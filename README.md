@@ -1,0 +1,190 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/crisol-dark.svg">
+    <img src="assets/crisol-light.svg" alt="Crisol" width="200">
+  </picture>
+</p>
+
+<h1 align="center">Crisol</h1>
+
+<p align="center">
+  <strong>Run one Task in a container, unattended, and get back exactly one branch.</strong>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.1.0-2dd4bf" alt="version 0.1.0">
+  <img src="https://img.shields.io/badge/status-walking%20skeleton-f59e0b" alt="status: walking skeleton">
+  <img src="https://img.shields.io/badge/platform-macOS-8b93a0" alt="platform macOS">
+  <img src="https://img.shields.io/badge/runtime-Bun-f9f1e1" alt="runtime Bun">
+  <img src="https://img.shields.io/badge/license-MIT-34d399" alt="license MIT">
+</p>
+
+---
+
+A *crisol* (crucible) holds the fire while it works. Crisol does the same for a coding agent. It
+clones your repo, runs the agent inside a Docker **Sandbox** that cannot touch your host, and
+leaves **one named branch** in your repo when it is done. That happens whether the Run succeeded
+or failed. Your working tree is never touched.
+
+```console
+$ crisol run "fix the login bug with + in emails" --json
+{"run":"9f496a56","branch":"crisol/9f496a56","base":"main@a2689ba","status":"unverified", …}
+```
+
+> [!NOTE]
+> **Crisol is a walking skeleton.** Every stage of a Run below works end to end today. The agent
+> is a scripted stand-in that makes one commit, though. The real Claude Code Adapter, Gates, the
+> network wall and credentials are coming one ticket at a time; see [Roadmap](#roadmap).
+
+## Why
+
+You can tell an agent to work on its own, but that is only safe if nothing it does can leak out.
+Crisol keeps a Run apart from your host in three ways:
+
+- **Its own Clone.** A Run never works in your checkout or a worktree. It gets a fresh clone that
+  shares no `.git` and no objects with your repo
+  ([ADR 0004](docs/adr/0004-clone-copies-objects-no-hardlinks.md)).
+- **Its own Sandbox.** The agent runs in a container, and the only part of your machine it can see
+  is that Clone.
+- **One way back.** The only thing that returns to your repo is a branch, brought back by
+  **Fetch-back**. Fetch-back runs `git fetch`; it never merges and never touches a working tree.
+
+## How a Run works
+
+```mermaid
+flowchart LR
+    A["crisol run &quot;task&quot;"] --> B["Validate<br/>base, branch name, Docker"]
+    B --> C["Clone<br/>~/.crisol/runs/&lt;id&gt;/repo"]
+    C --> D["Cut branch<br/>crisol/&lt;id&gt; from base"]
+    D --> E["Sandbox<br/>Clone mounted, agent works & commits"]
+    E --> F["Teardown<br/>container removed"]
+    F --> G["Fetch-back<br/>branch lands in your repo"]
+    G --> H["Run result<br/>JSON"]
+```
+
+1. **Validate first.** Crisol checks the base ref, the branch name and Docker before it touches
+   anything, so an invalid Run leaves nothing behind.
+2. **Clone and cut.** Crisol clones your repo with `git clone --no-local`. That copies only the
+   objects reachable from your branches, tags and `HEAD`, so a dropped stash never gets into the
+   Clone. Then it cuts `crisol/<id>` (or your `--name`) from the base.
+3. **Sandbox.** The Clone is bind-mounted into a container at the same absolute path. The Adapter
+   does the work and commits there.
+4. **Teardown and Fetch-back.** The container is removed, and the branch is fetched back into
+   your repo. If the Run fails, Fetch-back still runs, so no work is lost. If it fails too, you
+   see both errors.
+
+## Requirements
+
+| | |
+|---|---|
+| **OS** | macOS (Linux is planned) |
+| **Runtime** | [Bun](https://bun.sh) |
+| **Containers** | A running Docker engine: OrbStack, Docker Desktop, or Colima |
+| **Repo** | Any git repo with at least one commit |
+
+## Quick start
+
+```sh
+git clone https://github.com/matiinchauspe/crisol.git
+cd crisol && bun install
+
+# from inside any git repo you want to run against:
+bun /path/to/crisol/src/cli.ts run "say hello" --json
+```
+
+To get a standalone `crisol` binary instead, run `bun run build`. It writes `dist/crisol`.
+
+## Usage
+
+```
+crisol run "<task>" [--json] [--base <ref>] [--name <branch>]
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--base <ref>` | your current `HEAD` | Branch, tag or sha to cut the Run's branch from. It must be reachable from a local branch, a tag or `HEAD`, because that is all the Clone receives. To use `origin/main`, check it out or fast-forward a local branch onto it first. |
+| `--name <branch>` | `crisol/<id>` | The branch name the Run leaves in your repo. Refused before anything happens if it clashes with an existing branch, a tag, or a branch path (for example `feat` vs `feat/x`). |
+| `--json` | off | Print the Run result as JSON instead of one line. |
+
+### The Run result
+
+The fields are only ever added within 0.x, never renamed or removed:
+
+```json
+{
+  "run": "9f496a56",
+  "branch": "crisol/9f496a56",
+  "base": "main@a2689ba",
+  "status": "unverified",
+  "iterations": 1,
+  "gates": [],
+  "network": "open",
+  "blocked": [],
+  "warnings": []
+}
+```
+
+`status` is always `verified`, `unverified` or `not-converged`. Until Gates exist it is
+`unverified`, and `network` reports `open` until the network wall lands
+([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md)).
+
+### Where things live
+
+```
+~/.crisol/                 # override with CRISOL_HOME
+└── runs/<id>/
+    ├── repo/              # the Run's Clone
+    ├── log                # timestamped log of every stage
+    └── result.json        # the Run result
+```
+
+## Roadmap
+
+v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to end.
+
+| # | Ticket | |
+|---|---|---|
+| 01 | Walking skeleton | ✅ |
+| 02 | Gates and converge | |
+| 03 | Slots and fan-out | |
+| 04 | Fetch-back on every exit, and recover | |
+| 05 | Detach, status, logs | |
+| 06 | Network wall | |
+| 07 | Editable Allowlist, learn and open | |
+| 08 | Credentials | |
+| 09 | Commits | |
+| 10 | Text input | |
+| 11 | Services | |
+| 12 | Two-layer image and dependencies | |
+| 13 | Provider failure and capacity | |
+| 14 | Claude Code Adapter | |
+| 15 | Tenaza inside | |
+| 16 | `crisol gc` | |
+| 17 | `crisol init` | |
+| 18 | Release 0.1.0 | |
+
+## Vocabulary and decisions
+
+Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
+**Gate**, **Adapter**. Each term is defined in [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions
+behind Crisol's shape are recorded in [`docs/adr/`](docs/adr/):
+
+- [0001](docs/adr/0001-adapter-takes-a-sandbox-handle.md): the Adapter takes a Sandbox handle, not a raw container id
+- [0002](docs/adr/0002-ticket-01-sandbox-image-is-a-placeholder.md): ticket 01's Sandbox image is a placeholder
+- [0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md): the Run result reports `network: "open"` until the wall exists
+- [0004](docs/adr/0004-clone-copies-objects-no-hardlinks.md): the Clone copies git objects and never shares them with the host
+- [0005](docs/adr/0005-pre-start-declaration-replaces-post-start-wiring.md): a pre-start declaration replaces post-start wiring
+
+## Development
+
+```sh
+bun test     # the suite; needs a running Docker engine
+bun check    # typecheck
+```
+
+The tests drive real `git` and real Docker against throwaway repos and a throwaway `CRISOL_HOME`.
+The Adapter is the scripted stand-in, so no model is ever called.
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,17 @@
+{
+  "name": "crisol",
+  "type": "module",
+  "private": true,
+  "version": "0.1.0",
+  "bin": {
+    "crisol": "./dist/crisol"
+  },
+  "scripts": {
+    "typecheck": "bun check",
+    "test": "bun test",
+    "build": "bun build ./src/cli.ts --compile --outfile dist/crisol"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
