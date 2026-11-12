@@ -1,11 +1,15 @@
 #!/usr/bin/env bun
+import { runAuth } from "./auth";
 import { parsePositiveInteger } from "./config";
 import { assertSupportedPlatform } from "./platform";
 import { run } from "./run";
+import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
   'Usage: crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
   "[--max-iterations <n>] [--timeout <minutes>]";
+
+const AUTH_USAGE = "Usage: crisol auth";
 
 interface ParsedRunArgs {
   task: string;
@@ -95,12 +99,31 @@ export function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Argument validation runs BEFORE `runAuth`, so a usage error never reaches the real `claude setup-token`. */
+async function runAuthCommand(rest: string[]): Promise<number> {
+  if (rest.length > 0) {
+    process.stderr.write(`Unexpected argument: ${rest[0]}\n${AUTH_USAGE}\n`);
+    return 1;
+  }
+  try {
+    await runAuth();
+    console.log(`Stored ${CLAUDE_TOKEN_SECRET_NAME} in Crisol's Keychain entry.`);
+    return 0;
+  } catch (error) {
+    process.stderr.write(`${formatError(error)}\n`);
+    return 1;
+  }
+}
+
 async function main(argv: string[]): Promise<number> {
   assertSupportedPlatform();
 
   const [command, ...rest] = argv;
+  if (command === "auth") {
+    return runAuthCommand(rest);
+  }
   if (command !== "run") {
-    process.stderr.write(`${USAGE}\n`);
+    process.stderr.write(`${USAGE}\n${AUTH_USAGE}\n`);
     return 1;
   }
 
