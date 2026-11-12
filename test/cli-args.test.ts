@@ -249,6 +249,64 @@ describe("crisol run --max-iterations / --timeout validation", () => {
 });
 
 /**
+ * `--adapter`'s own validation (ticket 14) — checked ONLY through the usage-error paths,
+ * which fail during argument parsing, BEFORE `run()` is ever called. `--adapter claude-code`
+ * itself is never exercised here: that would reach the real `ClaudeCodeAdapter` and, through
+ * it, the real `claude --version` and a real Docker image build — exactly what the automated
+ * suite must never do. See `test/claude-code-adapter.test.ts` for the real Adapter's own tests.
+ */
+describe("crisol run --adapter validation (ticket 14)", () => {
+  test("--adapter with no value at all is a usage error", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const result = await runCli(["run", "say hello", "--adapter"], {
+        cwd: repo.path,
+        home: home.path,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("--adapter");
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("--adapter with an unrecognised name is a usage error, never silently falling back to fake", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const result = await runCli(["run", "say hello", "--adapter", "pi"], {
+        cwd: repo.path,
+        home: home.path,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("--adapter");
+      expect(result.stderr).toContain("pi");
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("--adapter fake (explicit default) behaves exactly like omitting it", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const result = await runCli(["run", "say hello", "--adapter", "fake", "--json"], {
+        cwd: repo.path,
+        home: home.path,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ status: "unverified" });
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+});
+
+/**
  * `crisol auth`'s own argument validation, checked here through the real CLI process,
  * ONLY for the usage-error case: it must run before `runAuth` is ever called, so this
  * never reaches the real `claude setup-token`. The real `auth` flow is exercised with

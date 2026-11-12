@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { ClaudeCodeAdapter } from "./adapters/claude-code";
 import { runAuth } from "./auth";
 import { parsePositiveInteger } from "./config";
 import { assertSupportedPlatform } from "./platform";
@@ -7,9 +8,12 @@ import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
   'Usage: crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
-  "[--max-iterations <n>] [--timeout <minutes>]";
+  "[--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]";
 
 const AUTH_USAGE = "Usage: crisol auth";
+
+const ADAPTER_NAMES = ["fake", "claude-code"] as const;
+type AdapterName = (typeof ADAPTER_NAMES)[number];
 
 interface ParsedRunArgs {
   task: string;
@@ -21,6 +25,8 @@ interface ParsedRunArgs {
   maxIterations?: number;
   /** Minutes; converted to ms for `RunOptions.ceilingMs`. */
   timeoutMinutes?: number;
+  /** `fake` (default — the suite's own scripted stand-in) or `claude-code` (the real Adapter, for a real Run). */
+  adapterName: AdapterName;
 }
 
 /** A missing value, or one that looks like another flag, is a usage error — never silently treated as "no value given" (which would let `--base --json` quietly run with no base). */
@@ -42,6 +48,15 @@ function readIntFlagValue(argv: string[], index: number, flag: string): number {
   return value;
 }
 
+/** Same guard as `readFlagValue`, plus an enum check — never silently falls back on an unrecognised name. */
+function readAdapterFlagValue(argv: string[], index: number): AdapterName {
+  const raw = readFlagValue(argv, index, "--adapter");
+  if (!(ADAPTER_NAMES as readonly string[]).includes(raw)) {
+    throw new Error(`--adapter must be one of ${ADAPTER_NAMES.join(", ")}, got "${raw}".\n${USAGE}`);
+  }
+  return raw as AdapterName;
+}
+
 function parseRunArgs(argv: string[]): ParsedRunArgs {
   let task: string | undefined;
   let json = false;
@@ -50,6 +65,7 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
   const gates: string[] = [];
   let maxIterations: number | undefined;
   let timeoutMinutes: number | undefined;
+  let adapterName: AdapterName = "fake";
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -70,6 +86,9 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     } else if (arg === "--timeout") {
       timeoutMinutes = readIntFlagValue(argv, i + 1, "--timeout");
       i++;
+    } else if (arg === "--adapter") {
+      adapterName = readAdapterFlagValue(argv, i + 1);
+      i++;
     } else if (task === undefined && !arg.startsWith("--")) {
       task = arg;
     } else {
@@ -81,7 +100,7 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     throw new Error(USAGE);
   }
 
-  return { task, json, base, name, gates, maxIterations, timeoutMinutes };
+  return { task, json, base, name, gates, maxIterations, timeoutMinutes, adapterName };
 }
 
 /**
@@ -144,6 +163,9 @@ async function main(argv: string[]): Promise<number> {
       gates: args.gates,
       maxIterations: args.maxIterations,
       ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
+      // `undefined` for "fake" (the default) is exactly what omitting `adapter` was before
+      // this flag existed — `run()`'s own default (`FakeAdapter`) is unchanged either way.
+      adapter: args.adapterName === "claude-code" ? new ClaudeCodeAdapter() : undefined,
     });
     if (args.json) {
       console.log(JSON.stringify(result));
