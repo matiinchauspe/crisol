@@ -103,24 +103,48 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 ## Usage
 
 ```
-crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]
+crisol run "<task>"... [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]
 crisol auth
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--base <ref>` | your current `HEAD` | Branch, tag or sha to cut the Run's branch from. It must be reachable from a local branch, a tag or `HEAD`, because that is all the Clone receives. To use `origin/main`, check it out or fast-forward a local branch onto it first. |
-| `--name <branch>` | `crisol/<id>` | The branch name the Run leaves in your repo. Refused before anything happens if it clashes with an existing branch, a tag, or a branch path (for example `feat` vs `feat/x`). |
+| `--name <branch>` | `crisol/<id>` | The branch name the Run leaves in your repo. Refused before anything happens if it clashes with an existing branch, a tag, or a branch path (for example `feat` vs `feat/x`). Only with a single Task. |
 | `--gate <cmd>` | none | A command whose exit code decides whether the work is right. Repeatable. Any `--gate` replaces your repo's own `.crisol/config.toml` Gates entirely — it never merges with them. |
 | `--max-iterations <n>` | `5` | Overrides how many Gate-fail-then-resume attempts this Run gets before `not-converged`. Must be a positive integer. |
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
 | `--adapter <fake\|claude-code>` | `fake` | Which Adapter runs the Task. `fake` is the suite's own scripted stand-in; `claude-code` runs the real Claude Code Adapter (`crisol auth` first — see [Credentials](#credentials)). |
-| `--json` | off | Print the Run result as JSON instead of one line. |
+| `--json` | off | Print the Run result as JSON instead of one line — one JSON line per Run when there are several Tasks. |
 
 A repo can declare its own Gates once, in `.crisol/config.toml`:
 
 ```toml
 gates = ["bun test", "bun run typecheck"]
+```
+
+### Several Tasks at once
+
+```
+crisol run "fix the login bug" "add a health check" "bump the README badges"
+```
+
+Each Task becomes its own independent Run: its own Clone, its own Sandbox, its own branch, all
+cut from the same base commit. Crisol never chains or merges them — what to do with the branches
+is up to you. With `--json`, each Run result is printed on its own line, in the order the Tasks
+were given; a Run that fails prints its error on stderr, prefixed with its Task, and the command
+exits non-zero without hiding the others.
+
+At most `max_parallel` Runs execute at once (3 by default), across every `crisol run` on the
+machine — including ones started from different terminals. A Run must hold one of
+`~/.crisol/slots/<n>.lock` to execute; with none free it waits, printing
+`Waiting for a free Slot`, and never fails for lack of one. The lock is an OS file lock, so a
+Run that dies — even by `kill -9` — gives its Slot back at once. Ctrl+C on a waiting Run stops it
+before it touches anything.
+
+```toml
+# ~/.crisol/config
+max_parallel = 2
 ```
 
 ### Credentials
@@ -199,7 +223,8 @@ counts how many attempts that took. `network` reports `open` until the network w
 
 ```
 ~/.crisol/                 # override with CRISOL_HOME
-├── config                 # optional: max_iterations / timeout_minutes overrides
+├── config                 # optional: max_parallel / max_iterations / timeout_minutes overrides
+├── slots/<n>.lock         # one per Slot; a Run holds one while it executes
 └── runs/<id>/
     ├── repo/              # the Run's Clone
     ├── log                # timestamped log of every stage
@@ -214,7 +239,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 |---|---|---|
 | 01 | Walking skeleton | ✅ |
 | 02 | Gates and converge | ✅ |
-| 03 | Slots and fan-out | |
+| 03 | Slots and fan-out | ✅ |
 | 04 | Fetch-back on every exit, and recover | |
 | 05 | Detach, status, logs | |
 | 06 | Network wall | |
@@ -234,7 +259,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 ## Vocabulary and decisions
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
-**Gate**, **Adapter**, **Secret**, **SecretStore**. Each term is defined in
+**Gate**, **Adapter**, **Slot**, **Fan-out**, **Secret**, **SecretStore**. Each term is defined in
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
 [`docs/adr/`](docs/adr/):
 
@@ -246,6 +271,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0006](docs/adr/0006-ticket-02-gate-ladder-and-ceiling-are-placeholders.md): ticket 02's `.crisol/config.toml` parser is a hand-rolled placeholder; the ceiling override (CLI flags and `~/.crisol/config`) is implemented
 - [0007](docs/adr/0007-ticket-08-credential-placeholders.md): `crisol auth` keeps the token off every spawned process's argv, verified against the real `security` CLI; its assumption about `claude setup-token`'s own output convention is not
 - [0008](docs/adr/0008-claude-code-adapter-agent-layer-and-attribution.md): the Claude Code Adapter's Agent layer runs as a non-root `agent` user (Claude Code refuses `--dangerously-skip-permissions` as root) and installs via the native installer (not npm); attribution is disabled by a baked `settings.json` rather than a CLI flag or the Preamble; `PreStartDeclaration` gains `ensureImage` rather than the plain `image: string` ADR 0005 sketched
+- [0009](docs/adr/0009-slots-poll-a-non-blocking-flock.md): a Slot is taken by polling a non-blocking `flock` rather than blocking on it, before the Run reserves anything; a fan-out prints one Run result per line
 
 ## Development
 

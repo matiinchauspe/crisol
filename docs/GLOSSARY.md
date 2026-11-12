@@ -43,6 +43,12 @@ _Avoid_: Integration, driver, connector
 One of `max_parallel` OS file locks a Run must hold to execute.
 _Avoid_: Worker, thread, lock (a Slot is what a Run holds, not the lock mechanism itself)
 
+**Fan-out**:
+Several independent Runs from one `crisol run`, one per Task, all cut from the same base commit.
+Never chained, never merged.
+_Avoid_: Batch, matrix, parallel run (parallelism is what Slots bound, across every process; a
+Fan-out is what one invocation asks for)
+
 **Allowlist**:
 The domains a Sandbox may reach, in three levels.
 _Avoid_: Whitelist, firewall rule
