@@ -13,17 +13,31 @@ export function readRepoGates(hostRepoPath: string): string[] {
   return parseGatesArray(readFileSync(configPath, "utf8"));
 }
 
-const GATES_LINE = /^[ \t]*gates[ \t]*=[ \t]*\[(.*)\][ \t]*$/m;
+/**
+ * `.crisol/config.toml`'s `env = [...]` — secret env var NAMES a repo declares (never
+ * values), read from the host's own environment at launch. Same file, same missing-file
+ * rule as `readRepoGates`.
+ */
+export function readRepoSecretNames(hostRepoPath: string): string[] {
+  const configPath = path.join(hostRepoPath, ".crisol", "config.toml");
+  if (!existsSync(configPath)) return [];
+  return parseSecretNamesArray(readFileSync(configPath, "utf8"));
+}
+
 const QUOTED_STRING = /"((?:[^"\\]|\\.)*)"/g;
 
+function arrayKeyLine(key: string): RegExp {
+  return new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[(.*)\\][ \\t]*$`, "m");
+}
+
 /**
- * Exported for a direct unit test — parsing needs no filesystem. Deliberately
- * narrow: only a single-line, double-quoted array is recognised; anything else
- * is silently ignored rather than rejected, so a repo adding another key
- * alongside `gates` isn't broken by this parser.
+ * Shared by every single-line, double-quoted string-array key `.crisol/config.toml`
+ * carries (`gates`, `env`, ...). Deliberately narrow: only a single-line array is
+ * recognised; anything else is silently ignored rather than rejected, so a repo adding
+ * one key doesn't break a parse of another already there.
  */
-export function parseGatesArray(text: string): string[] {
-  const match = GATES_LINE.exec(text);
+function parseStringArrayKey(text: string, key: string): string[] {
+  const match = arrayKeyLine(key).exec(text);
   if (!match) return [];
   const body = match[1] ?? "";
   const items: string[] = [];
@@ -33,6 +47,16 @@ export function parseGatesArray(text: string): string[] {
     items.push((item[1] ?? "").replace(/\\"/g, '"'));
   }
   return items;
+}
+
+/** Exported for a direct unit test — parsing needs no filesystem. */
+export function parseGatesArray(text: string): string[] {
+  return parseStringArrayKey(text, "gates");
+}
+
+/** Exported for a direct unit test — parsing needs no filesystem. */
+export function parseSecretNamesArray(text: string): string[] {
+  return parseStringArrayKey(text, "env");
 }
 
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
