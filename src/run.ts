@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import type { Adapter } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
-import { readGlobalConfig, readRepoGates, readRepoSecretNames } from "./config";
+import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
 import { assertDockerReachable, ensureBaseImage, startSandbox } from "./docker";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
@@ -18,6 +18,7 @@ import {
   isValidBranchName,
   readIdentity,
   resolveBaseSha,
+  scanCommitsForWarnings,
   tagExists,
 } from "./git";
 import { crisolHome, runDir, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
@@ -282,6 +283,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
 
   // Every validation below runs BEFORE any side effect — no mkdir, no clone, no docker run.
   const identity = readIdentity(hostRepoPath);
+  const instructions = readInstructions(home);
 
   const baseRef = options.base ?? currentRefName(hostRepoPath);
   const baseSha = resolveBaseSha(hostRepoPath, baseRef);
@@ -334,6 +336,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
   let status: RunStatus = "unverified";
   let reason: string | undefined;
   let gateResults: Gate[] = [];
+  let warnings: string[] = [];
   let primaryError: unknown;
   let fetchBackError: unknown;
   /**
@@ -390,7 +393,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
       interruptHandler = onInterrupt; // removed once, in the outer `finally`
 
       try {
-        const ctx = { sandbox, repoPath: clonePath, task: options.task };
+        const ctx = { sandbox, repoPath: clonePath, task: options.task, instructions };
         await Promise.race([
           (async () => {
             await adapter.launch(ctx);
@@ -443,6 +446,18 @@ export async function run(options: RunOptions): Promise<RunResult> {
           })(),
           interrupted,
         ]);
+
+        // Scan the branch's own commits for an AI attribution trailer or an unexpected
+        // author before Fetch-back — best-effort: a scan failure is logged, never thrown,
+        // so it can't turn an already-converged Run into a failure.
+        try {
+          warnings = scanCommitsForWarnings(clonePath, `${baseSha}..${branch}`, identity);
+        } catch (error) {
+          appendLog(
+            logPath,
+            `commit scan failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       } finally {
         const stopResult = await sandbox.stop();
         if (stopResult.ok) {
@@ -504,7 +519,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     gates: gateResults,
     network: "open", // no Allowlist wall yet
     blocked: [],
-    warnings: [],
+    warnings,
   };
   if (reason !== undefined) {
     result.reason = reason;

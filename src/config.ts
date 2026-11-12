@@ -107,3 +107,15 @@ export function readGlobalConfig(home: string): GlobalConfig {
   if (!existsSync(configPath)) return {};
   return parseGlobalConfig(readFileSync(configPath, "utf8"), configPath);
 }
+
+/**
+ * `~/.crisol/instructions.md` — injected as agent instructions in every Run when present.
+ * `home`, like `readGlobalConfig`, never the host repo or `~/.claude`: the global
+ * `~/.claude/CLAUDE.md` is never read or mounted. A missing file is the normal case, not
+ * an error.
+ */
+export function readInstructions(home: string): string | undefined {
+  const instructionsPath = path.join(home, "instructions.md");
+  if (!existsSync(instructionsPath)) return undefined;
+  return readFileSync(instructionsPath, "utf8");
+}

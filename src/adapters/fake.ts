@@ -29,6 +29,13 @@ export const GATE_FIXING_SCRIPT: readonly string[] = [
   "git commit --quiet -m 'fix: make the Gate green'",
 ];
 
+/** Two `-m` flags, not one embedded `\n`: git joins them as separate paragraphs, the same shape a real trailer takes. */
+export const CO_AUTHORED_SCRIPT: readonly string[] = [
+  "echo 'Crisol walking skeleton' >> CRISOL_RUN.md",
+  "git add CRISOL_RUN.md",
+  'git commit --quiet -m "feat: record the walking-skeleton run" -m "Co-Authored-By: Claude <noreply@anthropic.com>"',
+];
+
 export class FakeAdapter implements Adapter {
   constructor(
     private readonly launchScript: readonly string[] = DEFAULT_SCRIPT,

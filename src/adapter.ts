@@ -21,6 +21,8 @@ export interface AdapterContext {
   repoPath: string;
   /** Raw text; preamble prepending not yet implemented. */
   task: string;
+  /** `~/.crisol/instructions.md`'s content, when present — never the global `~/.claude/CLAUDE.md`, which is not mounted. */
+  instructions?: string;
 }
 
 export interface Adapter {

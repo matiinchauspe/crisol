@@ -212,3 +212,71 @@ export function isReachableFromClonedRefs(repoPath: string, sha: string): boolea
 export function resolveBaseSha(repoPath: string, ref: string): string {
   return shortSha(repoPath, `${ref}^{commit}`);
 }
+
+/** Matches the trailers Claude Code's own default attribution adds — never a real co-author's name, which a Sandbox agent has no business carrying since only one identity is ever passed in. */
+const ATTRIBUTION_PATTERN = /co-authored-by|generated (with|by)\b/i;
+
+/** Separate the fields of one `git log` record; `%B` can itself contain the field separator's neighbour characters but never these two control bytes. */
+const FIELD_SEP = "\x1f";
+const RECORD_SEP = "\x1e";
+
+interface ScannedCommit {
+  sha: string;
+  authorName: string;
+  authorEmail: string;
+  committerName: string;
+  committerEmail: string;
+  message: string;
+}
+
+function parseScannedCommits(output: string): ScannedCommit[] {
+  return output
+    .split(RECORD_SEP)
+    .map((record) => record.replace(/^\n/, ""))
+    .filter((record) => record.length > 0)
+    .map((record) => {
+      const [sha = "", authorName = "", authorEmail = "", committerName = "", committerEmail = "", ...rest] =
+        record.split(FIELD_SEP);
+      return { sha, authorName, authorEmail, committerName, committerEmail, message: rest.join(FIELD_SEP) };
+    });
+}
+
+function identityMismatch(name: string, email: string, identity: GitIdentity): boolean {
+  return name !== identity.name || email !== identity.email;
+}
+
+/**
+ * Reads every commit the Run added and flags — never rewrites — an AI attribution
+ * trailer or an author/committer that doesn't match the identity passed into the
+ * Sandbox as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`.
+ */
+export function scanCommitsForWarnings(
+  clonePath: string,
+  range: string,
+  identity: GitIdentity,
+): string[] {
+  const format = `%H${FIELD_SEP}%an${FIELD_SEP}%ae${FIELD_SEP}%cn${FIELD_SEP}%ce${FIELD_SEP}%B${RECORD_SEP}`;
+  const result = run(["git", "-C", clonePath, "log", `--format=${format}`, range]);
+  if (result.exitCode !== 0) {
+    throw new Error(`\`git log ${range}\` failed: ${result.stderr.trim()}`);
+  }
+
+  const warnings: string[] = [];
+  for (const commit of parseScannedCommits(result.stdout)) {
+    const abbreviatedSha = commit.sha.slice(0, 7);
+    if (ATTRIBUTION_PATTERN.test(commit.message)) {
+      warnings.push(`commit ${abbreviatedSha} carries an AI attribution trailer`);
+    }
+    if (identityMismatch(commit.authorName, commit.authorEmail, identity)) {
+      warnings.push(
+        `commit ${abbreviatedSha} has an unexpected author "${commit.authorName} <${commit.authorEmail}>"`,
+      );
+    }
+    if (identityMismatch(commit.committerName, commit.committerEmail, identity)) {
+      warnings.push(
+        `commit ${abbreviatedSha} has an unexpected committer "${commit.committerName} <${commit.committerEmail}>"`,
+      );
+    }
+  }
+  return warnings;
+}
