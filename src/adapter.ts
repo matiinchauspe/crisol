@@ -3,8 +3,7 @@ import type { MountSpec, Sandbox } from "./docker";
 /**
  * Everything the Sandbox needs before it starts, consumed once by `startSandbox` — never
  * by `exec` after the container is running, since the token must be Sandbox env and mounts
- * must exist at `docker run` time; neither can be bolted on afterward. No `image` field yet:
- * until the two-layer build exists, `run.ts` always runs the base image. `authenticate` and
+ * must exist at `docker run` time; neither can be bolted on afterward. `authenticate` and
  * `wireHooks` contribute to these fields instead of running against a live Sandbox.
  */
 export interface PreStartDeclaration {
@@ -12,6 +11,13 @@ export interface PreStartDeclaration {
   envNames: readonly string[];
   /** Empty until Tenaza rides inside; then wires the agent's hooks to Tenaza's config/state mounts. */
   mounts: readonly MountSpec[];
+  /**
+   * Ensures the Agent layer image exists (building it if missing) and resolves to its tag —
+   * a closure, not a plain string, because the build itself is async while `declarePreStart`
+   * is not. Undefined (the fake Adapter, and any Adapter with nothing to layer) falls through
+   * to Crisol's own base image in `run.ts`.
+   */
+  ensureImage?: () => Promise<string>;
 }
 
 export interface AdapterContext {

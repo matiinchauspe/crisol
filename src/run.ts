@@ -87,7 +87,7 @@ export interface RunOptions {
   name?: string;
   /** Overrides `crisolHome()` — the test seam (each test gets its own temp CRISOL_HOME). */
   home?: string;
-  /** Overrides the default `FakeAdapter` — the test seam for a scripted scenario; v1 has no other Adapter. */
+  /** Overrides the default `FakeAdapter` — the test seam for a scripted scenario, or the CLI's own way to select `ClaudeCodeAdapter` for a real Run. */
   adapter?: Adapter;
   /** Overrides the real id generator — the test seam for forcing a run-id collision. */
   generateRunId?: () => string;
@@ -315,7 +315,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
   const adapterSecretValues = resolveAdapterSecretValues(secretStore, preStart.envNames);
   const secretEnvNames = Array.from(new Set([...preStart.envNames, ...repoSecretNames]));
 
-  const ensureImage = options.ensureImage ?? ensureBaseImage;
+  const ensureImage = options.ensureImage ?? preStart.ensureImage ?? ensureBaseImage;
   // Resolved BEFORE any side effect — an offline first Run must throw here, never
   // leave a Clone+cut branch behind.
   const image = await ensureImage();
