@@ -76,12 +76,17 @@ export function assertDockerReachable(): void {
   }
 }
 
-/** `docker image inspect` is the whole cache key for this placeholder image; a real content-hash cache is later work. */
-export async function ensureBaseImage(tag: string = SKELETON_IMAGE_TAG): Promise<string> {
+/**
+ * Builds (if missing) and returns `tag` from an arbitrary Dockerfile passed over stdin —
+ * no build context, so the Dockerfile can only use instructions that need none (no `COPY`).
+ * The cache-or-build logic (`docker image inspect` then `docker build`) lives here once,
+ * shared by every layered image Crisol builds, instead of being re-implemented per caller.
+ */
+export async function ensureImageFromDockerfile(tag: string, dockerfile: string): Promise<string> {
   if (imageExists(tag)) return tag;
 
   const proc = Bun.spawn(["docker", "build", "-q", "-t", tag, "-"], {
-    stdin: new Blob([SKELETON_DOCKERFILE]),
+    stdin: new Blob([dockerfile]),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -90,6 +95,11 @@ export async function ensureBaseImage(tag: string = SKELETON_IMAGE_TAG): Promise
     throw new Error(`docker build failed for ${tag}: ${stderr.trim()}`);
   }
   return tag;
+}
+
+/** `docker image inspect` is the whole cache key for this placeholder image; a real content-hash cache is later work. */
+export async function ensureBaseImage(tag: string = SKELETON_IMAGE_TAG): Promise<string> {
+  return ensureImageFromDockerfile(tag, SKELETON_DOCKERFILE);
 }
 
 export interface StartSandboxOptions {
