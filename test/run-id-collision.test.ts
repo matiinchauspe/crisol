@@ -6,24 +6,16 @@ import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 
 /**
- * W2: a run id collision must retry with a new id, and must NEVER silently
- * reuse (and truncate) an existing Run dir's files. `generateRunId` is a
- * test seam on `RunOptions`, the same pattern already established for
- * `home`/`adapter`.
+ * A run id collision must retry with a new id, never silently reuse (and truncate) an
+ * existing Run dir's files. `generateRunId` is a test seam, same pattern as `home`/`adapter`.
  */
 describe("Run id collisions never truncate an earlier Run's files (W2)", () => {
   /**
-   * finding 4 (round-2 review): the ORIGINAL version of this test reused
-   * the same id ("aaaaaaaa") across TWO separate `run()` calls — but by the
-   * second call, the first run's Fetch-back had already landed the
-   * DEFAULT branch `crisol/aaaaaaaa` in the host repo, so `reserveRun`'s
-   * own `branchExists` short-circuit (`continue`, BEFORE `mkdirSync` is
-   * ever reached) is what actually forced the retry, not the `mkdirSync`
-   * EEXIST catch this test claimed to cover. Here the run dir for
-   * "aaaaaaaa" is pre-created by the TEST itself, in a SINGLE `run()` call,
-   * before the default branch exists anywhere — so `branchExists` is
-   * false and the loop reaches `mkdirSync(runDir("aaaaaaaa"))` directly,
-   * which is the EEXIST path actually under test.
+   * The ORIGINAL version of this test called `run()` TWICE with the same id — but by the
+   * second call, Fetch-back had already landed the default branch, so `branchExists`'s own
+   * short-circuit forced the retry, never actually exercising `mkdirSync`'s EEXIST path.
+   * Here the run dir is pre-created by the TEST itself, in a SINGLE `run()` call, before the
+   * default branch exists anywhere — so the EEXIST path is what's actually under test.
    */
   test("a pre-existing run directory forces a retry via mkdir's own EEXIST, not the branch-exists shortcut", async () => {
     const home = createTempHome();
@@ -39,9 +31,7 @@ describe("Run id collisions never truncate an earlier Run's files (W2)", () => {
       let call = 0;
       const generateRunId = () => ids[call++]!;
 
-      // A single call: the default branch "crisol/aaaaaaaa" does not exist
-      // anywhere yet, so `branchExists` cannot be what forces this retry —
-      // only `mkdirSync`'s EEXIST against the dir pre-created above can be.
+      // Only `mkdirSync`'s EEXIST can force this retry — the default branch doesn't exist yet.
       const result = await run({ task: "x", cwd: repo.path, home: home.path, generateRunId });
 
       expect(result.run).toBe("bbbbbbbb");
@@ -66,24 +56,15 @@ describe("Run id collisions never truncate an earlier Run's files (W2)", () => {
   }, 60_000);
 
   /**
-   * Round-3 review, finding 1 (CRITICAL): the per-id retry check in
-   * `reserveRun` originally only looked at `branchExists` for the
-   * GENERATED default branch — never `tagExists`/`hasPrefixCollision` — so
-   * a tag (or a D/F prefix collision) sharing the exact `crisol/<id>` name
-   * the first generated id would produce was invisible to the retry loop
-   * and would have reached Fetch-back's own ref-lookup ambiguity instead
-   * (see git-validation.test.ts's "fetchBack resolves the branch ref even
-   * when a same-named tag exists" reproduction). `reserveRun` now runs the
-   * SAME three checks `assertBranchAvailable` runs for an explicit
-   * `--name`, so this id-specific (not the id-INDEPENDENT literal
-   * "crisol") collision is retried with a fresh id instead.
+   * A tag sharing the exact `crisol/<id>` name the generated id would produce used to be
+   * invisible to the retry loop (it only checked `branchExists`), reaching Fetch-back's
+   * own ref-lookup ambiguity instead.
    */
   test("a per-id TAG collision on the generated default branch also forces a retry", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      // A TAG — not a branch — named exactly what the FIRST generated id
-      // would produce as a default branch.
+      // A TAG, not a branch, named exactly what the FIRST generated id would produce.
       Bun.spawnSync(["git", "-C", repo.path, "tag", "crisol/aaaaaaaa"]);
 
       const ids = ["aaaaaaaa", "bbbbbbbb"];

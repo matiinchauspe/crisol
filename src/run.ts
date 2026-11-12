@@ -27,27 +27,17 @@ export type { Gate } from "./gates";
 export type RunStatus = "verified" | "unverified" | "not-converged";
 export type NetworkMode = "allowlist" | "learn" | "open";
 
-/** The default branch prefix (`crisol/<id>`) — named once so finding 1's upfront guard and `reserveRun` agree on exactly what they're protecting. */
+/** Named once so the upfront guard and `reserveRun` agree on exactly what they're protecting. */
 const DEFAULT_BRANCH_PREFIX = "crisol";
 
-/**
- * Ceiling defaults: 5 iterations OR 60 minutes wall clock, whichever comes
- * first. Both are overridable per Run (`RunOptions.maxIterations`/
- * `ceilingMs`, also reachable from the CLI as `--max-iterations`/
- * `--timeout`) and in `~/.crisol/config` (`max_iterations`/
- * `timeout_minutes`) — `resolveCeiling` below resolves the three layers,
- * independently per knob.
- */
+/** 5 iterations OR 60 minutes, whichever comes first — see `resolveCeiling` for the override ladder. */
 const DEFAULT_MAX_ITERATIONS = 5;
 const DEFAULT_CEILING_MS = 60 * 60 * 1000;
 
 /**
- * The ceiling's own ladder, same shape as `resolveGates`: a per-Run value
- * (which is also where a CLI flag lands) beats `~/.crisol/config` beats the
- * built-in default, resolved independently per knob — a Run can set one
- * without touching the other. Kept as a pure function, separate from
- * `run()`, so the precedence itself is a unit test and never needs a real
- * Sandbox.
+ * Same ladder shape as `resolveGates`: per-Run beats `~/.crisol/config` beats the
+ * built-in default, resolved independently per knob. Kept as a pure function so the
+ * precedence itself is a unit test and never needs a real Sandbox.
  */
 export function resolveCeiling(
   perRun: { maxIterations?: number; ceilingMs?: number },
@@ -68,12 +58,10 @@ export interface Blocked {
 }
 
 /**
- * The stable public shape (spec, "Input and output" q9) — fields are only
- * ever added, never renamed or removed, within 0.x. `status` is
- * `"unverified"` only when no Gate exists anywhere in the ladder (the
- * "none" rung); `"verified"` and `"not-converged"` are driven by
- * `converge`'s Gate loop in `run()` below, and `reason` is set only for
- * the latter.
+ * Fields are only ever added, never renamed or removed, within 0.x. `status` is
+ * `"unverified"` only when no Gate exists anywhere in the ladder; `"verified"` and
+ * `"not-converged"` are driven by the Gate loop in `run()` below, and `reason` is set
+ * only for the latter.
  */
 export interface RunResult {
   run: string;
@@ -98,30 +86,26 @@ export interface RunOptions {
   home?: string;
   /** Overrides the default `FakeAdapter` — the test seam for a scripted scenario; v1 has no other Adapter. */
   adapter?: Adapter;
-  /** Overrides the real id generator — the test seam for forcing a run-id collision (fix W2). */
+  /** Overrides the real id generator — the test seam for forcing a run-id collision. */
   generateRunId?: () => string;
   /**
-   * Overrides `ensureBaseImage` — the test seam for forcing an
-   * image-resolution failure (finding 5: this must happen BEFORE any side
-   * effect, so an offline first Run never leaves a Clone+cut branch
-   * behind). Forcing a REAL `docker build` to fail deterministically isn't
-   * practical in a test; this is the same pattern as `generateRunId`.
+   * Overrides `ensureBaseImage` — the test seam for forcing an image-resolution failure.
+   * Forcing a REAL `docker build` to fail deterministically isn't practical in a test;
+   * same pattern as `generateRunId`.
    */
   ensureImage?: () => Promise<string>;
-  /** `--gate` (repeatable) — the strongest rung of the Gate ladder; beats the repo's own `.crisol/config.toml` `gates = […]`. Absent or empty falls through to the repo rung. */
+  /** `--gate` — the strongest rung of the Gate ladder; absent or empty falls through to the repo rung. */
   gates?: readonly string[];
-  /** Per-Run override of the iteration ceiling (default 5) — also where `--max-iterations` lands; beats `~/.crisol/config`'s `max_iterations`, which beats the default. Also the test seam for the "never converge" and ceiling scenarios, since a real 60-minute wall clock would make those impractical to run for real. */
+  /** Default 5; the test seam for "never converge" and ceiling scenarios, where small numbers keep tests fast. */
   maxIterations?: number;
-  /** Per-Run override of the wall-clock ceiling, in ms (default 60 minutes) — also where `--timeout` (given in minutes) lands, converted to ms. Same ladder and same test-seam reasoning as `maxIterations`. */
+  /** Default 60 minutes, in ms. Same test-seam reasoning as `maxIterations` — a real wall clock would make ceiling tests impractical. */
   ceilingMs?: number;
 }
 
 /**
- * 8 lowercase hex chars (fix W2 — lengthened from the spec's own "a1b2"
- * EXAMPLE, which was never meant as the literal id length). Collisions are
- * still possible, just astronomically unlikely at this length; `reserveRun`
- * below is what actually makes a collision SAFE, not this function's
- * output space.
+ * 8 lowercase hex chars. Collisions are still possible, just astronomically unlikely
+ * at this length — `reserveRun` below is what actually makes a collision SAFE, not
+ * this function's output space.
  */
 function generateRunId(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 8);
@@ -136,23 +120,17 @@ function isEexist(error: unknown): boolean {
 }
 
 /**
- * Reserves a Run id AND its directory atomically enough to matter: `mkdir`
- * without `recursive` so an existing dir throws EEXIST instead of being
- * silently reused (and truncated — fix W2) — retried with a fresh id on
- * collision, up to `maxAttempts`. When the branch name is the DEFAULT
- * (`crisol/<id>`, no explicit `--name`), a colliding default branch also
- * forces a retry — an explicit `--name` was already validated once, before
- * any side effect, by the caller.
+ * Reserves a Run id AND its directory atomically enough to matter: `mkdir` without
+ * `recursive` so an existing dir throws EEXIST instead of being silently reused (and
+ * truncated) — retried with a fresh id on collision, up to `maxAttempts`. A colliding
+ * DEFAULT branch (`crisol/<id>`, no explicit `--name`) also forces a retry; an explicit
+ * `--name` was already validated once by the caller.
  *
- * Round-3 review, finding 1 (CRITICAL): the per-id retry check originally
- * only looked at `branchExists`, never `tagExists`/`hasPrefixCollision` —
- * extended here to the SAME three checks `assertBranchAvailable` runs for
- * an explicit `--name`, so an (astronomically rare) id-specific tag or D/F
- * collision is also retried rather than silently reaching Fetch-back. The
- * id-INDEPENDENT case — a plain branch named "crisol" blocking every
- * possible `crisol/<id>` — is NOT handled here (no retry could ever help
- * it); see `assertDefaultPrefixAvailable`, called once before this loop
- * even starts.
+ * The retry checks the SAME three collisions `assertBranchAvailable` runs for an
+ * explicit `--name` (branch, tag, D/F conflict), not just `branchExists` alone. The
+ * id-INDEPENDENT case — a plain branch named "crisol" blocking every possible
+ * `crisol/<id>` — is NOT handled here, since no retry could ever escape it; see
+ * `assertDefaultPrefixAvailable`, called once before this loop starts.
  */
 function reserveRun(
   hostRepoPath: string,
@@ -185,16 +163,11 @@ function reserveRun(
 }
 
 /**
- * Round-3 review, finding 1 (CRITICAL): a default-named Run (no `--name`)
- * never ran any of `assertBranchAvailable`'s checks — only an explicit
- * `--name` did. The worst case is id-INDEPENDENT: a plain branch literally
- * named "crisol" collides with the directory/file shape of EVERY possible
- * `crisol/<id>` default branch, so `reserveRun`'s own id-retry loop can
- * never escape it (every attempt fails the same way, exhausting
- * `maxAttempts` on a cryptic "could not allocate" message instead of
- * naming the real cause). Checked once, here, before `reserveRun` is even
- * called — before any side effect — with a plain message pointing at the
- * one way out.
+ * The id-INDEPENDENT case `reserveRun`'s own retry loop can never escape: a plain
+ * branch literally named "crisol" collides with the directory/file shape of EVERY
+ * possible `crisol/<id>` default branch, so every retry attempt fails the same way.
+ * Checked here, before any side effect, with a plain message naming the real cause
+ * instead of letting the loop exhaust `maxAttempts` on a cryptic one.
  */
 function assertDefaultPrefixAvailable(hostRepoPath: string): void {
   if (branchExists(hostRepoPath, DEFAULT_BRANCH_PREFIX)) {
@@ -207,22 +180,10 @@ function assertDefaultPrefixAvailable(hostRepoPath: string): void {
 }
 
 /**
- * Round-3 review, finding 4 (WARNING): `resolveBaseSha` only proves `sha`
- * EXISTS, not that it's reachable from anything — an unreachable sha used
- * to pass silently here, through `reserveRun`'s mkdir and `cloneLocal`,
- * only to fail deep inside `checkoutNewBranch` with git's own misleading
- * "is not a commit" (git's `--no-local` transport only ever walks objects
- * reachable from a ref, so the Clone can never actually see it). Checked
- * here, before any side effect, with a plain message naming the sha.
- *
- * Round-4 review, finding C1 (WARNING, both reviewers reproduced): the
- * check itself used to look at ALL refs in the host repo
- * (`isReachableFromAnyRef`), which disagreed with what `cloneLocal`
- * actually transfers — see `isReachableFromClonedRefs`'s own doc comment
- * in `git.ts` for the full mismatch and why narrowing the check (not the
- * Clone) is the fix. The message below now also names the way out for the
- * one case that's unreachable for a GOOD reason (a remote-tracking-only or
- * stashed sha): check out or fast-forward a local branch onto it first.
+ * `resolveBaseSha` only proves `sha` EXISTS, not that it's reachable from anything — an
+ * unreachable sha used to pass silently here, only to fail deep inside `checkoutNewBranch`
+ * with git's own misleading "is not a commit". Checked here, before any side effect, with
+ * a plain message naming the sha and the way out (fast-forward a local branch onto it).
  */
 function assertBaseReachable(hostRepoPath: string, baseRef: string, baseSha: string): void {
   if (!isReachableFromClonedRefs(hostRepoPath, baseSha)) {
@@ -236,17 +197,10 @@ function assertBaseReachable(hostRepoPath: string, baseRef: string, baseSha: str
 }
 
 /**
- * All checks here run BEFORE any side effect (fix W5's own ordering),
- * extended by round-2 review findings 1 and 2:
- * - a name starting with `refs/` would double-qualify once `fetchBack`
- *   prefixes `refs/heads/` onto it (finding 1b);
- * - a name ambiguous with an existing TAG is refused outright, rather than
- *   relying solely on `fetchBack`'s own qualified refspec and post-fetch
- *   verification to save it (finding 1b, CRITICAL);
- * - a name that collides with an existing branch by ref directory/file
- *   conflict (`crisol` vs `crisol/<id>`, or the reverse) is caught HERE,
- *   never left for git to reject at Fetch-back once the whole Run already
- *   ran for nothing (finding 2).
+ * All checks run before any side effect. A name starting with `refs/` would
+ * double-qualify once `fetchBack` prefixes `refs/heads/` onto it; the tag-ambiguity
+ * and directory/file-collision checks are refused outright here too, rather than
+ * relying solely on `fetchBack`'s own fully-qualified refspec to save them later.
  */
 function assertBranchAvailable(hostRepoPath: string, name: string): void {
   if (!isValidBranchName(name)) {
@@ -274,15 +228,11 @@ function assertBranchAvailable(hostRepoPath: string, name: string): void {
 }
 
 /**
- * The Run, end to end: Clone the host repo, cut a branch, bind-mount the
- * Clone into a Sandbox, let the Adapter work, then let Crisol — never the
- * agent — decide done: the loop below runs every declared Gate, resumes
- * the SAME session with the failing command and its output on red, and
- * repeats until every Gate is green (`"verified"`) or the ceiling is hit
- * first (`"not-converged"`, `reason: "ceiling"`). With no Gate declared
- * anywhere in the ladder, the agent's own completion report stands in
- * (`"unverified"`) and the loop never spends a second iteration. Finally,
- * Fetch-back — never skipped, whatever `status` landed on.
+ * Crisol, never the agent, decides done: the loop below runs every declared Gate,
+ * resumes the SAME session with the failing command on red, and repeats until every
+ * Gate is green or the ceiling hits first. With no Gate anywhere in the ladder, the
+ * agent's own completion report stands in. Fetch-back runs always, whatever `status`
+ * landed on.
  */
 export async function run(options: RunOptions): Promise<RunResult> {
   const home = options.home ?? crisolHome();
@@ -291,26 +241,21 @@ export async function run(options: RunOptions): Promise<RunResult> {
     throw new Error(`Not inside a git repo: ${options.cwd}`);
   }
 
-  // Fix W5: every validation below runs BEFORE any side effect — no mkdir,
-  // no clone, no `docker run` — in the order the review asked for: identity,
-  // base resolution, branch name, Docker reachability.
+  // Every validation below runs BEFORE any side effect — no mkdir, no clone, no docker run.
   const identity = readIdentity(hostRepoPath);
 
   const baseRef = options.base ?? currentRefName(hostRepoPath);
-  // Resolves an annotated tag down to the commit it targets (fix "tag").
   const baseSha = resolveBaseSha(hostRepoPath, baseRef);
-  assertBaseReachable(hostRepoPath, baseRef, baseSha); // finding 4
+  assertBaseReachable(hostRepoPath, baseRef, baseSha);
   const base = `${baseRef}@${baseSha}`;
 
   if (options.name !== undefined) {
-    assertBranchAvailable(hostRepoPath, options.name); // fix W3, findings 1b/2
+    assertBranchAvailable(hostRepoPath, options.name);
   } else {
-    assertDefaultPrefixAvailable(hostRepoPath); // finding 1 (round-3 review, CRITICAL)
+    assertDefaultPrefixAvailable(hostRepoPath);
   }
 
-  // Gate ladder: --gate beats the repo's own .crisol/config.toml beats
-  // none. A read-only pre-flight check, grouped here with every other one,
-  // before Docker or any side effect.
+  // Grouped with every other pre-flight check, before Docker or any side effect.
   const gates = resolveGates(options.gates, readRepoGates(hostRepoPath));
   const { maxIterations, ceilingMs } = resolveCeiling(
     { maxIterations: options.maxIterations, ceilingMs: options.ceilingMs },
@@ -321,18 +266,14 @@ export async function run(options: RunOptions): Promise<RunResult> {
   assertDockerReachable();
 
   const adapter = options.adapter ?? new FakeAdapter();
-  // Adapter-split fix: authenticate/wireHooks now arrive as ONE pre-start
-  // declaration, consumed by `startSandbox` before it ever runs `docker
-  // run` — see docs/adr/0005-pre-start-declaration-replaces-post-start-wiring.md.
   const preStart = adapter.declarePreStart();
   const ensureImage = options.ensureImage ?? ensureBaseImage;
-  // Finding 5: resolved/built BEFORE any side effect (mkdir, clone, branch
-  // cut) — an offline first Run (image build fails) must throw here, never
-  // leave a Clone+cut branch behind for Fetch-back to bring back empty.
+  // Resolved BEFORE any side effect — an offline first Run must throw here, never
+  // leave a Clone+cut branch behind.
   const image = await ensureImage();
 
   const generateId = options.generateRunId ?? generateRunId;
-  const { id, branch } = reserveRun(hostRepoPath, home, options.name, generateId); // fix W2
+  const { id, branch } = reserveRun(hostRepoPath, home, options.name, generateId);
 
   const logPath = runLogPath(id, home);
   const clonePath = runRepoPath(id, home);
@@ -349,36 +290,21 @@ export async function run(options: RunOptions): Promise<RunResult> {
   let gateResults: Gate[] = [];
   let primaryError: unknown;
   let fetchBackError: unknown;
-  // Finding 2 (round-3 review, CRITICAL): SIGINT/SIGTERM must cover the
-  // WHOLE window from the Sandbox starting through teardown AND
-  // Fetch-back — armed right after `startSandbox` succeeds (below) and
-  // disarmed exactly once, in the outer `finally` at the bottom of this
-  // block, AFTER Fetch-back has been attempted. The OLD code `process.off`'d
-  // the handlers right after the Adapter's own race settled — well before
-  // `sandbox.stop()` or Fetch-back ever ran — so a Ctrl+C landing in either
-  // of those windows hit no listener at all: silently lost, no log line, no
-  // effect. A SECOND signal arriving once teardown/Fetch-back is already
-  // underway is still logged here, but is otherwise a no-op: `interrupted`
-  // (below) can only reject once, and Crisol never force-exits itself
-  // mid-teardown or mid-Fetch-back — that is exactly the failure this fix
-  // closes. An operator who truly wants an immediate exit still has SIGKILL.
+  /**
+   * Must cover the WHOLE window from the Sandbox starting through teardown AND
+   * Fetch-back — armed after `startSandbox` succeeds, disarmed once in the outer
+   * `finally` AFTER Fetch-back. The OLD code removed the handlers right after the
+   * Adapter's race settled, well before `stop()`/Fetch-back ran, so a Ctrl+C landing
+   * there was silently lost. A second signal during teardown/Fetch-back is logged but
+   * a no-op — Crisol never force-exits itself mid-teardown; SIGKILL remains for that.
+   */
   let interruptHandler: ((signal: NodeJS.Signals) => void) | undefined;
 
   try {
     try {
-      // The Clone gets its OWN .git, with ONLY the objects reachable from
-      // some ref — see docs/adr/0004-clone-copies-objects-no-hardlinks.md
-      // (fix C1, amended by finding 9) — cut here, before the Sandbox even
-      // exists, so the agent never has a moment where it could reach the
-      // host's refs.
-      //
-      // Finding 5 (round-3 review, CONFIRMED): this used to run OUTSIDE any
-      // try/catch, so a Clone/checkout failure propagated straight out of
-      // `run()` with the Run log left holding only the "starting" line.
-      // Moved inside the SAME try as every failure below, so it is logged
-      // exactly like any other primary error, and Fetch-back still gets
-      // its own attempt (fix W4) even though, with no branch ever cut,
-      // that attempt will usually fail too.
+      // Moved inside the SAME try as every failure below, so a Clone/checkout failure is
+      // logged exactly like any other primary error, and Fetch-back still gets its own
+      // attempt even though, with no branch cut, it will usually fail too.
       cloneLocal(hostRepoPath, clonePath);
       checkoutNewBranch(clonePath, branch, baseSha);
       appendLog(logPath, `clone ready at ${clonePath}, branch ${branch} cut from ${baseSha}`);
@@ -401,13 +327,10 @@ export async function run(options: RunOptions): Promise<RunResult> {
         `sandbox ${sandbox.containerId} started from ${image}, mounts=${sandbox.mounts.join(",")}`,
       );
 
-      // Finding 6: Ctrl+C (SIGINT) or SIGTERM must tear the Sandbox down
-      // AND still run Fetch-back (spec: "On EVERY exit ... Ctrl+C") rather
-      // than leaving the container and the agent running. Racing the
-      // Adapter's own work against an "interrupted" promise, and letting
-      // the signal REJECT it, reuses the primaryError/finally machinery
-      // below exactly as an ordinary Adapter failure would — the Sandbox
-      // still gets torn down in `finally`, and Fetch-back still runs after.
+      // Racing the Adapter's work against an "interrupted" promise, and letting the
+      // signal REJECT it, reuses the primaryError/finally machinery below exactly as an
+      // ordinary Adapter failure would — the Sandbox still gets torn down, and
+      // Fetch-back still runs.
       let onInterrupt!: (signal: NodeJS.Signals) => void;
       const interrupted = new Promise<never>((_, reject) => {
         onInterrupt = (signal) => {
@@ -427,12 +350,6 @@ export async function run(options: RunOptions): Promise<RunResult> {
             iterations = 1;
             const startedAt = Date.now();
 
-            // Converge: Crisol, not the agent, decides done. Loop Gate
-            // runs, resuming with the failing command and output on red,
-            // until every Gate is green or the ceiling hits first. A Run
-            // with no Gate anywhere in the ladder never spends a second
-            // iteration — the agent's own completion report is the
-            // done-signal (`"unverified"`).
             while (true) {
               const completed = await adapter.reportCompletion(ctx);
               appendLog(
@@ -480,8 +397,6 @@ export async function run(options: RunOptions): Promise<RunResult> {
           interrupted,
         ]);
       } finally {
-        // Fix W1: `stop()` now reports whether teardown actually succeeded —
-        // never claim "stopped" when it didn't.
         const stopResult = await sandbox.stop();
         if (stopResult.ok) {
           appendLog(logPath, `sandbox ${sandbox.containerId} stopped`);
@@ -500,11 +415,9 @@ export async function run(options: RunOptions): Promise<RunResult> {
       );
     }
 
-    // Fix W4: Fetch-back is never optional (spec, "Workspace") — it runs even
-    // when the step above failed, and ITS OWN failure is logged but never
-    // masks the primary error. Still inside the signal-covered window
-    // (finding 2): `interruptHandler`, if armed, is removed only once, in
-    // the outer `finally` below, AFTER this attempt.
+    // Fetch-back is never optional — it runs even when the step above failed, and its own
+    // failure is logged but never masks the primary error. Still inside the signal-covered
+    // window: `interruptHandler` is removed only once, after this attempt.
     try {
       fetchBack(hostRepoPath, clonePath, branch);
       appendLog(logPath, `fetch-back complete: ${branch} now in ${hostRepoPath}`);
@@ -542,7 +455,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     status,
     iterations,
     gates: gateResults,
-    network: "open", // no Allowlist wall yet — see docs/adr/0003-...
+    network: "open", // no Allowlist wall yet
     blocked: [],
     warnings: [],
   };

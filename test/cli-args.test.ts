@@ -3,11 +3,7 @@ import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
 
-/**
- * W6: `--base`/`--name` with a missing value, or a value that itself looks
- * like another flag (starts with `--`), must be a usage error with a
- * non-zero exit — never silently treated as "no value given".
- */
+/** A missing value, or one that looks like another flag, must be a usage error — never silently treated as "no value given". */
 describe("crisol run argument validation (W6)", () => {
   test("--base with no value at all is a usage error", async () => {
     const home = createTempHome();

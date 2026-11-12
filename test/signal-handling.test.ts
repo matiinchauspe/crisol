@@ -17,13 +17,9 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
 }
 
 /**
- * finding 6 (round-2 review): Ctrl+C left the container AND the agent
- * running — the spec's own testing decisions name SIGINT explicitly
- * ("branch present in the host repo after every exit path, INCLUDING
- * SIGINT"). `process.emit("SIGINT", ...)` fires the exact listeners
- * `run()` installs (Node/Bun's `process` is a plain EventEmitter for
- * signals), without needing a real OS-level signal or a subprocess — a
- * deterministic way to test the handler itself.
+ * `process.emit("SIGINT", ...)` fires the exact listeners `run()` installs — Node/Bun's
+ * `process` is a plain EventEmitter for signals — without needing a real OS-level signal
+ * or a subprocess.
  */
 describe("Ctrl+C tears the Sandbox down and still runs Fetch-back (finding 6)", () => {
   test("SIGINT during the Adapter's work stops the container and still leaves the branch in the host repo", async () => {
@@ -39,8 +35,7 @@ describe("Ctrl+C tears the Sandbox down and still runs Fetch-back (finding 6)", 
         async launch(ctx: AdapterContext) {
           launchStarted = true;
           containerId = ctx.sandbox.containerId;
-          // A long sleep INSIDE the Sandbox — long enough that the signal
-          // always arrives well before this would ever resolve on its own.
+          // Long enough that the signal always arrives well before this resolves on its own.
           await ctx.sandbox.exec(["sleep", "30"]);
         },
         async reportCompletion() {
@@ -52,8 +47,7 @@ describe("Ctrl+C tears the Sandbox down and still runs Fetch-back (finding 6)", 
       const runPromise = run({ task: "x", cwd: repo.path, home: home.path, adapter: slowAdapter });
 
       await waitFor(() => launchStarted);
-      // A microtask tick so the signal handlers (registered synchronously
-      // right before `adapter.launch` is awaited) are in place.
+      // A tick so the signal handlers are in place before the signal fires.
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       process.emit("SIGINT", "SIGINT");
@@ -68,8 +62,7 @@ describe("Ctrl+C tears the Sandbox down and still runs Fetch-back (finding 6)", 
       });
       expect(inspect.exitCode).not.toBe(0);
 
-      // Fetch-back still ran: find the run id from the log directory and
-      // confirm the branch landed in the host repo despite the interrupt.
+      // Fetch-back still ran despite the interrupt.
       const runs = Bun.spawnSync(["ls", `${home.path}/runs`], { stdout: "pipe" })
         .stdout.toString("utf8")
         .trim()
@@ -93,22 +86,11 @@ describe("Ctrl+C tears the Sandbox down and still runs Fetch-back (finding 6)", 
   }, 30_000);
 
   /**
-   * Round-3 review, finding 2 (CRITICAL): the OLD code `process.off`'d the
-   * SIGINT/SIGTERM handlers right after the Adapter's own race settled —
-   * well before `sandbox.stop()` (teardown) or Fetch-back ever ran. A
-   * SECOND Ctrl+C landing in that window hit NO listener at all: under the
-   * OLD code, `process.emit` on an event with zero listeners is a pure
-   * no-op (never logged, no effect) — the exact "no teardown, no
-   * Fetch-back" risk this fix closes for any signal arriving there. The
-   * handlers must now cover the WHOLE window through teardown AND
-   * Fetch-back, removed only once, at the very end.
-   *
-   * The first SIGINT (during the Adapter's slow `launch`) is identical to
-   * the test above; a short delay after it reliably lands the SECOND
-   * SIGINT inside the teardown+Fetch-back window — `process.off` (old
-   * code) already ran by then (same-tick synchronous code), while
-   * `docker rm -f` plus Fetch-back's own git calls still take measurably
-   * longer than that delay.
+   * Regression test for the OLD code's handler-removal window: `process.off` ran right
+   * after the Adapter's race settled, so a second signal landing during teardown/Fetch-back
+   * hit no listener (a silent no-op). The first SIGINT is identical to the test above; the
+   * short delay after it reliably lands the SECOND one inside the teardown+Fetch-back
+   * window, since `docker rm -f` plus Fetch-back's own git calls take measurably longer.
    */
   test("a SECOND SIGINT during teardown/Fetch-back is still logged, not silently lost", async () => {
     const home = createTempHome();

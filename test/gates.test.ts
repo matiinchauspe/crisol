@@ -4,11 +4,8 @@ import { formatGateFeedback, resolveGates, runGates } from "../src/gates";
 import { parseGatesArray } from "../src/config";
 
 /**
- * A hand-rolled `Sandbox` double, scripted by exit code — no Docker needed.
- * Same reasoning as `buildDockerRunArgs`'s own pure unit tests: `runGates`'s
- * LOOP logic (run every Gate, collect `{cmd, ok}`, find the first failure)
- * is a pure function of what `exec` returns, so it doesn't need a real
- * container to prove it.
+ * No Docker needed: `runGates`'s LOOP logic is a pure function of what `exec` returns,
+ * so a hand-rolled `Sandbox` double, scripted by exit code, is enough to prove it.
  */
 function fakeSandbox(results: Record<string, Partial<ExecResult>>): Sandbox {
   return {

@@ -14,18 +14,12 @@ interface ParsedRunArgs {
   name?: string;
   /** `--gate`, repeatable — the Gate ladder's strongest rung. */
   gates: string[];
-  /** `--max-iterations <n>` — per-Run override of the iteration ceiling; lands on `RunOptions.maxIterations`. */
   maxIterations?: number;
-  /** `--timeout <minutes>` — per-Run override of the wall-clock ceiling, in minutes; converted to ms before landing on `RunOptions.ceilingMs`. */
+  /** Minutes; converted to ms for `RunOptions.ceilingMs`. */
   timeoutMinutes?: number;
 }
 
-/**
- * A missing value, or a value that itself looks like another flag (starts
- * with `--`), is a usage error (fix W6) — never silently treated as "no
- * value given", which would otherwise let `--base --json` quietly run with
- * no base at all instead of refusing.
- */
+/** A missing value, or one that looks like another flag, is a usage error — never silently treated as "no value given" (which would let `--base --json` quietly run with no base). */
 function readFlagValue(argv: string[], index: number, flag: string): string {
   const value = argv[index];
   if (value === undefined || value.startsWith("--")) {
@@ -34,7 +28,7 @@ function readFlagValue(argv: string[], index: number, flag: string): string {
   return value;
 }
 
-/** Same missing/flag-shaped-value guard as `readFlagValue`, plus a positive-integer check — never silently falls back on an unparseable ceiling override. */
+/** Same guard as `readFlagValue`, plus a positive-integer check — never silently falls back on an unparseable value. */
 function readIntFlagValue(argv: string[], index: number, flag: string): number {
   const raw = readFlagValue(argv, index, flag);
   const value = parsePositiveInteger(raw);
@@ -87,10 +81,9 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
 }
 
 /**
- * finding 7 (round-2 review): an `AggregateError` (W4's double-failure
- * shape — primary error AND Fetch-back both failed) was printed via its
- * own outer `.message` alone, dropping both underlying causes. Exported so
- * it can be unit-tested directly without spawning a real CLI process.
+ * An `AggregateError`'s outer `.message` alone drops its underlying causes;
+ * this surfaces them. Exported so it can be unit-tested without spawning a
+ * real CLI process.
  */
 export function formatError(error: unknown): string {
   if (error instanceof AggregateError) {
@@ -103,7 +96,6 @@ export function formatError(error: unknown): string {
 }
 
 async function main(argv: string[]): Promise<number> {
-  // The ticket's own wording: exits AT ONCE, before any argument parsing.
   assertSupportedPlatform();
 
   const [command, ...rest] = argv;
@@ -142,9 +134,8 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-// `import.meta.main` guards the entrypoint side effect so `cli.ts` can be
-// imported from a test (e.g. for `formatError`) without running `main()`
-// against the test runner's own argv and exiting the whole process.
+// Guards the entrypoint so `cli.ts` can be imported in a test (e.g. for `formatError`)
+// without running `main()` against the test runner's argv and exiting the process.
 if (import.meta.main) {
   const exitCode = await main(process.argv.slice(2));
   process.exit(exitCode);

@@ -16,12 +16,6 @@ import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
 
-/**
- * The required failure-path tests: non-git cwd, an Adapter throw (primary
- * error surfaces, Fetch-back still ran), a branch collision (refused
- * before any clone, no runs/<id> created), and a missing identity. Plus
- * W5's Docker-unreachable path and W4's double-failure (AggregateError).
- */
 describe("non-git cwd (failure path)", () => {
   test("fails before any side effect, naming the problem", async () => {
     const home = createTempHome();
@@ -80,12 +74,7 @@ describe("branch-name collision (failure path, W3/W5)", () => {
   });
 });
 
-/**
- * finding 1 (CRITICAL/pre-check half): a `--name` ambiguous with an
- * existing tag, or one that already starts with `refs/`, is refused BEFORE
- * any side effect — never left for `fetchBack`'s own qualified-refspec fix
- * and post-fetch verification to catch after the whole Run already ran.
- */
+/** Refused BEFORE any side effect — never left for `fetchBack`'s own fix to catch after the whole Run already ran. */
 describe("--name ambiguous with an existing tag (failure path, finding 1)", () => {
   test("refuses before any clone when --name collides with an existing tag", async () => {
     const home = createTempHome();
@@ -128,12 +117,7 @@ describe("--name starting with refs/ (failure path, finding 1)", () => {
   });
 });
 
-/**
- * finding 2 (WARNING): `--name crisol` while `crisol/<id>` exists (or the
- * reverse) is a git ref directory/file collision, caught here BEFORE any
- * side effect rather than only at Fetch-back once the whole Run already
- * happened for nothing.
- */
+/** A git ref directory/file collision, caught here BEFORE any side effect rather than only at Fetch-back once the whole Run already happened for nothing. */
 describe("--name D/F prefix collision with an existing branch (failure path, finding 2)", () => {
   test("refuses before any clone when --name is an existing branch's directory prefix", async () => {
     const home = createTempHome();
@@ -177,16 +161,9 @@ describe("--name D/F prefix collision with an existing branch (failure path, fin
 });
 
 /**
- * finding 1 (round-3 review, CRITICAL): a DEFAULT-named Run (no `--name`)
- * never ran `assertBranchAvailable` at all — only an explicit `--name` did.
- * `reserveRun` only checked `branchExists` for the generated `crisol/<id>`,
- * so a host with a plain branch literally named "crisol" blocked EVERY
- * default-named Run's branch at Fetch-back time ('cannot lock ref
- * "refs/heads/crisol/<id>": "refs/heads/crisol" exists'), after the whole
- * Run (Clone, Sandbox, Adapter) had already happened for nothing. Retrying
- * with a fresh id can never help here — every `crisol/<id>` collides with
- * the SAME "crisol" branch regardless of id — so this must fail BEFORE any
- * side effect, with a plain message naming the one way out: `--name`.
+ * A default-named Run must fail before any side effect too — not just an explicit
+ * `--name`. Retrying with a fresh id can never help here, since every `crisol/<id>`
+ * collides with the SAME "crisol" branch regardless of id.
  */
 describe("a default-named Run collides with a plain \"crisol\" branch (failure path, finding 1 CRITICAL)", () => {
   test("refuses before any side effect, pointing at --name as the way out", async () => {
@@ -211,13 +188,7 @@ describe("a default-named Run collides with a plain \"crisol\" branch (failure p
   });
 });
 
-/**
- * finding 5: `ensureBaseImage` must run BEFORE any side effect — an offline
- * first Run (image build fails) must never leave a Clone+cut branch behind.
- * `ensureImage` is a test seam on `RunOptions` (same pattern as
- * `generateRunId`) since forcing a REAL `docker build` to fail
- * deterministically isn't practical in a test.
- */
+/** `ensureImage` is a test seam, since forcing a REAL `docker build` to fail deterministically isn't practical in a test. */
 describe("ensureBaseImage runs before any side effect (failure path, finding 5)", () => {
   test("an image-resolution failure leaves no run directory, no Clone, and no branch behind", async () => {
     const home = createTempHome();
@@ -243,24 +214,16 @@ describe("ensureBaseImage runs before any side effect (failure path, finding 5)"
 });
 
 /**
- * finding 4 (round-3 review, WARNING): `resolveBaseSha`'s own check is
- * existence-only (`rev-parse <ref>^{commit}`) — a sha that is still
- * physically in the object store but unreachable from every ref (its
- * branch was force-deleted, no `git gc` has run yet) happily passes it,
- * then fails much later, deep inside the `--no-local file://` Clone's own
- * checkout, with git's misleading "'<sha>' is not a commit and a branch
- * '<name>' cannot be created from it" — by which point `reserveRun`'s mkdir
- * and the Clone itself have already happened. Reachability is now checked
- * up front, before any side effect, with a plain message naming the sha.
+ * A sha that's still physically in the object store but unreachable from every ref
+ * must be refused up front, not left to the Clone's misleading "is not a commit" error.
  */
 describe("--base <unreachable sha> fails before any side effect (failure path, finding 4)", () => {
   test("a sha that exists in the object store but isn't reachable from any ref is refused, not left to the Clone's misleading error", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      // An orphaned commit: exists in the object store (no `git gc` run),
-      // but no branch or tag names it after the branch that pointed at it
-      // is force-deleted.
+      // An orphaned commit: exists in the object store, but no branch or tag names it
+      // once the branch that pointed at it is force-deleted.
       Bun.spawnSync(["git", "-C", repo.path, "checkout", "-q", "-b", "tmp"]);
       writeFileSync(`${repo.path}/orphan.txt`, "orphan\n");
       Bun.spawnSync(["git", "-C", repo.path, "add", "orphan.txt"]);
@@ -291,17 +254,9 @@ describe("--base <unreachable sha> fails before any side effect (failure path, f
 });
 
 /**
- * Round-4 review, finding C1 (WARNING, both reviewers reproduced): the old
- * `isReachableFromAnyRef` ran `git for-each-ref --contains <sha>` with NO
- * pattern, which lists refs under ALL of `refs/` — including
- * `refs/remotes/*`, which `cloneLocal`'s `--no-local file://` transport
- * never walks (a remote-tracking ref is a purely local bookkeeping concept;
- * the host repo never advertises it to anything cloning from it). So
- * `--base origin/main` ahead of every local branch used to pass this
- * pre-side-effect check, then fail much later inside `checkoutNewBranch`
- * with git's own misleading "is not a commit" — after the run dir and the
- * Clone had already been created. Fixed by scoping the check to exactly
- * what the Clone receives (`refs/heads/`, `refs/tags/`, and HEAD).
+ * A remote-tracking ref (`origin/main` ahead of local) is reachable from nothing
+ * `cloneLocal` actually walks — must be refused, not left to fail deep inside
+ * `checkoutNewBranch`.
  */
 describe("--base origin/<branch> ahead of every local branch (failure path, round-4 finding C1)", () => {
   test("refuses before any side effect — the Clone never receives objects only reachable via refs/remotes", async () => {
@@ -309,15 +264,12 @@ describe("--base origin/<branch> ahead of every local branch (failure path, roun
     const upstream = createFixtureRepo();
     const hostPath = mkdtempSync(path.join(tmpdir(), "crisol-host-"));
     try {
-      // `host` is a real clone of `upstream`, so it has its own `origin`
-      // remote-tracking refs, same as any real-world checkout.
+      // A real clone of `upstream`, so `hostPath` has its own `origin` remote-tracking refs.
       Bun.spawnSync(["git", "clone", "--quiet", upstream.path, hostPath]);
       Bun.spawnSync(["git", "-C", hostPath, "config", "user.name", "Crisol Fixture"]);
       Bun.spawnSync(["git", "-C", hostPath, "config", "user.email", "fixture@crisol.test"]);
 
-      // Upstream advances; `host` fetches so `refs/remotes/origin/main`
-      // moves ahead while `host`'s own local `main` stays behind — exactly
-      // the everyday "fetched but not merged" shape.
+      // Upstream advances and `host` fetches — the everyday "fetched but not merged" shape.
       writeFileSync(path.join(upstream.path, "ahead.txt"), "ahead\n");
       Bun.spawnSync(["git", "-C", upstream.path, "add", "ahead.txt"]);
       Bun.spawnSync(["git", "-C", upstream.path, "commit", "--quiet", "-m", "chore: upstream advances"]);
@@ -338,7 +290,6 @@ describe("--base origin/<branch> ahead of every local branch (failure path, roun
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain(aheadSha);
       expect(result.stderr.toLowerCase()).toContain("reachable");
-      // Never reaches checkoutNewBranch's own misleading git error.
       expect(result.stderr).not.toContain("is not a commit");
       expect(existsSync(path.join(home.path, "runs"))).toBe(false);
     } finally {
@@ -349,11 +300,7 @@ describe("--base origin/<branch> ahead of every local branch (failure path, roun
   }, 30_000);
 });
 
-/**
- * Round-4 review, finding C1: same mismatch, a different ref namespace the
- * old ALL-refs check also matched — `refs/stash`. A stash entry's commit is
- * reachable from nothing `cloneLocal` ever walks either.
- */
+/** A stash entry's commit is reachable from nothing `cloneLocal` ever walks either — same mismatch, a different ref namespace. */
 describe("--base <stash sha> (failure path, round-4 finding C1)", () => {
   test("refuses before any side effect — a stash entry never crosses into the Clone", async () => {
     const home = createTempHome();
@@ -385,12 +332,7 @@ describe("--base <stash sha> (failure path, round-4 finding C1)", () => {
   }, 30_000);
 });
 
-/**
- * Cheap extra: the docker CLI itself being missing from PATH must print a
- * plain message naming docker, never a raw `Bun.spawnSync` ENOENT. `git`
- * stays resolvable (via `/usr/bin`, system git) so the failure is isolated
- * to the docker-reachability check, not an earlier git call.
- */
+/** `git` stays resolvable (via `/usr/bin`, system git) so the failure is isolated to the docker-reachability check, not an earlier git call. */
 describe("docker CLI missing from PATH (failure path, extra)", () => {
   test("fails with a plain message naming docker, not a spawn ENOENT", async () => {
     const home = createTempHome();
@@ -403,9 +345,7 @@ describe("docker CLI missing from PATH (failure path, extra)", () => {
       });
 
       expect(result.exitCode).toBe(1);
-      // Crisol's OWN plain message, never Bun's raw spawn-failure wording
-      // ("Executable not found in $PATH: ...") or its ENOENT/errno
-      // internals.
+      // Crisol's OWN plain message, never Bun's raw spawn-failure wording or ENOENT/errno internals.
       expect(result.stderr).toContain("was not found on PATH");
       expect(result.stderr.toLowerCase()).toContain("install docker");
       expect(result.stderr).not.toContain("ENOENT");
@@ -464,27 +404,19 @@ describe("Docker engine unreachable (failure path, W5)", () => {
 });
 
 /**
- * finding 5 (round-3 review, CONFIRMED): `cloneLocal`/`checkoutNewBranch`
- * run OUTSIDE the try/catch that sets `primaryError` — so a failure there
- * propagates straight out of `run()`, and the Run log is left holding ONLY
- * the "starting" line, never the failure itself (unlike every OTHER
- * failure path, which always appends a "primary error: ..." line). The
- * `ensureImage` seam is the one hook that runs AFTER every pre-side-effect
- * check but BEFORE `cloneLocal` — used here to sabotage the HOST repo's
- * permissions so the upcoming Clone fails for real (forcing a REAL git
- * clone to fail deterministically otherwise has no clean hook, same
- * reasoning as the `ensureImage` seam's own doc comment).
+ * `cloneLocal`/`checkoutNewBranch` used to run OUTSIDE the try/catch that sets
+ * `primaryError`, so a failure there propagated straight out of `run()` with the Run log
+ * holding ONLY the "starting" line. `ensureImage` is repurposed here to sabotage the HOST
+ * repo's permissions right before `cloneLocal` runs — the one clean hook to force a REAL
+ * git clone to fail deterministically.
  */
 describe("a Clone failure still lands in the Run log (failure path, finding 5)", () => {
   test("cloneLocal failing is logged, not left with only the 'starting' line", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      // `fetchBack` ALSO runs against the same (still chmod'd) host repo
-      // and will usually ALSO fail — the top-level thrown error can end up
-      // an `AggregateError` whose own `.message` doesn't carry either
-      // underlying git message, so this asserts on the LOG's "primary
-      // error:" line instead of the thrown error's message.
+      // `fetchBack` also runs against the same (still chmod'd) repo and usually fails
+      // too, so this asserts on the LOG's "primary error:" line, not the thrown error.
       let caught: unknown;
       try {
         await run({
@@ -506,8 +438,7 @@ describe("a Clone failure still lands in the Run log (failure path, finding 5)",
       const log = readFileSync(path.join(home.path, "runs", runs[0]!, "log"), "utf8");
       expect(log).toContain("run ");
       expect(log).toContain("starting");
-      // Before the fix, this was the ONLY line in the log — the Clone
-      // failure happened outside any try/catch and was never appended.
+      // Before the fix, this was the ONLY line in the log.
       const primaryErrorLine = log.split("\n").find((line) => line.includes("primary error:"));
       expect(primaryErrorLine).toBeDefined();
       expect(primaryErrorLine).toMatch(/git repository|remote repository/i);
@@ -583,7 +514,7 @@ describe("Adapter failure (failure path, W4)", () => {
       const agg = caught as AggregateError;
       expect(agg.errors).toHaveLength(2);
       expect(String(agg.errors[0])).toContain("adapter exploded");
-      // W3: git's own stderr must surface — not an empty, swallowed message.
+      // git's own stderr must surface — not an empty, swallowed message.
       expect(String(agg.errors[1]).length).toBeGreaterThan("fetch-back failed: ".length);
 
       const runs = readdirSync(path.join(home.path, "runs"));

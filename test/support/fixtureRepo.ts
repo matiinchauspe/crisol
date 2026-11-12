@@ -14,11 +14,7 @@ function sh(args: string[], cwd: string): void {
   }
 }
 
-/**
- * A throwaway host git repo (spec, Testing Decisions: "each test with its
- * own temp CRISOL_HOME and a throwaway fixture git repo") — its own
- * identity, one commit on `main`, nothing else.
- */
+/** A throwaway host git repo: its own identity, one commit on `main`, nothing else. */
 export function createFixtureRepo(): FixtureRepo {
   const repoPath = mkdtempSync(path.join(tmpdir(), "crisol-fixture-repo-"));
   sh(["git", "init", "--quiet", "--initial-branch=main"], repoPath);

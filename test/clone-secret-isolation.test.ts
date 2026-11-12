@@ -5,17 +5,10 @@ import { createFixtureRepo } from "./support/fixtureRepo";
 import { runRepoPath } from "../src/paths";
 
 /**
- * New decision #1655 (amends crisol ADR 0004 a second time): the Clone must
- * copy REACHABLE objects only. The round-1 fix (`git clone --local
- * --no-hardlinks`) still used git's filesystem-clone fast path, which
- * copies the WHOLE `.git/objects/` directory wholesale — dangling objects
- * included. A secret that was `git add`ed, `git stash`ed, and later `git
- * stash drop`ped is unreachable from any ref (`git log --all` never
- * mentions it) but stays physically in the host's object store until a
- * `git gc` runs; reproduced in scratchpad, the `--local` Clone could still
- * `git cat-file` it. `--no-local file://<path>` forces git's normal
- * transport negotiation even for a local path, which only ever walks and
- * transfers objects reachable from a ref.
+ * The Clone must copy REACHABLE objects only. A secret that was staged, stashed, and
+ * later dropped is unreachable from any ref but stays physically in the host's object
+ * store until `git gc` runs — an earlier filesystem-clone fast path could still read it
+ * inside the Clone.
  */
 describe("Clone copies reachable objects only, never dangling ones (finding 9 / #1655)", () => {
   test("a secret that was staged, stashed, then dropped is unreadable inside the Clone", async () => {
@@ -41,9 +34,8 @@ describe("Clone copies reachable objects only, never dangling ones (finding 9 / 
 
       Bun.spawnSync(["git", "-C", repo.path, "stash", "drop", "--quiet"]);
 
-      // Sanity: unreachable from any ref, but still physically present on
-      // the HOST until a `git gc` runs — proves the setup actually
-      // reproduces the dangerous case, not an already-absent object.
+      // Sanity: proves the setup reproduces the dangerous case (present but
+      // unreachable), not an already-absent object.
       const stillOnHost = Bun.spawnSync(["git", "-C", repo.path, "cat-file", "-p", blobSha], {
         stdout: "pipe",
         stderr: "pipe",

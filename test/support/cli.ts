@@ -9,13 +9,9 @@ export interface CliResult {
 }
 
 /**
- * Runs the `crisol` CLI as a real, separate process — the spec's own
- * Testing Decisions name the CLI itself as the one seam: tests observe
- * only what it prints and what it leaves on disk, never its internals.
- * Mirrors Tenaza's own `test/support/cli.ts` `runCli` helper. Runs the
- * TypeScript entrypoint directly (not a `bun build --compile` binary) so
- * the suite stays fast; building the binary is this ticket's own
- * `package.json` `build` script, never run by the suite.
+ * Runs the CLI as a real, separate process: tests observe only what it prints and
+ * what it leaves on disk, never its internals. Runs the TypeScript entrypoint
+ * directly, not a `bun build --compile` binary, so the suite stays fast.
  */
 export async function runCli(
   args: string[],

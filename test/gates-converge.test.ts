@@ -9,11 +9,8 @@ import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
 
 /**
- * A Gate that fails while `GATE_TARGET.txt` holds "oops" (what
- * `GATE_FAILING_SCRIPT` leaves it at) and passes once it holds "ok" (what
- * `GATE_FIXING_SCRIPT` leaves it at). Always PRINTS the file's content
- * before the pass/fail check, so a red run always has real stdout to
- * carry into the resume feedback.
+ * Fails while GATE_TARGET.txt holds "oops", passes once it holds "ok". Always PRINTS the
+ * content before the check, so a red run has real stdout to carry into the resume feedback.
  */
 const GATE_CMD = 'echo "content=$(cat GATE_TARGET.txt)" && [ "$(cat GATE_TARGET.txt)" = ok ]';
 
@@ -50,7 +47,6 @@ describe("ticket 02: Gates and converge", () => {
         expect(result.status).toBe("verified");
         expect(result.iterations).toBe(1);
         expect(result.reason).toBeUndefined();
-        // Every result lists each Gate as { cmd, ok }.
         expect(result.gates).toEqual([{ cmd: "test -f CRISOL_RUN.md", ok: true }]);
       } finally {
         home.cleanup();
@@ -82,7 +78,6 @@ describe("ticket 02: Gates and converge", () => {
         expect(result.iterations).toBe(2);
         expect(result.gates).toEqual([{ cmd: GATE_CMD, ok: true }]);
 
-        // The resume message carried the failing command and its output.
         expect(feedbacks).toHaveLength(1);
         expect(feedbacks[0]).toContain(GATE_CMD);
         expect(feedbacks[0]).toContain("content=oops");
@@ -100,8 +95,8 @@ describe("ticket 02: Gates and converge", () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
-        // The SAME script for launch and resume: every attempt repeats the
-        // identical failing commit, so the Gate stays red forever.
+        // The SAME script for launch and resume — every attempt repeats the identical
+        // failing commit, so the Gate never turns green.
         const adapter = new FakeAdapter(GATE_FAILING_SCRIPT, GATE_FAILING_SCRIPT);
 
         const result = await run({
@@ -140,9 +135,8 @@ describe("ticket 02: Gates and converge", () => {
           home: home.path,
           adapter,
           gates: [GATE_CMD],
-          // An iteration ceiling high enough that it can never be the one
-          // that fires; a real docker exec always takes well over 10ms, so
-          // the wall clock is what actually stops this Run.
+          // High enough that it can never fire; a real docker exec always takes well
+          // over 10ms, so the wall clock is what actually stops this Run.
           maxIterations: 1000,
           ceilingMs: 10,
         });
@@ -179,8 +173,7 @@ describe("ticket 02: Gates and converge", () => {
 
         expect(result.exitCode).toBe(0);
         const payload = JSON.parse(result.stdout);
-        // A weaker rung (the repo's) never substitutes for the stronger one
-        // (--gate): the result must show ONLY the CLI's own Gate, green.
+        // A weaker rung (the repo's) never substitutes for the stronger one (--gate).
         expect(payload.status).toBe("verified");
         expect(payload.gates).toEqual([{ cmd: "test -f CRISOL_RUN.md", ok: true }]);
       } finally {
