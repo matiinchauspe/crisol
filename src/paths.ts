@@ -28,6 +28,14 @@ export function runRepoPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "repo");
 }
 
+export function slotsDir(home: string = crisolHome()): string {
+  return path.join(home, "slots");
+}
+
+export function slotPath(index: number, home: string = crisolHome()): string {
+  return path.join(slotsDir(home), `${index}.lock`);
+}
+
 export function runLogPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "log");
 }
