@@ -6,6 +6,7 @@ import type { Adapter } from "../src/adapter";
 import { FakeAdapter } from "../src/adapters/fake";
 import { buildDockerRunArgs } from "../src/docker";
 import { run } from "../src/run";
+import type { SecretStore } from "../src/secret-store";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 
@@ -82,7 +83,14 @@ describe("the pre-start declaration end to end, against a real Sandbox (Adapter 
     const roHostDir = mkdtempSync(path.join(tmpdir(), "crisol-ro-"));
     const rwHostDir = mkdtempSync(path.join(tmpdir(), "crisol-rw-"));
     writeFileSync(path.join(roHostDir, "config.txt"), "readonly-config\n");
-    process.env.CRISOL_TEST_TOKEN = "s3cr3t";
+    // An Adapter-declared secret's value is resolved from `SecretStore`, never from the
+    // host's own env — a fake store stands in for the Keychain.
+    const fakeSecretStore: SecretStore = {
+      get: (name) => (name === "CRISOL_TEST_TOKEN" ? "s3cr3t" : undefined),
+      set: () => {
+        throw new Error("not expected to be called in this test");
+      },
+    };
     try {
       const declaringAdapter: Adapter = {
         declarePreStart() {
@@ -123,6 +131,7 @@ describe("the pre-start declaration end to end, against a real Sandbox (Adapter 
         cwd: repo.path,
         home: home.path,
         adapter: declaringAdapter,
+        secretStore: fakeSecretStore,
       });
 
       const probeText = Bun.spawnSync(
@@ -136,7 +145,6 @@ describe("the pre-start declaration end to end, against a real Sandbox (Adapter 
       // The rw mount is a REAL bind mount — the write is visible on the host.
       expect(existsSync(path.join(rwHostDir, "ok.txt"))).toBe(true);
     } finally {
-      delete process.env.CRISOL_TEST_TOKEN;
       home.cleanup();
       repo.cleanup();
       rmSync(roHostDir, { recursive: true, force: true });
