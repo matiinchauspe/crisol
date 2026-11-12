@@ -33,9 +33,10 @@ $ crisol run "fix the login bug with + in emails" --json
 
 > [!NOTE]
 > **Crisol is a walking skeleton.** Every stage of a Run below works end to end today, including
-> Gates and converge. The agent is still a scripted stand-in, though. The real Claude Code
-> Adapter, the network wall and credentials are coming one ticket at a time; see
-> [Roadmap](#roadmap).
+> Gates, converge and least-privilege credentials. The agent is still a scripted stand-in,
+> though — `crisol auth` and a repo's own declared secrets both work, but nothing yet declares
+> the one secret a real agent would need. The real Claude Code Adapter and the network wall are
+> coming one ticket at a time; see [Roadmap](#roadmap).
 
 ## Why
 
@@ -104,6 +105,7 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 
 ```
 crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>]
+crisol auth
 ```
 
 | Flag | Default | What it does |
@@ -120,6 +122,31 @@ A repo can declare its own Gates once, in `.crisol/config.toml`:
 ```toml
 gates = ["bun test", "bun run typecheck"]
 ```
+
+### Credentials
+
+By default, no secret enters the Sandbox at all — v1's only Adapter (the scripted stand-in)
+declares none. A repo that needs one declares it by NAME, never by value, in the same
+`.crisol/config.toml`:
+
+```toml
+env = ["NPM_TOKEN"]
+```
+
+`NPM_TOKEN` is then read from your own shell's environment at launch — export it before running
+`crisol run`. A name declared but missing from your environment fails the Run before anything
+happens, naming it. Nothing from `$HOME` is ever mounted (no `~/.gitconfig`, `~/.ssh`,
+`~/.config/gh`, `~/.aws`, `~/.claude`), and no push is possible from inside a Sandbox — the only
+way a Run's work reaches your repo is Fetch-back.
+
+```
+crisol auth
+```
+
+Obtains a Claude Code OAuth token (wrapping `claude setup-token`) and stores it in Crisol's own
+macOS Keychain entry, behind `SecretStore` — never on disk, never in your shell's history. A
+future Adapter that declares `CLAUDE_CODE_OAUTH_TOKEN` resolves its value from there, the same
+way a repo-declared secret resolves from your shell's environment.
 
 ### The ceiling
 
@@ -187,7 +214,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 05 | Detach, status, logs | |
 | 06 | Network wall | |
 | 07 | Editable Allowlist, learn and open | |
-| 08 | Credentials | |
+| 08 | Credentials | ✅ |
 | 09 | Commits | |
 | 10 | Text input | |
 | 11 | Services | |
@@ -202,8 +229,9 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 ## Vocabulary and decisions
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
-**Gate**, **Adapter**. Each term is defined in [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions
-behind Crisol's shape are recorded in [`docs/adr/`](docs/adr/):
+**Gate**, **Adapter**, **Secret**, **SecretStore**. Each term is defined in
+[`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
+[`docs/adr/`](docs/adr/):
 
 - [0001](docs/adr/0001-adapter-takes-a-sandbox-handle.md): the Adapter takes a Sandbox handle, not a raw container id
 - [0002](docs/adr/0002-ticket-01-sandbox-image-is-a-placeholder.md): ticket 01's Sandbox image is a placeholder
@@ -211,6 +239,7 @@ behind Crisol's shape are recorded in [`docs/adr/`](docs/adr/):
 - [0004](docs/adr/0004-clone-copies-objects-no-hardlinks.md): the Clone copies git objects and never shares them with the host
 - [0005](docs/adr/0005-pre-start-declaration-replaces-post-start-wiring.md): a pre-start declaration replaces post-start wiring
 - [0006](docs/adr/0006-ticket-02-gate-ladder-and-ceiling-are-placeholders.md): ticket 02's `.crisol/config.toml` parser is a hand-rolled placeholder; the ceiling override (CLI flags and `~/.crisol/config`) is implemented
+- [0007](docs/adr/0007-ticket-08-credential-placeholders.md): `crisol auth` keeps the token off every spawned process's argv, verified against the real `security` CLI; its assumption about `claude setup-token`'s own output convention is not
 
 ## Development
 

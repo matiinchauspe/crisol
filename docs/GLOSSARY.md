@@ -56,3 +56,17 @@ what each one is FOR)
 The fixed text Crisol prepends to every Task.
 _Avoid_: System prompt, header (the Preamble is specific to the Task text, and the Adapter may
 tune its wording — it is not a generic system prompt)
+
+**Secret**:
+An env var NAME an Adapter or a repo declares — never its value. Resolved to a value from
+`SecretStore` (Adapter-declared) or the host's own environment (repo-declared) right before the
+Sandbox starts; a missing one fails the Run before launch, naming it.
+_Avoid_: Credential (too broad — git identity and the Claude token are both "credentials" but
+only the token is a Secret by this definition), Token (one specific Secret, not every Secret)
+
+**SecretStore**:
+Crisol's own store for a Secret's value, outside any Run (v1: the macOS Keychain, behind one
+Crisol-owned entry). `crisol auth` is its only writer; `run.ts` reads it for an Adapter-declared
+Secret.
+_Avoid_: Vault, keychain (lowercase "keychain" names the v1 mechanism; SecretStore is the
+interface above it — see docs/adr/0007)
