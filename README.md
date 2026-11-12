@@ -32,9 +32,10 @@ $ crisol run "fix the login bug with + in emails" --json
 ```
 
 > [!NOTE]
-> **Crisol is a walking skeleton.** Every stage of a Run below works end to end today. The agent
-> is a scripted stand-in that makes one commit, though. The real Claude Code Adapter, Gates, the
-> network wall and credentials are coming one ticket at a time; see [Roadmap](#roadmap).
+> **Crisol is a walking skeleton.** Every stage of a Run below works end to end today, including
+> Gates and converge. The agent is still a scripted stand-in, though. The real Claude Code
+> Adapter, the network wall and credentials are coming one ticket at a time; see
+> [Roadmap](#roadmap).
 
 ## Why
 
@@ -57,7 +58,8 @@ flowchart LR
     B --> C["Clone<br/>~/.crisol/runs/&lt;id&gt;/repo"]
     C --> D["Cut branch<br/>crisol/&lt;id&gt; from base"]
     D --> E["Sandbox<br/>Clone mounted, agent works & commits"]
-    E --> F["Teardown<br/>container removed"]
+    E --> X["Converge<br/>Gates run; red resumes with feedback"]
+    X --> F["Teardown<br/>container removed"]
     F --> G["Fetch-back<br/>branch lands in your repo"]
     G --> H["Run result<br/>JSON"]
 ```
@@ -69,7 +71,11 @@ flowchart LR
    Clone. Then it cuts `crisol/<id>` (or your `--name`) from the base.
 3. **Sandbox.** The Clone is bind-mounted into a container at the same absolute path. The Adapter
    does the work and commits there.
-4. **Teardown and Fetch-back.** The container is removed, and the branch is fetched back into
+4. **Converge.** Crisol — never the agent — decides done. It runs every declared Gate; any red one
+   resumes the same session with the failing command and its output, up to a ceiling (5 iterations
+   or 60 minutes). All green is `verified`; no Gate declared anywhere is `unverified`; hitting the
+   ceiling is `not-converged`.
+5. **Teardown and Fetch-back.** The container is removed, and the branch is fetched back into
    your repo. If the Run fails, Fetch-back still runs, so no work is lost. If it fails too, you
    see both errors.
 
@@ -97,14 +103,39 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 ## Usage
 
 ```
-crisol run "<task>" [--json] [--base <ref>] [--name <branch>]
+crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>]
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--base <ref>` | your current `HEAD` | Branch, tag or sha to cut the Run's branch from. It must be reachable from a local branch, a tag or `HEAD`, because that is all the Clone receives. To use `origin/main`, check it out or fast-forward a local branch onto it first. |
 | `--name <branch>` | `crisol/<id>` | The branch name the Run leaves in your repo. Refused before anything happens if it clashes with an existing branch, a tag, or a branch path (for example `feat` vs `feat/x`). |
+| `--gate <cmd>` | none | A command whose exit code decides whether the work is right. Repeatable. Any `--gate` replaces your repo's own `.crisol/config.toml` Gates entirely — it never merges with them. |
+| `--max-iterations <n>` | `5` | Overrides how many Gate-fail-then-resume attempts this Run gets before `not-converged`. Must be a positive integer. |
+| `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
 | `--json` | off | Print the Run result as JSON instead of one line. |
+
+A repo can declare its own Gates once, in `.crisol/config.toml`:
+
+```toml
+gates = ["bun test", "bun run typecheck"]
+```
+
+### The ceiling
+
+A Run stops resuming once either of two ceilings hits first: 5 iterations, or 60 minutes of wall
+clock. Both defaults are overridable, independently, in three layers — `--max-iterations`/
+`--timeout` beat `~/.crisol/config`'s own `max_iterations`/`timeout_minutes` beat the built-in
+default:
+
+```toml
+# ~/.crisol/config
+max_iterations = 10
+timeout_minutes = 90
+```
+
+An invalid value (anything other than a positive integer) in either the flag or the config file
+fails the Run before anything happens, naming the flag — or the config file's path — and the key.
 
 ### The Run result
 
@@ -115,23 +146,28 @@ The fields are only ever added within 0.x, never renamed or removed:
   "run": "9f496a56",
   "branch": "crisol/9f496a56",
   "base": "main@a2689ba",
-  "status": "unverified",
-  "iterations": 1,
-  "gates": [],
+  "status": "verified",
+  "iterations": 2,
+  "gates": [{ "cmd": "bun test", "ok": true }],
   "network": "open",
   "blocked": [],
   "warnings": []
 }
 ```
 
-`status` is always `verified`, `unverified` or `not-converged`. Until Gates exist it is
-`unverified`, and `network` reports `open` until the network wall lands
+`status` is `verified` once every declared Gate is green, `not-converged` (with
+`reason: "ceiling"`) if it never gets there within the ceiling (5 iterations or 60 minutes by
+default — see [The ceiling](#the-ceiling)), and `unverified` when no Gate is declared anywhere —
+the CLI's `--gate`, else the repo's own `.crisol/config.toml`.
+A red Gate resumes the same agent session with its failing command and output; `iterations`
+counts how many attempts that took. `network` reports `open` until the network wall lands
 ([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md)).
 
 ### Where things live
 
 ```
 ~/.crisol/                 # override with CRISOL_HOME
+├── config                 # optional: max_iterations / timeout_minutes overrides
 └── runs/<id>/
     ├── repo/              # the Run's Clone
     ├── log                # timestamped log of every stage
@@ -145,7 +181,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | # | Ticket | |
 |---|---|---|
 | 01 | Walking skeleton | ✅ |
-| 02 | Gates and converge | |
+| 02 | Gates and converge | ✅ |
 | 03 | Slots and fan-out | |
 | 04 | Fetch-back on every exit, and recover | |
 | 05 | Detach, status, logs | |
@@ -174,6 +210,7 @@ behind Crisol's shape are recorded in [`docs/adr/`](docs/adr/):
 - [0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md): the Run result reports `network: "open"` until the wall exists
 - [0004](docs/adr/0004-clone-copies-objects-no-hardlinks.md): the Clone copies git objects and never shares them with the host
 - [0005](docs/adr/0005-pre-start-declaration-replaces-post-start-wiring.md): a pre-start declaration replaces post-start wiring
+- [0006](docs/adr/0006-ticket-02-gate-ladder-and-ceiling-are-placeholders.md): ticket 02's `.crisol/config.toml` parser is a hand-rolled placeholder; the ceiling override (CLI flags and `~/.crisol/config`) is implemented
 
 ## Development
 
