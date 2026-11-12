@@ -33,10 +33,9 @@ $ crisol run "fix the login bug with + in emails" --json
 
 > [!NOTE]
 > **Crisol is a walking skeleton.** Every stage of a Run below works end to end today, including
-> Gates, converge and least-privilege credentials. The agent is still a scripted stand-in,
-> though — `crisol auth` and a repo's own declared secrets both work, but nothing yet declares
-> the one secret a real agent would need. The real Claude Code Adapter and the network wall are
-> coming one ticket at a time; see [Roadmap](#roadmap).
+> Gates, converge and least-privilege credentials. `crisol run` still defaults to a scripted
+> stand-in Adapter; the real Claude Code Adapter exists (`--adapter claude-code`) but isn't the
+> default yet, and the network wall is still open. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -104,7 +103,7 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 ## Usage
 
 ```
-crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>]
+crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]
 crisol auth
 ```
 
@@ -115,6 +114,7 @@ crisol auth
 | `--gate <cmd>` | none | A command whose exit code decides whether the work is right. Repeatable. Any `--gate` replaces your repo's own `.crisol/config.toml` Gates entirely — it never merges with them. |
 | `--max-iterations <n>` | `5` | Overrides how many Gate-fail-then-resume attempts this Run gets before `not-converged`. Must be a positive integer. |
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
+| `--adapter <fake\|claude-code>` | `fake` | Which Adapter runs the Task. `fake` is the suite's own scripted stand-in; `claude-code` runs the real Claude Code Adapter (`crisol auth` first — see [Credentials](#credentials)). |
 | `--json` | off | Print the Run result as JSON instead of one line. |
 
 A repo can declare its own Gates once, in `.crisol/config.toml`:
@@ -125,9 +125,11 @@ gates = ["bun test", "bun run typecheck"]
 
 ### Credentials
 
-By default, no secret enters the Sandbox at all — v1's only Adapter (the scripted stand-in)
-declares none. A repo that needs one declares it by NAME, never by value, in the same
-`.crisol/config.toml`:
+By default, no secret enters the Sandbox at all — the scripted stand-in Adapter declares none.
+The real Claude Code Adapter (`--adapter claude-code`) declares exactly one,
+`CLAUDE_CODE_OAUTH_TOKEN`, resolved from `crisol auth`'s Keychain entry below — run that first, or
+the Run fails before anything happens, naming it. A repo that needs another secret declares it by
+NAME, never by value, in the same `.crisol/config.toml`:
 
 ```toml
 env = ["NPM_TOKEN"]
@@ -144,9 +146,12 @@ crisol auth
 ```
 
 Obtains a Claude Code OAuth token (wrapping `claude setup-token`) and stores it in Crisol's own
-macOS Keychain entry, behind `SecretStore` — never on disk, never in your shell's history. A
-future Adapter that declares `CLAUDE_CODE_OAUTH_TOKEN` resolves its value from there, the same
-way a repo-declared secret resolves from your shell's environment.
+macOS Keychain entry, behind `SecretStore` — never on disk, never in your shell's history. The
+Claude Code Adapter resolves `CLAUDE_CODE_OAUTH_TOKEN`'s value from there, the same way a
+repo-declared secret resolves from your shell's environment. The Agent layer it runs in installs
+the same Claude Code version as your host (`claude --version`) under a non-root `agent` user
+(Claude Code itself refuses `--dangerously-skip-permissions` as root), and disables commit/PR
+attribution by configuration inside the Sandbox — never by asking the model.
 
 ### The ceiling
 
@@ -220,7 +225,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 11 | Services | |
 | 12 | Two-layer image and dependencies | |
 | 13 | Provider failure and capacity | |
-| 14 | Claude Code Adapter | |
+| 14 | Claude Code Adapter | ✅ |
 | 15 | Tenaza inside | |
 | 16 | `crisol gc` | |
 | 17 | `crisol init` | |
@@ -240,6 +245,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0005](docs/adr/0005-pre-start-declaration-replaces-post-start-wiring.md): a pre-start declaration replaces post-start wiring
 - [0006](docs/adr/0006-ticket-02-gate-ladder-and-ceiling-are-placeholders.md): ticket 02's `.crisol/config.toml` parser is a hand-rolled placeholder; the ceiling override (CLI flags and `~/.crisol/config`) is implemented
 - [0007](docs/adr/0007-ticket-08-credential-placeholders.md): `crisol auth` keeps the token off every spawned process's argv, verified against the real `security` CLI; its assumption about `claude setup-token`'s own output convention is not
+- [0008](docs/adr/0008-claude-code-adapter-agent-layer-and-attribution.md): the Claude Code Adapter's Agent layer runs as a non-root `agent` user (Claude Code refuses `--dangerously-skip-permissions` as root) and installs via the native installer (not npm); attribution is disabled by a baked `settings.json` rather than a CLI flag or the Preamble; `PreStartDeclaration` gains `ensureImage` rather than the plain `image: string` ADR 0005 sketched
 
 ## Development
 
@@ -249,7 +255,8 @@ bun check    # typecheck
 ```
 
 The tests drive real `git` and real Docker against throwaway repos and a throwaway `CRISOL_HOME`.
-The Adapter is the scripted stand-in, so no model is ever called.
+`crisol run` always defaults to the scripted stand-in Adapter unless `--adapter claude-code` is
+passed explicitly, so the suite never calls a model or builds the real Agent layer image.
 
 ## License
 
