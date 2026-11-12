@@ -247,3 +247,25 @@ describe("crisol run --max-iterations / --timeout validation", () => {
     }
   });
 });
+
+/**
+ * `crisol auth`'s own argument validation, checked here through the real CLI process,
+ * ONLY for the usage-error case: it must run before `runAuth` is ever called, so this
+ * never reaches the real `claude setup-token`. The real `auth` flow is exercised with
+ * fakes in `test/auth.test.ts` instead.
+ */
+describe("crisol auth argument validation (ticket 08)", () => {
+  test("an unexpected argument is a usage error, never reaching the real obtainer", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const result = await runCli(["auth", "extra-arg"], { cwd: repo.path, home: home.path });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("Unexpected argument");
+      expect(result.stderr).toContain("crisol auth");
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+});
