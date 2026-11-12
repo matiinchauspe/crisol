@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import type { Adapter } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
-import { readGlobalConfig, readRepoGates } from "./config";
+import { readGlobalConfig, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
 import { assertDockerReachable, ensureBaseImage, startSandbox } from "./docker";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
@@ -21,6 +21,8 @@ import {
   tagExists,
 } from "./git";
 import { crisolHome, runDir, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
+import { KeychainSecretStore } from "./secret-store";
+import type { SecretStore } from "./secret-store";
 
 export type { Gate } from "./gates";
 
@@ -100,6 +102,8 @@ export interface RunOptions {
   maxIterations?: number;
   /** Default 60 minutes, in ms. Same test-seam reasoning as `maxIterations` — a real wall clock would make ceiling tests impractical. */
   ceilingMs?: number;
+  /** Overrides the default `KeychainSecretStore` — the test seam, since a test must never touch the real login Keychain. */
+  secretStore?: SecretStore;
 }
 
 /**
@@ -227,6 +231,41 @@ function assertBranchAvailable(hostRepoPath: string, name: string): void {
   }
 }
 
+/** A repo-declared secret's value comes from the host's own env, never the Keychain — checked before any side effect, naming whatever is missing. */
+function assertDeclaredSecretsPresent(names: readonly string[]): void {
+  const missing = names.filter((name) => process.env[name] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `Declared secret${missing.length > 1 ? "s" : ""} missing from the host environment: ` +
+        `${missing.join(", ")}. Export ${missing.length > 1 ? "them" : "it"} before running \`crisol run\`.`,
+    );
+  }
+}
+
+/** An Adapter-declared secret's value comes from `SecretStore`, keyed by that same name — never a special case for one literal name. Checked before any side effect; a name `crisol auth` never populated fails the Run, naming it. */
+function resolveAdapterSecretValues(
+  secretStore: SecretStore,
+  names: readonly string[],
+): Record<string, string> {
+  const values: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const name of names) {
+    const value = secretStore.get(name);
+    if (value === undefined) {
+      missing.push(name);
+    } else {
+      values[name] = value;
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Secret${missing.length > 1 ? "s" : ""} not found in Crisol's Keychain entry: ` +
+        `${missing.join(", ")}. Run \`crisol auth\` first.`,
+    );
+  }
+  return values;
+}
+
 /**
  * Crisol, never the agent, decides done: the loop below runs every declared Gate,
  * resumes the SAME session with the failing command on red, and repeats until every
@@ -263,10 +302,17 @@ export async function run(options: RunOptions): Promise<RunResult> {
     { maxIterations: DEFAULT_MAX_ITERATIONS, ceilingMs: DEFAULT_CEILING_MS },
   );
 
+  const repoSecretNames = readRepoSecretNames(hostRepoPath);
+  assertDeclaredSecretsPresent(repoSecretNames);
+
   assertDockerReachable();
 
   const adapter = options.adapter ?? new FakeAdapter();
   const preStart = adapter.declarePreStart();
+  const secretStore = options.secretStore ?? new KeychainSecretStore();
+  const adapterSecretValues = resolveAdapterSecretValues(secretStore, preStart.envNames);
+  const secretEnvNames = Array.from(new Set([...preStart.envNames, ...repoSecretNames]));
+
   const ensureImage = options.ensureImage ?? ensureBaseImage;
   // Resolved BEFORE any side effect — an offline first Run must throw here, never
   // leave a Clone+cut branch behind.
@@ -318,7 +364,8 @@ export async function run(options: RunOptions): Promise<RunResult> {
           GIT_COMMITTER_NAME: identity.name,
           GIT_COMMITTER_EMAIL: identity.email,
         },
-        secretEnvNames: preStart.envNames,
+        secretEnvNames,
+        secretEnv: adapterSecretValues,
         mounts: preStart.mounts,
         id,
       });

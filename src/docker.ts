@@ -104,6 +104,8 @@ export interface StartSandboxOptions {
    * lands on the docker argv (visible in `ps`, shell history, or this process's logs).
    */
   secretEnvNames?: readonly string[];
+  /** A value for a name in `secretEnvNames` not already in this process's own env (a Keychain-sourced token) — merged into the spawned docker CLI's env only, never into `process.env` or the argv. */
+  secretEnv?: Record<string, string>;
   /** Extra mounts an Adapter declares pre-start — empty for the fake Adapter. */
   mounts?: readonly MountSpec[];
   /** Becomes the container's `--name crisol-<id>` and `--label crisol.run=<id>`. */
@@ -170,16 +172,17 @@ export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
  * calls can `exec` into it repeatedly.
  */
 export async function startSandbox(options: StartSandboxOptions): Promise<Sandbox> {
-  const { mountPath, mounts: extraMounts = [] } = options;
+  const { mountPath, mounts: extraMounts = [], secretEnv = {} } = options;
   const mounts = [
     formatMount(mountPath, mountPath, "rw"),
     ...extraMounts.map((m) => formatMount(m.hostPath, m.containerPath, m.mode)),
   ];
 
   const proc = Bun.spawn(buildDockerRunArgs(options), {
-    // Secret values reach the container through THIS process's env, never the
-    // docker argv — resolved from the bare `-e NAME` here.
-    env: process.env,
+    // Secret values reach the container through THIS spawn's own env, never the
+    // docker argv. `secretEnv` is merged in for this one spawn only — `process.env`
+    // itself is never mutated.
+    env: { ...process.env, ...secretEnv },
     stdout: "pipe",
     stderr: "pipe",
   });
