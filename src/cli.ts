@@ -1,14 +1,23 @@
 #!/usr/bin/env bun
+import { parsePositiveInteger } from "./config";
 import { assertSupportedPlatform } from "./platform";
 import { run } from "./run";
 
-const USAGE = 'Usage: crisol run "<task>" [--json] [--base <ref>] [--name <branch>]';
+const USAGE =
+  'Usage: crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
+  "[--max-iterations <n>] [--timeout <minutes>]";
 
 interface ParsedRunArgs {
   task: string;
   json: boolean;
   base?: string;
   name?: string;
+  /** `--gate`, repeatable — the Gate ladder's strongest rung. */
+  gates: string[];
+  /** `--max-iterations <n>` — per-Run override of the iteration ceiling; lands on `RunOptions.maxIterations`. */
+  maxIterations?: number;
+  /** `--timeout <minutes>` — per-Run override of the wall-clock ceiling, in minutes; converted to ms before landing on `RunOptions.ceilingMs`. */
+  timeoutMinutes?: number;
 }
 
 /**
@@ -25,11 +34,24 @@ function readFlagValue(argv: string[], index: number, flag: string): string {
   return value;
 }
 
+/** Same missing/flag-shaped-value guard as `readFlagValue`, plus a positive-integer check — never silently falls back on an unparseable ceiling override. */
+function readIntFlagValue(argv: string[], index: number, flag: string): number {
+  const raw = readFlagValue(argv, index, flag);
+  const value = parsePositiveInteger(raw);
+  if (value === undefined) {
+    throw new Error(`${flag} must be a positive integer, got "${raw}".\n${USAGE}`);
+  }
+  return value;
+}
+
 function parseRunArgs(argv: string[]): ParsedRunArgs {
   let task: string | undefined;
   let json = false;
   let base: string | undefined;
   let name: string | undefined;
+  const gates: string[] = [];
+  let maxIterations: number | undefined;
+  let timeoutMinutes: number | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -40,6 +62,15 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
       i++;
     } else if (arg === "--name") {
       name = readFlagValue(argv, i + 1, "--name");
+      i++;
+    } else if (arg === "--gate") {
+      gates.push(readFlagValue(argv, i + 1, "--gate"));
+      i++;
+    } else if (arg === "--max-iterations") {
+      maxIterations = readIntFlagValue(argv, i + 1, "--max-iterations");
+      i++;
+    } else if (arg === "--timeout") {
+      timeoutMinutes = readIntFlagValue(argv, i + 1, "--timeout");
       i++;
     } else if (task === undefined && !arg.startsWith("--")) {
       task = arg;
@@ -52,7 +83,7 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     throw new Error(USAGE);
   }
 
-  return { task, json, base, name };
+  return { task, json, base, name, gates, maxIterations, timeoutMinutes };
 }
 
 /**
@@ -95,6 +126,9 @@ async function main(argv: string[]): Promise<number> {
       cwd: process.cwd(),
       base: args.base,
       name: args.name,
+      gates: args.gates,
+      maxIterations: args.maxIterations,
+      ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
     });
     if (args.json) {
       console.log(JSON.stringify(result));
