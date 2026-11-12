@@ -24,6 +24,7 @@ import {
 import { crisolHome, runDir, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import { KeychainSecretStore } from "./secret-store";
 import type { SecretStore } from "./secret-store";
+import { acquireSlot } from "./slots";
 
 export type { Gate } from "./gates";
 
@@ -36,6 +37,12 @@ const DEFAULT_BRANCH_PREFIX = "crisol";
 /** 5 iterations OR 60 minutes, whichever comes first — see `resolveCeiling` for the override ladder. */
 const DEFAULT_MAX_ITERATIONS = 5;
 const DEFAULT_CEILING_MS = 60 * 60 * 1000;
+
+const DEFAULT_MAX_PARALLEL = 3;
+
+export function resolveMaxParallel(globalConfig: GlobalConfig): number {
+  return globalConfig.maxParallel ?? DEFAULT_MAX_PARALLEL;
+}
 
 /**
  * Same ladder shape as `resolveGates`: per-Run beats `~/.crisol/config` beats the
@@ -84,6 +91,8 @@ export interface RunOptions {
   /** Where to discover the host git repo from — normally `process.cwd()`. */
   cwd: string;
   base?: string;
+  /** Pins the commit `base` names, so a fan-out cuts every Run from one commit even if the ref moves meanwhile. */
+  baseSha?: string;
   name?: string;
   /** Overrides `crisolHome()` — the test seam (each test gets its own temp CRISOL_HOME). */
   home?: string;
@@ -105,6 +114,10 @@ export interface RunOptions {
   ceilingMs?: number;
   /** Overrides the default `KeychainSecretStore` — the test seam, since a test must never touch the real login Keychain. */
   secretStore?: SecretStore;
+  /** Called once if every Slot is taken and the Run starts waiting for one. */
+  onSlotWait?: (maxParallel: number) => void;
+  /** Aborts a Run still waiting for a Slot; a Run already holding one stops through SIGINT/SIGTERM instead. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -185,10 +198,8 @@ function assertDefaultPrefixAvailable(hostRepoPath: string): void {
 }
 
 /**
- * `resolveBaseSha` only proves `sha` EXISTS, not that it's reachable from anything — an
- * unreachable sha used to pass silently here, only to fail deep inside `checkoutNewBranch`
- * with git's own misleading "is not a commit". Checked here, before any side effect, with
- * a plain message naming the sha and the way out (fast-forward a local branch onto it).
+ * `resolveBaseSha` only proves `sha` EXISTS; an unreachable one would otherwise fail deep
+ * inside `checkoutNewBranch` with git's misleading "is not a commit".
  */
 function assertBaseReachable(hostRepoPath: string, baseRef: string, baseSha: string): void {
   if (!isReachableFromClonedRefs(hostRepoPath, baseSha)) {
@@ -286,7 +297,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
   const instructions = readInstructions(home);
 
   const baseRef = options.base ?? currentRefName(hostRepoPath);
-  const baseSha = resolveBaseSha(hostRepoPath, baseRef);
+  const baseSha = options.baseSha ?? resolveBaseSha(hostRepoPath, baseRef);
   assertBaseReachable(hostRepoPath, baseRef, baseSha);
   const base = `${baseRef}@${baseSha}`;
 
@@ -296,11 +307,12 @@ export async function run(options: RunOptions): Promise<RunResult> {
     assertDefaultPrefixAvailable(hostRepoPath);
   }
 
-  // Grouped with every other pre-flight check, before Docker or any side effect.
   const gates = resolveGates(options.gates, readRepoGates(hostRepoPath));
+  const globalConfig = readGlobalConfig(home);
+  const maxParallel = resolveMaxParallel(globalConfig);
   const { maxIterations, ceilingMs } = resolveCeiling(
     { maxIterations: options.maxIterations, ceilingMs: options.ceilingMs },
-    readGlobalConfig(home),
+    globalConfig,
     { maxIterations: DEFAULT_MAX_ITERATIONS, ceilingMs: DEFAULT_CEILING_MS },
   );
 
@@ -320,16 +332,32 @@ export async function run(options: RunOptions): Promise<RunResult> {
   // leave a Clone+cut branch behind.
   const image = await ensureImage();
 
-  const generateId = options.generateRunId ?? generateRunId;
-  const { id, branch } = reserveRun(hostRepoPath, home, options.name, generateId);
+  // Taken before the Run reserves anything, so a queued Run leaves no trace on disk.
+  const slot = await acquireSlot({
+    home,
+    maxParallel,
+    onWait: () => options.onSlotWait?.(maxParallel),
+    signal: options.signal,
+  });
 
-  const logPath = runLogPath(id, home);
+  let id: string;
+  let branch: string;
+  let logPath: string;
+  try {
+    const generateId = options.generateRunId ?? generateRunId;
+    ({ id, branch } = reserveRun(hostRepoPath, home, options.name, generateId));
+    logPath = runLogPath(id, home);
+    writeFileSync(logPath, "");
+  } catch (error) {
+    slot.release();
+    throw error;
+  }
   const clonePath = runRepoPath(id, home);
-  writeFileSync(logPath, "");
 
   appendLog(
     logPath,
-    `run ${id} starting: task=${JSON.stringify(options.task)} base=${base} branch=${branch}`,
+    `run ${id} starting: task=${JSON.stringify(options.task)} base=${base} branch=${branch} ` +
+      `slot=${slot.index}/${maxParallel}`,
   );
 
   let iterations = 0;
@@ -340,20 +368,16 @@ export async function run(options: RunOptions): Promise<RunResult> {
   let primaryError: unknown;
   let fetchBackError: unknown;
   /**
-   * Must cover the WHOLE window from the Sandbox starting through teardown AND
-   * Fetch-back — armed after `startSandbox` succeeds, disarmed once in the outer
-   * `finally` AFTER Fetch-back. The OLD code removed the handlers right after the
-   * Adapter's race settled, well before `stop()`/Fetch-back ran, so a Ctrl+C landing
-   * there was silently lost. A second signal during teardown/Fetch-back is logged but
-   * a no-op — Crisol never force-exits itself mid-teardown; SIGKILL remains for that.
+   * Armed from the Sandbox start through teardown AND Fetch-back, so a Ctrl+C landing in
+   * either is never lost. A second signal is logged but a no-op — Crisol never force-exits
+   * mid-teardown; SIGKILL remains for that.
    */
   let interruptHandler: ((signal: NodeJS.Signals) => void) | undefined;
 
   try {
     try {
-      // Moved inside the SAME try as every failure below, so a Clone/checkout failure is
-      // logged exactly like any other primary error, and Fetch-back still gets its own
-      // attempt even though, with no branch cut, it will usually fail too.
+      // In the same try as every failure below, so a Clone/checkout failure is logged like
+      // any other and Fetch-back still gets its attempt.
       cloneLocal(hostRepoPath, clonePath);
       checkoutNewBranch(clonePath, branch, baseSha);
       appendLog(logPath, `clone ready at ${clonePath}, branch ${branch} cut from ${baseSha}`);
@@ -495,6 +519,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
       process.off("SIGINT", interruptHandler);
       process.off("SIGTERM", interruptHandler);
     }
+    slot.release();
   }
 
   if (primaryError !== undefined && fetchBackError !== undefined) {
@@ -529,4 +554,22 @@ export async function run(options: RunOptions): Promise<RunResult> {
   appendLog(logPath, `result written: ${JSON.stringify(result)}`);
 
   return result;
+}
+
+/**
+ * Independent Runs, one per Task, all cut from the commit `base` names at the moment of the
+ * call — never chained, never merged. Each settles on its own, so one failing Run never
+ * hides the others' branches.
+ */
+export async function runFanOut(
+  tasks: readonly string[],
+  options: Omit<RunOptions, "task" | "name" | "baseSha">,
+): Promise<PromiseSettledResult<RunResult>[]> {
+  const hostRepoPath = discoverGitRoot(options.cwd);
+  if (!hostRepoPath) {
+    throw new Error(`Not inside a git repo: ${options.cwd}`);
+  }
+  const base = options.base ?? currentRefName(hostRepoPath);
+  const baseSha = resolveBaseSha(hostRepoPath, base);
+  return Promise.allSettled(tasks.map((task) => run({ ...options, task, base, baseSha })));
 }

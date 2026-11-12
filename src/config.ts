@@ -66,10 +66,11 @@ export function parsePositiveInteger(raw: string): number | undefined {
   return POSITIVE_INTEGER.test(raw) ? Number.parseInt(raw, 10) : undefined;
 }
 
-/** The ceiling's global rung; unset keys fall through to the built-in default. */
+/** `~/.crisol/config`; an unset key falls through to the built-in default. */
 export interface GlobalConfig {
   maxIterations?: number;
   timeoutMinutes?: number;
+  maxParallel?: number;
 }
 
 function intKeyLine(key: string): RegExp {
@@ -98,6 +99,8 @@ export function parseGlobalConfig(text: string, sourcePath: string): GlobalConfi
   if (maxIterations !== undefined) config.maxIterations = maxIterations;
   const timeoutMinutes = extractIntKey(text, "timeout_minutes", sourcePath);
   if (timeoutMinutes !== undefined) config.timeoutMinutes = timeoutMinutes;
+  const maxParallel = extractIntKey(text, "max_parallel", sourcePath);
+  if (maxParallel !== undefined) config.maxParallel = maxParallel;
   return config;
 }
 

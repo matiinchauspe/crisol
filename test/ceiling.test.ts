@@ -14,13 +14,13 @@ describe("parseGlobalConfig (~/.crisol/config's max_iterations / timeout_minutes
   });
 
   test("ignores an unknown key alongside a known one", () => {
-    expect(parseGlobalConfig("max_parallel = 3\nmax_iterations = 2\n", "config")).toEqual({
+    expect(parseGlobalConfig("network_mode = 3\nmax_iterations = 2\n", "config")).toEqual({
       maxIterations: 2,
     });
   });
 
   test("returns {} when neither key is present at all", () => {
-    expect(parseGlobalConfig("max_parallel = 3\n", "config")).toEqual({});
+    expect(parseGlobalConfig("network_mode = 3\n", "config")).toEqual({});
   });
 
   test("rejects a non-integer value, naming the source and the key", () => {

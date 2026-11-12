@@ -3,11 +3,12 @@ import { ClaudeCodeAdapter } from "./adapters/claude-code";
 import { runAuth } from "./auth";
 import { parsePositiveInteger } from "./config";
 import { assertSupportedPlatform } from "./platform";
-import { run } from "./run";
+import { run, runFanOut } from "./run";
+import type { RunOptions, RunResult } from "./run";
 import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
-  'Usage: crisol run "<task>" [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
+  'Usage: crisol run "<task>"... [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
   "[--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]";
 
 const AUTH_USAGE = "Usage: crisol auth";
@@ -16,7 +17,8 @@ const ADAPTER_NAMES = ["fake", "claude-code"] as const;
 type AdapterName = (typeof ADAPTER_NAMES)[number];
 
 interface ParsedRunArgs {
-  task: string;
+  /** More than one fans out into independent Runs from the same base. */
+  tasks: string[];
   json: boolean;
   base?: string;
   name?: string;
@@ -58,7 +60,7 @@ function readAdapterFlagValue(argv: string[], index: number): AdapterName {
 }
 
 function parseRunArgs(argv: string[]): ParsedRunArgs {
-  let task: string | undefined;
+  const tasks: string[] = [];
   let json = false;
   let base: string | undefined;
   let name: string | undefined;
@@ -89,18 +91,21 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     } else if (arg === "--adapter") {
       adapterName = readAdapterFlagValue(argv, i + 1);
       i++;
-    } else if (task === undefined && !arg.startsWith("--")) {
-      task = arg;
+    } else if (!arg.startsWith("--")) {
+      tasks.push(arg);
     } else {
       throw new Error(`Unknown argument: ${arg}\n${USAGE}`);
     }
   }
 
-  if (task === undefined) {
+  if (tasks.length === 0) {
     throw new Error(USAGE);
   }
+  if (tasks.length > 1 && name !== undefined) {
+    throw new Error(`--name names one branch; it cannot be used with ${tasks.length} Tasks.\n${USAGE}`);
+  }
 
-  return { task, json, base, name, gates, maxIterations, timeoutMinutes, adapterName };
+  return { tasks, json, base, name, gates, maxIterations, timeoutMinutes, adapterName };
 }
 
 /**
@@ -154,29 +159,53 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
+  // Stops Runs still queued for a Slot; Runs already holding one stop through their own handlers.
+  const interrupt = new AbortController();
+  const onSignal = () => interrupt.abort();
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+
+  const options: Omit<RunOptions, "task"> = {
+    cwd: process.cwd(),
+    base: args.base,
+    name: args.name,
+    gates: args.gates,
+    maxIterations: args.maxIterations,
+    ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
+    // `undefined` is `run()`'s own default, the fake Adapter.
+    adapter: args.adapterName === "claude-code" ? new ClaudeCodeAdapter() : undefined,
+    onSlotWait: (maxParallel) =>
+      process.stderr.write(`Waiting for a free Slot (max_parallel = ${maxParallel})…\n`),
+    signal: interrupt.signal,
+  };
+
+  let settled: PromiseSettledResult<RunResult>[];
   try {
-    const result = await run({
-      task: args.task,
-      cwd: process.cwd(),
-      base: args.base,
-      name: args.name,
-      gates: args.gates,
-      maxIterations: args.maxIterations,
-      ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
-      // `undefined` for "fake" (the default) is exactly what omitting `adapter` was before
-      // this flag existed — `run()`'s own default (`FakeAdapter`) is unchanged either way.
-      adapter: args.adapterName === "claude-code" ? new ClaudeCodeAdapter() : undefined,
-    });
-    if (args.json) {
-      console.log(JSON.stringify(result));
-    } else {
-      console.log(`Run ${result.run}: branch ${result.branch}, status ${result.status}.`);
-    }
-    return 0;
+    settled =
+      args.tasks.length === 1
+        ? await Promise.allSettled([run({ ...options, task: args.tasks[0]! })])
+        : await runFanOut(args.tasks, options);
   } catch (error) {
     process.stderr.write(`${formatError(error)}\n`);
     return 1;
   }
+
+  let exitCode = 0;
+  settled.forEach((outcome, index) => {
+    if (outcome.status === "fulfilled") {
+      const result = outcome.value;
+      console.log(
+        args.json
+          ? JSON.stringify(result)
+          : `Run ${result.run}: branch ${result.branch}, status ${result.status}.`,
+      );
+    } else {
+      exitCode = 1;
+      const prefix = args.tasks.length > 1 ? `Task ${JSON.stringify(args.tasks[index])}: ` : "";
+      process.stderr.write(`${prefix}${formatError(outcome.reason)}\n`);
+    }
+  });
+  return exitCode;
 }
 
 // Guards the entrypoint so `cli.ts` can be imported in a test (e.g. for `formatError`)
