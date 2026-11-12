@@ -1,7 +1,11 @@
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import type { Adapter } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
+import { readGlobalConfig, readRepoGates } from "./config";
+import type { GlobalConfig } from "./config";
 import { assertDockerReachable, ensureBaseImage, startSandbox } from "./docker";
+import { formatGateFeedback, resolveGates, runGates } from "./gates";
+import type { Gate } from "./gates";
 import {
   branchExists,
   checkoutNewBranch,
@@ -18,15 +22,44 @@ import {
 } from "./git";
 import { crisolHome, runDir, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 
+export type { Gate } from "./gates";
+
 export type RunStatus = "verified" | "unverified" | "not-converged";
 export type NetworkMode = "allowlist" | "learn" | "open";
 
 /** The default branch prefix (`crisol/<id>`) — named once so finding 1's upfront guard and `reserveRun` agree on exactly what they're protecting. */
 const DEFAULT_BRANCH_PREFIX = "crisol";
 
-export interface Gate {
-  cmd: string;
-  ok: boolean;
+/**
+ * Ceiling defaults: 5 iterations OR 60 minutes wall clock, whichever comes
+ * first. Both are overridable per Run (`RunOptions.maxIterations`/
+ * `ceilingMs`, also reachable from the CLI as `--max-iterations`/
+ * `--timeout`) and in `~/.crisol/config` (`max_iterations`/
+ * `timeout_minutes`) — `resolveCeiling` below resolves the three layers,
+ * independently per knob.
+ */
+const DEFAULT_MAX_ITERATIONS = 5;
+const DEFAULT_CEILING_MS = 60 * 60 * 1000;
+
+/**
+ * The ceiling's own ladder, same shape as `resolveGates`: a per-Run value
+ * (which is also where a CLI flag lands) beats `~/.crisol/config` beats the
+ * built-in default, resolved independently per knob — a Run can set one
+ * without touching the other. Kept as a pure function, separate from
+ * `run()`, so the precedence itself is a unit test and never needs a real
+ * Sandbox.
+ */
+export function resolveCeiling(
+  perRun: { maxIterations?: number; ceilingMs?: number },
+  globalConfig: GlobalConfig,
+  defaults: { maxIterations: number; ceilingMs: number },
+): { maxIterations: number; ceilingMs: number } {
+  const configCeilingMs =
+    globalConfig.timeoutMinutes !== undefined ? globalConfig.timeoutMinutes * 60 * 1000 : undefined;
+  return {
+    maxIterations: perRun.maxIterations ?? globalConfig.maxIterations ?? defaults.maxIterations,
+    ceilingMs: perRun.ceilingMs ?? configCeilingMs ?? defaults.ceilingMs,
+  };
 }
 
 export interface Blocked {
@@ -36,9 +69,11 @@ export interface Blocked {
 
 /**
  * The stable public shape (spec, "Input and output" q9) — fields are only
- * ever added, never renamed or removed, within 0.x. Ticket 01 only ever
- * produces `status: "unverified"` (no Gates exist yet), so `reason`
- * (meaningful only for `not-converged`) is optional and never set here.
+ * ever added, never renamed or removed, within 0.x. `status` is
+ * `"unverified"` only when no Gate exists anywhere in the ladder (the
+ * "none" rung); `"verified"` and `"not-converged"` are driven by
+ * `converge`'s Gate loop in `run()` below, and `reason` is set only for
+ * the latter.
  */
 export interface RunResult {
   run: string;
@@ -73,6 +108,12 @@ export interface RunOptions {
    * practical in a test; this is the same pattern as `generateRunId`.
    */
   ensureImage?: () => Promise<string>;
+  /** `--gate` (repeatable) — the strongest rung of the Gate ladder; beats the repo's own `.crisol/config.toml` `gates = […]`. Absent or empty falls through to the repo rung. */
+  gates?: readonly string[];
+  /** Per-Run override of the iteration ceiling (default 5) — also where `--max-iterations` lands; beats `~/.crisol/config`'s `max_iterations`, which beats the default. Also the test seam for the "never converge" and ceiling scenarios, since a real 60-minute wall clock would make those impractical to run for real. */
+  maxIterations?: number;
+  /** Per-Run override of the wall-clock ceiling, in ms (default 60 minutes) — also where `--timeout` (given in minutes) lands, converted to ms. Same ladder and same test-seam reasoning as `maxIterations`. */
+  ceilingMs?: number;
 }
 
 /**
@@ -233,10 +274,15 @@ function assertBranchAvailable(hostRepoPath: string, name: string): void {
 }
 
 /**
- * The thinnest Run end to end (ticket 01): Clone the host repo, cut a
- * branch, bind-mount the Clone into a Sandbox, let the Adapter work and
- * commit, Fetch-back, report. No Gates exist yet, so Crisol never loops —
- * `status` is always `"unverified"`.
+ * The Run, end to end: Clone the host repo, cut a branch, bind-mount the
+ * Clone into a Sandbox, let the Adapter work, then let Crisol — never the
+ * agent — decide done: the loop below runs every declared Gate, resumes
+ * the SAME session with the failing command and its output on red, and
+ * repeats until every Gate is green (`"verified"`) or the ceiling is hit
+ * first (`"not-converged"`, `reason: "ceiling"`). With no Gate declared
+ * anywhere in the ladder, the agent's own completion report stands in
+ * (`"unverified"`) and the loop never spends a second iteration. Finally,
+ * Fetch-back — never skipped, whatever `status` landed on.
  */
 export async function run(options: RunOptions): Promise<RunResult> {
   const home = options.home ?? crisolHome();
@@ -261,6 +307,16 @@ export async function run(options: RunOptions): Promise<RunResult> {
   } else {
     assertDefaultPrefixAvailable(hostRepoPath); // finding 1 (round-3 review, CRITICAL)
   }
+
+  // Gate ladder: --gate beats the repo's own .crisol/config.toml beats
+  // none. A read-only pre-flight check, grouped here with every other one,
+  // before Docker or any side effect.
+  const gates = resolveGates(options.gates, readRepoGates(hostRepoPath));
+  const { maxIterations, ceilingMs } = resolveCeiling(
+    { maxIterations: options.maxIterations, ceilingMs: options.ceilingMs },
+    readGlobalConfig(home),
+    { maxIterations: DEFAULT_MAX_ITERATIONS, ceilingMs: DEFAULT_CEILING_MS },
+  );
 
   assertDockerReachable();
 
@@ -288,6 +344,9 @@ export async function run(options: RunOptions): Promise<RunResult> {
   );
 
   let iterations = 0;
+  let status: RunStatus = "unverified";
+  let reason: string | undefined;
+  let gateResults: Gate[] = [];
   let primaryError: unknown;
   let fetchBackError: unknown;
   // Finding 2 (round-3 review, CRITICAL): SIGINT/SIGTERM must cover the
@@ -365,9 +424,58 @@ export async function run(options: RunOptions): Promise<RunResult> {
         await Promise.race([
           (async () => {
             await adapter.launch(ctx);
-            iterations += 1;
-            const done = await adapter.reportCompletion(ctx);
-            appendLog(logPath, `adapter reported completion=${done} after ${iterations} iteration(s)`);
+            iterations = 1;
+            const startedAt = Date.now();
+
+            // Converge: Crisol, not the agent, decides done. Loop Gate
+            // runs, resuming with the failing command and output on red,
+            // until every Gate is green or the ceiling hits first. A Run
+            // with no Gate anywhere in the ladder never spends a second
+            // iteration — the agent's own completion report is the
+            // done-signal (`"unverified"`).
+            while (true) {
+              const completed = await adapter.reportCompletion(ctx);
+              appendLog(
+                logPath,
+                `adapter reported completion=${completed} after ${iterations} iteration(s)`,
+              );
+
+              if (gates.length === 0) {
+                status = "unverified";
+                gateResults = [];
+                break;
+              }
+
+              const { results, firstFailure } = await runGates(sandbox, gates);
+              gateResults = results;
+              appendLog(
+                logPath,
+                `gates (iteration ${iterations}): ${results
+                  .map((gate) => `${gate.cmd} => ${gate.ok ? "ok" : "FAIL"}`)
+                  .join("; ")}`,
+              );
+
+              if (firstFailure === undefined) {
+                status = "verified";
+                break;
+              }
+
+              const elapsedMs = Date.now() - startedAt;
+              if (iterations >= maxIterations || elapsedMs >= ceilingMs) {
+                status = "not-converged";
+                reason = "ceiling";
+                appendLog(
+                  logPath,
+                  `ceiling reached at iteration ${iterations} (elapsed ${elapsedMs}ms); ` +
+                    `last failing Gate "${firstFailure.cmd}": ${firstFailure.output}`,
+                );
+                break;
+              }
+
+              appendLog(logPath, `resuming with feedback for failing Gate "${firstFailure.cmd}"`);
+              await adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure));
+              iterations += 1;
+            }
           })(),
           interrupted,
         ]);
@@ -431,13 +539,16 @@ export async function run(options: RunOptions): Promise<RunResult> {
     run: id,
     branch,
     base,
-    status: "unverified", // no Gates yet — see docs/adr/0002-...
+    status,
     iterations,
-    gates: [],
+    gates: gateResults,
     network: "open", // no Allowlist wall yet — see docs/adr/0003-...
     blocked: [],
     warnings: [],
   };
+  if (reason !== undefined) {
+    result.reason = reason;
+  }
 
   writeFileSync(runResultPath(id, home), JSON.stringify(result, null, 2));
   appendLog(logPath, `result written: ${JSON.stringify(result)}`);
