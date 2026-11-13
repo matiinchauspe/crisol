@@ -72,6 +72,14 @@ export class DarwinFlockSlotLock implements SlotLock {
   }
 }
 
+/**
+ * A Run lock is the Slot's primitive on the Run's own dir. The Slot cannot prove a Run alive:
+ * once a Run dies, a later Run may take the same Slot.
+ */
+export function tryLockRun(path: string, lock: SlotLock = new DarwinFlockSlotLock()): HeldLock | undefined {
+  return lock.tryLock(path);
+}
+
 export interface Slot {
   /** 1-based: `<index>.lock` under `~/.crisol/slots/`. */
   readonly index: number;

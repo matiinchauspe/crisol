@@ -40,6 +40,11 @@ export function runLogPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "log");
 }
 
+/** Held by a live Run for its whole life; `crisol recover` reads a Run it can lock as dead. */
+export function runLockPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "lock");
+}
+
 export function runResultPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "result.json");
 }

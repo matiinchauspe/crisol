@@ -2,7 +2,10 @@
 import { ClaudeCodeAdapter } from "./adapters/claude-code";
 import { runAuth } from "./auth";
 import { parsePositiveInteger } from "./config";
+import { crisolHome } from "./paths";
 import { assertSupportedPlatform } from "./platform";
+import { recover } from "./recover";
+import type { RecoverOutcome } from "./recover";
 import { run, runFanOut } from "./run";
 import type { RunOptions, RunResult } from "./run";
 import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
@@ -13,6 +16,8 @@ const USAGE =
 
 const AUTH_USAGE = "Usage: crisol auth";
 
+const RECOVER_USAGE = "Usage: crisol recover";
+
 const ADAPTER_NAMES = ["fake", "claude-code"] as const;
 type AdapterName = (typeof ADAPTER_NAMES)[number];
 
@@ -22,16 +27,13 @@ interface ParsedRunArgs {
   json: boolean;
   base?: string;
   name?: string;
-  /** `--gate`, repeatable — the Gate ladder's strongest rung. */
   gates: string[];
   maxIterations?: number;
-  /** Minutes; converted to ms for `RunOptions.ceilingMs`. */
   timeoutMinutes?: number;
-  /** `fake` (default — the suite's own scripted stand-in) or `claude-code` (the real Adapter, for a real Run). */
   adapterName: AdapterName;
 }
 
-/** A missing value, or one that looks like another flag, is a usage error — never silently treated as "no value given" (which would let `--base --json` quietly run with no base). */
+/** A value that looks like another flag is a usage error, or `--base --json` would quietly run with no base. */
 function readFlagValue(argv: string[], index: number, flag: string): string {
   const value = argv[index];
   if (value === undefined || value.startsWith("--")) {
@@ -40,7 +42,6 @@ function readFlagValue(argv: string[], index: number, flag: string): string {
   return value;
 }
 
-/** Same guard as `readFlagValue`, plus a positive-integer check — never silently falls back on an unparseable value. */
 function readIntFlagValue(argv: string[], index: number, flag: string): number {
   const raw = readFlagValue(argv, index, flag);
   const value = parsePositiveInteger(raw);
@@ -50,7 +51,6 @@ function readIntFlagValue(argv: string[], index: number, flag: string): number {
   return value;
 }
 
-/** Same guard as `readFlagValue`, plus an enum check — never silently falls back on an unrecognised name. */
 function readAdapterFlagValue(argv: string[], index: number): AdapterName {
   const raw = readFlagValue(argv, index, "--adapter");
   if (!(ADAPTER_NAMES as readonly string[]).includes(raw)) {
@@ -108,11 +108,7 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
   return { tasks, json, base, name, gates, maxIterations, timeoutMinutes, adapterName };
 }
 
-/**
- * An `AggregateError`'s outer `.message` alone drops its underlying causes;
- * this surfaces them. Exported so it can be unit-tested without spawning a
- * real CLI process.
- */
+/** An `AggregateError`'s own `.message` drops its causes. */
 export function formatError(error: unknown): string {
   if (error instanceof AggregateError) {
     const causes = error.errors
@@ -123,7 +119,7 @@ export function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Argument validation runs BEFORE `runAuth`, so a usage error never reaches the real `claude setup-token`. */
+/** Arguments are checked first, so a usage error never reaches the real `claude setup-token`. */
 async function runAuthCommand(rest: string[]): Promise<number> {
   if (rest.length > 0) {
     process.stderr.write(`Unexpected argument: ${rest[0]}\n${AUTH_USAGE}\n`);
@@ -139,6 +135,45 @@ async function runAuthCommand(rest: string[]): Promise<number> {
   }
 }
 
+function formatOutcome(outcome: RecoverOutcome): string {
+  switch (outcome.kind) {
+    case "recovered":
+      return `Run ${outcome.run}: recovered ${outcome.branch} into ${outcome.host} at ${outcome.sha.slice(0, 7)}.`;
+    case "live":
+      return `Run ${outcome.run}: live, left alone.`;
+    case "skipped":
+      return `Run ${outcome.run}: skipped, ${outcome.why}.`;
+    case "failed":
+      return `Run ${outcome.run}: FAILED, ${outcome.error}`;
+    case "up-to-date":
+      return `Run ${outcome.run}: up to date.`;
+  }
+}
+
+async function runRecoverCommand(rest: string[]): Promise<number> {
+  if (rest.length > 0) {
+    process.stderr.write(`Unexpected argument: ${rest[0]}\n${RECOVER_USAGE}\n`);
+    return 1;
+  }
+  const report = await recover(crisolHome());
+  if (report.dockerWarning) process.stderr.write(`${report.dockerWarning}\n`);
+  const shown = report.outcomes.filter((outcome) => outcome.kind !== "up-to-date");
+  if (shown.length === 0) {
+    console.log("Nothing to recover.");
+    return 0;
+  }
+  let exitCode = 0;
+  for (const outcome of shown) {
+    if (outcome.kind === "failed") {
+      exitCode = 1;
+      process.stderr.write(`${formatOutcome(outcome)}\n`);
+    } else {
+      console.log(formatOutcome(outcome));
+    }
+  }
+  return exitCode;
+}
+
 async function main(argv: string[]): Promise<number> {
   assertSupportedPlatform();
 
@@ -146,8 +181,11 @@ async function main(argv: string[]): Promise<number> {
   if (command === "auth") {
     return runAuthCommand(rest);
   }
+  if (command === "recover") {
+    return runRecoverCommand(rest);
+  }
   if (command !== "run") {
-    process.stderr.write(`${USAGE}\n${AUTH_USAGE}\n`);
+    process.stderr.write(`${USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n`);
     return 1;
   }
 
@@ -159,11 +197,11 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
-  // Stops Runs still queued for a Slot; Runs already holding one stop through their own handlers.
+  // Stops Runs still queued for a Slot, and is also how a Run learns of a signal that landed
+  // as it left the queue, before its own handlers were armed.
   const interrupt = new AbortController();
-  const onSignal = () => interrupt.abort();
-  process.on("SIGINT", onSignal);
-  process.on("SIGTERM", onSignal);
+  const onSignal = (signal: NodeJS.Signals) => interrupt.abort(signal);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, onSignal);
 
   const options: Omit<RunOptions, "task"> = {
     cwd: process.cwd(),
@@ -172,10 +210,10 @@ async function main(argv: string[]): Promise<number> {
     gates: args.gates,
     maxIterations: args.maxIterations,
     ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
-    // `undefined` is `run()`'s own default, the fake Adapter.
     adapter: args.adapterName === "claude-code" ? new ClaudeCodeAdapter() : undefined,
     onSlotWait: (maxParallel) =>
       process.stderr.write(`Waiting for a free Slot (max_parallel = ${maxParallel})…\n`),
+    onWarning: (warning) => process.stderr.write(`Warning: ${warning}\n`),
     signal: interrupt.signal,
   };
 
@@ -208,8 +246,7 @@ async function main(argv: string[]): Promise<number> {
   return exitCode;
 }
 
-// Guards the entrypoint so `cli.ts` can be imported in a test (e.g. for `formatError`)
-// without running `main()` against the test runner's argv and exiting the process.
+// So a test can import `formatError` without running `main()` against the runner's argv.
 if (import.meta.main) {
   const exitCode = await main(process.argv.slice(2));
   process.exit(exitCode);

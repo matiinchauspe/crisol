@@ -1,9 +1,10 @@
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import type { Adapter } from "./adapter";
+import type { Adapter, AdapterContext } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
 import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
-import { assertDockerReachable, ensureBaseImage, startSandbox } from "./docker";
+import { assertDockerReachable, ensureBaseImage, removeRunSandboxes, startSandbox } from "./docker";
+import type { Sandbox } from "./docker";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
 import type { Gate } from "./gates";
 import {
@@ -21,20 +22,19 @@ import {
   scanCommitsForWarnings,
   tagExists,
 } from "./git";
-import { crisolHome, runDir, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
+import { crisolHome, runDir, runLockPath, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import { KeychainSecretStore } from "./secret-store";
 import type { SecretStore } from "./secret-store";
-import { acquireSlot } from "./slots";
+import { acquireSlot, tryLockRun } from "./slots";
+import type { HeldLock } from "./slots";
 
 export type { Gate } from "./gates";
 
 export type RunStatus = "verified" | "unverified" | "not-converged";
 export type NetworkMode = "allowlist" | "learn" | "open";
 
-/** Named once so the upfront guard and `reserveRun` agree on exactly what they're protecting. */
 const DEFAULT_BRANCH_PREFIX = "crisol";
 
-/** 5 iterations OR 60 minutes, whichever comes first — see `resolveCeiling` for the override ladder. */
 const DEFAULT_MAX_ITERATIONS = 5;
 const DEFAULT_CEILING_MS = 60 * 60 * 1000;
 
@@ -44,11 +44,7 @@ export function resolveMaxParallel(globalConfig: GlobalConfig): number {
   return globalConfig.maxParallel ?? DEFAULT_MAX_PARALLEL;
 }
 
-/**
- * Same ladder shape as `resolveGates`: per-Run beats `~/.crisol/config` beats the
- * built-in default, resolved independently per knob. Kept as a pure function so the
- * precedence itself is a unit test and never needs a real Sandbox.
- */
+/** Per Run beats `~/.crisol/config` beats the default, each knob on its own. */
 export function resolveCeiling(
   perRun: { maxIterations?: number; ceilingMs?: number },
   globalConfig: GlobalConfig,
@@ -68,10 +64,8 @@ export interface Blocked {
 }
 
 /**
- * Fields are only ever added, never renamed or removed, within 0.x. `status` is
- * `"unverified"` only when no Gate exists anywhere in the ladder; `"verified"` and
- * `"not-converged"` are driven by the Gate loop in `run()` below, and `reason` is set
- * only for the latter.
+ * Fields are only ever added, never renamed or removed, within 0.x. `reason` is set only for
+ * `not-converged`.
  */
 export interface RunResult {
   run: string;
@@ -84,6 +78,14 @@ export interface RunResult {
   network: NetworkMode;
   blocked: Blocked[];
   warnings: string[];
+  /** Whether Fetch-back brought the branch into the host repo. `false` leaves it to `crisol recover`. */
+  fetchBack: boolean;
+}
+
+/** What the Run lock file holds, for `crisol recover` to find a dead Run's branch and host repo. */
+export interface RunLockRecord {
+  host: string;
+  branch: string;
 }
 
 export interface RunOptions {
@@ -94,37 +96,32 @@ export interface RunOptions {
   /** Pins the commit `base` names, so a fan-out cuts every Run from one commit even if the ref moves meanwhile. */
   baseSha?: string;
   name?: string;
-  /** Overrides `crisolHome()` — the test seam (each test gets its own temp CRISOL_HOME). */
+  /** Overrides `crisolHome()`. */
   home?: string;
-  /** Overrides the default `FakeAdapter` — the test seam for a scripted scenario, or the CLI's own way to select `ClaudeCodeAdapter` for a real Run. */
+  /** Defaults to `FakeAdapter`. */
   adapter?: Adapter;
-  /** Overrides the real id generator — the test seam for forcing a run-id collision. */
+  /** Test seam: forces a run-id collision. */
   generateRunId?: () => string;
-  /**
-   * Overrides `ensureBaseImage` — the test seam for forcing an image-resolution failure.
-   * Forcing a REAL `docker build` to fail deterministically isn't practical in a test;
-   * same pattern as `generateRunId`.
-   */
+  /** Test seam: a real `docker build` cannot be made to fail on demand. */
   ensureImage?: () => Promise<string>;
-  /** `--gate` — the strongest rung of the Gate ladder; absent or empty falls through to the repo rung. */
+  /** `--gate`; absent or empty falls through to the repo's Gates. */
   gates?: readonly string[];
-  /** Default 5; the test seam for "never converge" and ceiling scenarios, where small numbers keep tests fast. */
   maxIterations?: number;
-  /** Default 60 minutes, in ms. Same test-seam reasoning as `maxIterations` — a real wall clock would make ceiling tests impractical. */
+  /** In ms. */
   ceilingMs?: number;
-  /** Overrides the default `KeychainSecretStore` — the test seam, since a test must never touch the real login Keychain. */
+  /** Defaults to the login Keychain, which a test must never touch. */
   secretStore?: SecretStore;
   /** Called once if every Slot is taken and the Run starts waiting for one. */
   onSlotWait?: (maxParallel: number) => void;
-  /** Aborts a Run still waiting for a Slot; a Run already holding one stops through SIGINT/SIGTERM instead. */
+  /** Called with each warning the human must act on now, such as a Sandbox left running. */
+  onWarning?: (warning: string) => void;
+  /**
+   * Aborts a Run still waiting for a Slot. A Run past its Slot stops on its own signal handlers,
+   * and treats a signal already aborted, with the signal's name as `reason`, as one received.
+   */
   signal?: AbortSignal;
 }
 
-/**
- * 8 lowercase hex chars. Collisions are still possible, just astronomically unlikely
- * at this length — `reserveRun` below is what actually makes a collision SAFE, not
- * this function's output space.
- */
 function generateRunId(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 8);
 }
@@ -133,22 +130,36 @@ function appendLog(logPath: string, line: string): void {
   appendFileSync(logPath, `[${new Date().toISOString()}] ${line}\n`);
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function isEexist(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: string }).code === "EEXIST";
 }
 
+interface Reservation {
+  id: string;
+  branch: string;
+  lock: HeldLock;
+}
+
 /**
- * Reserves a Run id AND its directory atomically enough to matter: `mkdir` without
- * `recursive` so an existing dir throws EEXIST instead of being silently reused (and
- * truncated) — retried with a fresh id on collision, up to `maxAttempts`. A colliding
- * DEFAULT branch (`crisol/<id>`, no explicit `--name`) also forces a retry; an explicit
- * `--name` was already validated once by the caller.
- *
- * The retry checks the SAME three collisions `assertBranchAvailable` runs for an
- * explicit `--name` (branch, tag, D/F conflict), not just `branchExists` alone. The
- * id-INDEPENDENT case — a plain branch named "crisol" blocking every possible
- * `crisol/<id>` — is NOT handled here, since no retry could ever escape it; see
- * `assertDefaultPrefixAvailable`, called once before this loop starts.
+ * The record is written only once the lock is held, and `crisol recover` skips a lock with no
+ * record, so recover never takes the lock of a Run still being reserved.
+ */
+function lockRun(id: string, home: string, record: RunLockRecord): HeldLock {
+  const lockPath = runLockPath(id, home);
+  const lock = tryLockRun(lockPath);
+  if (!lock) throw new Error(`Run ${id}'s lock is already held by another process.`);
+  writeFileSync(lockPath, JSON.stringify(record));
+  return lock;
+}
+
+/**
+ * `mkdir` without `recursive`, so an existing Run dir is never reused and truncated; a collision
+ * retries with a fresh id, as does a colliding default branch. A plain branch named `crisol`
+ * collides with every id, so `assertDefaultPrefixAvailable` refuses it before this loop.
  */
 function reserveRun(
   hostRepoPath: string,
@@ -156,7 +167,7 @@ function reserveRun(
   explicitName: string | undefined,
   generateId: () => string,
   maxAttempts = 20,
-): { id: string; branch: string } {
+): Reservation {
   mkdirSync(runsRoot(home), { recursive: true });
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const id = generateId();
@@ -167,26 +178,19 @@ function reserveRun(
         tagExists(hostRepoPath, branch) ||
         hasPrefixCollision(hostRepoPath, branch))
     ) {
-      continue; // an extremely rare default-branch collision — try another id
+      continue;
     }
     try {
       mkdirSync(runDir(id, home));
-      return { id, branch };
     } catch (error) {
       if (!isEexist(error)) throw error;
-      // run-dir collision on this id — try another, never reuse this one.
+      continue;
     }
+    return { id, branch, lock: lockRun(id, home, { host: hostRepoPath, branch }) };
   }
   throw new Error(`Could not allocate a unique run id after ${maxAttempts} attempts.`);
 }
 
-/**
- * The id-INDEPENDENT case `reserveRun`'s own retry loop can never escape: a plain
- * branch literally named "crisol" collides with the directory/file shape of EVERY
- * possible `crisol/<id>` default branch, so every retry attempt fails the same way.
- * Checked here, before any side effect, with a plain message naming the real cause
- * instead of letting the loop exhaust `maxAttempts` on a cryptic one.
- */
 function assertDefaultPrefixAvailable(hostRepoPath: string): void {
   if (branchExists(hostRepoPath, DEFAULT_BRANCH_PREFIX)) {
     throw new Error(
@@ -197,10 +201,7 @@ function assertDefaultPrefixAvailable(hostRepoPath: string): void {
   }
 }
 
-/**
- * `resolveBaseSha` only proves `sha` EXISTS; an unreachable one would otherwise fail deep
- * inside `checkoutNewBranch` with git's misleading "is not a commit".
- */
+/** Without it, an unreachable sha fails deep inside `checkoutNewBranch` with git's misleading "is not a commit". */
 function assertBaseReachable(hostRepoPath: string, baseRef: string, baseSha: string): void {
   if (!isReachableFromClonedRefs(hostRepoPath, baseSha)) {
     throw new Error(
@@ -212,12 +213,7 @@ function assertBaseReachable(hostRepoPath: string, baseRef: string, baseSha: str
   }
 }
 
-/**
- * All checks run before any side effect. A name starting with `refs/` would
- * double-qualify once `fetchBack` prefixes `refs/heads/` onto it; the tag-ambiguity
- * and directory/file-collision checks are refused outright here too, rather than
- * relying solely on `fetchBack`'s own fully-qualified refspec to save them later.
- */
+/** A `refs/` name would be double-qualified once Fetch-back prefixes `refs/heads/`. */
 function assertBranchAvailable(hostRepoPath: string, name: string): void {
   if (!isValidBranchName(name)) {
     throw new Error(`"${name}" is not a valid git branch name.`);
@@ -243,7 +239,6 @@ function assertBranchAvailable(hostRepoPath: string, name: string): void {
   }
 }
 
-/** A repo-declared secret's value comes from the host's own env, never the Keychain — checked before any side effect, naming whatever is missing. */
 function assertDeclaredSecretsPresent(names: readonly string[]): void {
   const missing = names.filter((name) => process.env[name] === undefined);
   if (missing.length > 0) {
@@ -254,7 +249,6 @@ function assertDeclaredSecretsPresent(names: readonly string[]): void {
   }
 }
 
-/** An Adapter-declared secret's value comes from `SecretStore`, keyed by that same name — never a special case for one literal name. Checked before any side effect; a name `crisol auth` never populated fails the Run, naming it. */
 function resolveAdapterSecretValues(
   secretStore: SecretStore,
   names: readonly string[],
@@ -278,12 +272,95 @@ function resolveAdapterSecretValues(
   return values;
 }
 
+const INTERRUPTING_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+
+interface Interruption {
+  /** The first signal received, if any. */
+  readonly by: string | undefined;
+  /** Rejects on the first signal. */
+  readonly rejected: Promise<never>;
+  throwIfInterrupted(): void;
+  disarm(): void;
+}
+
+function interruptedError(by: string): Error {
+  return new Error(`Run interrupted by ${by}`);
+}
+
 /**
- * Crisol, never the agent, decides done: the loop below runs every declared Gate,
- * resumes the SAME session with the failing command on red, and repeats until every
- * Gate is green or the ceiling hits first. With no Gate anywhere in the ladder, the
- * agent's own completion report stands in. Fetch-back runs always, whatever `status`
- * landed on.
+ * Armed as soon as the Run has a dir, and held through teardown and Fetch-back. A later signal
+ * is logged and otherwise ignored: Crisol never abandons a teardown half way. SIGKILL remains
+ * for that, and `crisol recover` for what it leaves behind.
+ */
+function armInterruption(logPath: string, alreadyAborted: AbortSignal | undefined): Interruption {
+  let by: string | undefined;
+  let reject!: (error: Error) => void;
+  const rejected = new Promise<never>((_, rejectWith) => {
+    reject = rejectWith;
+  });
+  // A signal can land before anything races this promise.
+  rejected.catch(() => {});
+
+  const onSignal = (signal: string) => {
+    appendLog(logPath, `received ${signal}; tearing the Sandbox down, Fetch-back still runs`);
+    if (by !== undefined) return;
+    by = signal;
+    reject(interruptedError(signal));
+  };
+  for (const signal of INTERRUPTING_SIGNALS) process.on(signal, onSignal);
+  // The signal reached the caller's handler while this Run was leaving the Slot queue.
+  if (alreadyAborted?.aborted) {
+    onSignal(typeof alreadyAborted.reason === "string" ? alreadyAborted.reason : "abort");
+  }
+
+  return {
+    get by() {
+      return by;
+    },
+    rejected,
+    throwIfInterrupted() {
+      if (by !== undefined) throw interruptedError(by);
+    },
+    disarm() {
+      for (const signal of INTERRUPTING_SIGNALS) process.off(signal, onSignal);
+    },
+  };
+}
+
+/** A signal that lands during a synchronous git call reaches its handler only once the event loop turns. */
+function letSignalsLand(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Removes the Sandbox, retrying by label when its handle fails or never came back. Never
+ * throws; returns a warning when the container is still there.
+ */
+async function tearDown(sandbox: Sandbox | undefined, id: string, logPath: string): Promise<string | undefined> {
+  if (sandbox) {
+    const stopped = await sandbox.stop();
+    if (stopped.ok) {
+      appendLog(logPath, `sandbox ${sandbox.containerId} stopped`);
+      return undefined;
+    }
+    appendLog(logPath, `sandbox ${sandbox.containerId} FAILED to stop: ${stopped.stderr}; retrying by label`);
+  }
+  const removed = await removeRunSandboxes(id);
+  if (removed.ok) {
+    if (removed.removed > 0) appendLog(logPath, `sandbox removed by label crisol.run=${id}`);
+    return undefined;
+  }
+  appendLog(logPath, `sandbox removal by label crisol.run=${id} FAILED: ${removed.stderr}`);
+  return (
+    `Sandbox crisol-${id} could not be removed (${removed.stderr || "docker failed"}); ` +
+    `remove it with \`docker rm -f crisol-${id}\`.`
+  );
+}
+
+/**
+ * Crisol, never the agent, decides done: every declared Gate runs, a red one resumes the same
+ * session with its failure, until all are green or the ceiling hits. With no Gate anywhere, the
+ * agent's completion report stands in. Fetch-back runs on every exit, whatever `status` is.
  */
 export async function run(options: RunOptions): Promise<RunResult> {
   const home = options.home ?? crisolHome();
@@ -328,11 +405,10 @@ export async function run(options: RunOptions): Promise<RunResult> {
   const secretEnvNames = Array.from(new Set([...preStart.envNames, ...repoSecretNames]));
 
   const ensureImage = options.ensureImage ?? preStart.ensureImage ?? ensureBaseImage;
-  // Resolved BEFORE any side effect — an offline first Run must throw here, never
-  // leave a Clone+cut branch behind.
+  // An offline first Run must fail here, never after leaving a Clone and a branch behind.
   const image = await ensureImage();
 
-  // Taken before the Run reserves anything, so a queued Run leaves no trace on disk.
+  // Before the Run reserves anything, so a queued Run leaves no trace on disk.
   const slot = await acquireSlot({
     home,
     maxParallel,
@@ -340,19 +416,19 @@ export async function run(options: RunOptions): Promise<RunResult> {
     signal: options.signal,
   });
 
-  let id: string;
-  let branch: string;
-  let logPath: string;
+  let reservation: Reservation | undefined;
   try {
-    const generateId = options.generateRunId ?? generateRunId;
-    ({ id, branch } = reserveRun(hostRepoPath, home, options.name, generateId));
-    logPath = runLogPath(id, home);
-    writeFileSync(logPath, "");
+    reservation = reserveRun(hostRepoPath, home, options.name, options.generateRunId ?? generateRunId);
+    writeFileSync(runLogPath(reservation.id, home), "");
   } catch (error) {
+    reservation?.lock.release();
     slot.release();
     throw error;
   }
+  const { id, branch, lock } = reservation;
+  const logPath = runLogPath(id, home);
   const clonePath = runRepoPath(id, home);
+  const interruption = armInterruption(logPath, options.signal);
 
   appendLog(
     logPath,
@@ -364,25 +440,73 @@ export async function run(options: RunOptions): Promise<RunResult> {
   let status: RunStatus = "unverified";
   let reason: string | undefined;
   let gateResults: Gate[] = [];
-  let warnings: string[] = [];
+  const warnings: string[] = [];
   let primaryError: unknown;
   let fetchBackError: unknown;
-  /**
-   * Armed from the Sandbox start through teardown AND Fetch-back, so a Ctrl+C landing in
-   * either is never lost. A second signal is logged but a no-op — Crisol never force-exits
-   * mid-teardown; SIGKILL remains for that.
-   */
-  let interruptHandler: ((signal: NodeJS.Signals) => void) | undefined;
+  let resultError: unknown;
+  let fetchedBack = false;
+  let sandbox: Sandbox | undefined;
+
+  const converge = async (ctx: AdapterContext): Promise<void> => {
+    await adapter.launch(ctx);
+    iterations = 1;
+    const startedAt = Date.now();
+
+    while (true) {
+      // The race below has already moved on; this keeps an interrupted loop from resuming the agent.
+      interruption.throwIfInterrupted();
+      const completed = await adapter.reportCompletion(ctx);
+      appendLog(logPath, `adapter reported completion=${completed} after ${iterations} iteration(s)`);
+
+      if (gates.length === 0) {
+        status = "unverified";
+        gateResults = [];
+        return;
+      }
+
+      const { results, firstFailure } = await runGates(ctx.sandbox, gates);
+      interruption.throwIfInterrupted();
+      gateResults = results;
+      appendLog(
+        logPath,
+        `gates (iteration ${iterations}): ${results
+          .map((gate) => `${gate.cmd} => ${gate.ok ? "ok" : "FAIL"}`)
+          .join("; ")}`,
+      );
+
+      if (firstFailure === undefined) {
+        status = "verified";
+        return;
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      if (iterations >= maxIterations || elapsedMs >= ceilingMs) {
+        status = "not-converged";
+        reason = "ceiling";
+        appendLog(
+          logPath,
+          `ceiling reached at iteration ${iterations} (elapsed ${elapsedMs}ms); ` +
+            `last failing Gate "${firstFailure.cmd}": ${firstFailure.output}`,
+        );
+        return;
+      }
+
+      appendLog(logPath, `resuming with feedback for failing Gate "${firstFailure.cmd}"`);
+      await adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure));
+      iterations += 1;
+    }
+  };
 
   try {
     try {
-      // In the same try as every failure below, so a Clone/checkout failure is logged like
-      // any other and Fetch-back still gets its attempt.
+      // Made even when a signal already landed: an interrupted Run still leaves its branch.
       cloneLocal(hostRepoPath, clonePath);
       checkoutNewBranch(clonePath, branch, baseSha);
       appendLog(logPath, `clone ready at ${clonePath}, branch ${branch} cut from ${baseSha}`);
+      await letSignalsLand();
+      interruption.throwIfInterrupted();
 
-      const sandbox = await startSandbox({
+      sandbox = await startSandbox({
         image,
         mountPath: clonePath,
         env: {
@@ -401,159 +525,79 @@ export async function run(options: RunOptions): Promise<RunResult> {
         `sandbox ${sandbox.containerId} started from ${image}, mounts=${sandbox.mounts.join(",")}`,
       );
 
-      // Racing the Adapter's work against an "interrupted" promise, and letting the
-      // signal REJECT it, reuses the primaryError/finally machinery below exactly as an
-      // ordinary Adapter failure would — the Sandbox still gets torn down, and
-      // Fetch-back still runs.
-      let onInterrupt!: (signal: NodeJS.Signals) => void;
-      const interrupted = new Promise<never>((_, reject) => {
-        onInterrupt = (signal) => {
-          appendLog(logPath, `received ${signal}; tearing the Sandbox down, Fetch-back still runs`);
-          reject(new Error(`Run interrupted by ${signal}`));
-        };
-      });
-      process.on("SIGINT", onInterrupt);
-      process.on("SIGTERM", onInterrupt);
-      interruptHandler = onInterrupt; // removed once, in the outer `finally`
+      await Promise.race([
+        converge({ sandbox, repoPath: clonePath, task: options.task, instructions }),
+        interruption.rejected,
+      ]);
 
+      // Best-effort: a failed scan must not turn a converged Run into a failed one.
       try {
-        const ctx = { sandbox, repoPath: clonePath, task: options.task, instructions };
-        await Promise.race([
-          (async () => {
-            await adapter.launch(ctx);
-            iterations = 1;
-            const startedAt = Date.now();
-
-            while (true) {
-              const completed = await adapter.reportCompletion(ctx);
-              appendLog(
-                logPath,
-                `adapter reported completion=${completed} after ${iterations} iteration(s)`,
-              );
-
-              if (gates.length === 0) {
-                status = "unverified";
-                gateResults = [];
-                break;
-              }
-
-              const { results, firstFailure } = await runGates(sandbox, gates);
-              gateResults = results;
-              appendLog(
-                logPath,
-                `gates (iteration ${iterations}): ${results
-                  .map((gate) => `${gate.cmd} => ${gate.ok ? "ok" : "FAIL"}`)
-                  .join("; ")}`,
-              );
-
-              if (firstFailure === undefined) {
-                status = "verified";
-                break;
-              }
-
-              const elapsedMs = Date.now() - startedAt;
-              if (iterations >= maxIterations || elapsedMs >= ceilingMs) {
-                status = "not-converged";
-                reason = "ceiling";
-                appendLog(
-                  logPath,
-                  `ceiling reached at iteration ${iterations} (elapsed ${elapsedMs}ms); ` +
-                    `last failing Gate "${firstFailure.cmd}": ${firstFailure.output}`,
-                );
-                break;
-              }
-
-              appendLog(logPath, `resuming with feedback for failing Gate "${firstFailure.cmd}"`);
-              await adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure));
-              iterations += 1;
-            }
-          })(),
-          interrupted,
-        ]);
-
-        // Scan the branch's own commits for an AI attribution trailer or an unexpected
-        // author before Fetch-back — best-effort: a scan failure is logged, never thrown,
-        // so it can't turn an already-converged Run into a failure.
-        try {
-          warnings = scanCommitsForWarnings(clonePath, `${baseSha}..${branch}`, identity);
-        } catch (error) {
-          appendLog(
-            logPath,
-            `commit scan failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      } finally {
-        const stopResult = await sandbox.stop();
-        if (stopResult.ok) {
-          appendLog(logPath, `sandbox ${sandbox.containerId} stopped`);
-        } else {
-          appendLog(
-            logPath,
-            `sandbox ${sandbox.containerId} FAILED to stop: ${stopResult.stderr}`,
-          );
-        }
+        warnings.push(...scanCommitsForWarnings(clonePath, `${baseSha}..${branch}`, identity));
+      } catch (error) {
+        appendLog(logPath, `commit scan failed: ${errorMessage(error)}`);
       }
     } catch (error) {
       primaryError = error;
-      appendLog(
-        logPath,
-        `primary error: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      appendLog(logPath, `primary error: ${errorMessage(error)}`);
     }
 
-    // Fetch-back is never optional — it runs even when the step above failed, and its own
-    // failure is logged but never masks the primary error. Still inside the signal-covered
-    // window: `interruptHandler` is removed only once, after this attempt.
+    const teardownWarning = await tearDown(sandbox, id, logPath);
+    if (teardownWarning !== undefined) {
+      warnings.push(teardownWarning);
+      options.onWarning?.(teardownWarning);
+    }
+
     try {
-      fetchBack(hostRepoPath, clonePath, branch);
+      fetchBack(hostRepoPath, clonePath, branch, (signal) =>
+        appendLog(logPath, `fetch-back killed by ${signal}; retrying`),
+      );
+      fetchedBack = true;
       appendLog(logPath, `fetch-back complete: ${branch} now in ${hostRepoPath}`);
     } catch (error) {
       fetchBackError = error;
-      appendLog(
-        logPath,
-        `fetch-back failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      appendLog(logPath, `fetch-back failed: ${errorMessage(error)}`);
     }
+    await letSignalsLand();
+
+    if (primaryError !== undefined) {
+      status = "not-converged";
+      reason = interruption.by !== undefined ? `interrupted: ${interruption.by}` : `error: ${errorMessage(primaryError)}`;
+    }
+    const result: RunResult = {
+      run: id,
+      branch,
+      base,
+      status,
+      ...(reason !== undefined ? { reason } : {}),
+      iterations,
+      gates: gateResults,
+      network: "open", // no Allowlist wall yet
+      blocked: [],
+      warnings,
+      fetchBack: fetchedBack,
+    };
+
+    // Written on every exit, before the Run lock frees: recover and gc read it as the Run's last word.
+    try {
+      writeFileSync(runResultPath(id, home), JSON.stringify(result, null, 2));
+      appendLog(logPath, `result written: ${JSON.stringify(result)}`);
+    } catch (error) {
+      resultError = error;
+      appendLog(logPath, `result.json could not be written: ${errorMessage(error)}`);
+    }
+
+    const errors = [primaryError, fetchBackError].filter((error) => error !== undefined);
+    if (errors.length === 2) {
+      throw new AggregateError(errors, "Run failed and Fetch-back also failed");
+    }
+    if (errors.length === 1) throw errors[0];
+    if (resultError !== undefined) throw resultError;
+    return result;
   } finally {
-    if (interruptHandler) {
-      process.off("SIGINT", interruptHandler);
-      process.off("SIGTERM", interruptHandler);
-    }
+    interruption.disarm();
+    lock.release();
     slot.release();
   }
-
-  if (primaryError !== undefined && fetchBackError !== undefined) {
-    throw new AggregateError(
-      [primaryError, fetchBackError],
-      "Run failed and Fetch-back also failed",
-    );
-  }
-  if (primaryError !== undefined) {
-    throw primaryError;
-  }
-  if (fetchBackError !== undefined) {
-    throw fetchBackError;
-  }
-
-  const result: RunResult = {
-    run: id,
-    branch,
-    base,
-    status,
-    iterations,
-    gates: gateResults,
-    network: "open", // no Allowlist wall yet
-    blocked: [],
-    warnings,
-  };
-  if (reason !== undefined) {
-    result.reason = reason;
-  }
-
-  writeFileSync(runResultPath(id, home), JSON.stringify(result, null, 2));
-  appendLog(logPath, `result written: ${JSON.stringify(result)}`);
-
-  return result;
 }
 
 /**
