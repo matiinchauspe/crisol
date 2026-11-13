@@ -7,8 +7,14 @@ import path from "node:path";
  *   while it is in flight.
  * - `fail-once`: exit 1 the first time, run the real command afterwards.
  * - `fail-always`: exit 1 every time.
+ * - `pass-once`: run the real command the first time, exit 1 afterwards — passes `--detach`'s
+ *   pre-flight and fails its background process's.
  */
-export type WrapMode = { kind: "stall"; seconds: number } | { kind: "fail-once" } | { kind: "fail-always" };
+export type WrapMode =
+  | { kind: "stall"; seconds: number }
+  | { kind: "fail-once" }
+  | { kind: "fail-always" }
+  | { kind: "pass-once" };
 
 export interface WrapRule {
   tool: "git" | "docker";
@@ -33,6 +39,8 @@ function behaviour(mode: WrapMode, hitFile: string): string {
       return `if [ ! -s "${hitFile}" ]; then echo $$ >> "${hitFile}"; echo "wrapped failure" >&2; exit 1; fi`;
     case "fail-always":
       return `echo $$ >> "${hitFile}"; echo "wrapped failure" >&2; exit 1`;
+    case "pass-once":
+      return `if [ -s "${hitFile}" ]; then echo "wrapped failure" >&2; exit 1; fi; echo $$ >> "${hitFile}"; break`;
   }
 }
 

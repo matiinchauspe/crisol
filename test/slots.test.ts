@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { slotPath } from "../src/paths";
-import { acquireSlot } from "../src/slots";
+import { acquireSlot, probeRunLock, tryLockRun } from "../src/slots";
 import { createTempHome } from "./support/crisolHome";
 
 const HOLD_SLOT = path.join(import.meta.dir, "support", "holdSlot.ts");
@@ -122,4 +122,34 @@ describe("acquireSlot", () => {
       home.cleanup();
     }
   }, 15_000);
+});
+
+describe("probeRunLock", () => {
+  test("never creates a lock file that is not there", () => {
+    const home = createTempHome();
+    try {
+      const missing = path.join(home.path, "lock");
+      expect(probeRunLock(missing)).toBe("gone");
+      expect(existsSync(missing)).toBe(false);
+    } finally {
+      home.cleanup();
+    }
+  });
+
+  test("tells a held Run lock from a free one", () => {
+    const home = createTempHome();
+    try {
+      const lockPath = path.join(home.path, "lock");
+      writeFileSync(lockPath, "{}");
+      const held = tryLockRun(lockPath)!;
+      expect(probeRunLock(lockPath)).toBeUndefined();
+      held.release();
+      const probe = probeRunLock(lockPath);
+      expect(probe).not.toBe("gone");
+      expect(probe).toBeDefined();
+      (probe as { release(): void }).release();
+    } finally {
+      home.cleanup();
+    }
+  });
 });

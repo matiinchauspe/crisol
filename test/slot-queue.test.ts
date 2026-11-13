@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { runLogPath, runResultPath, runsRoot } from "../src/paths";
+import { runLogPath, runRepoPath, runResultPath, runsRoot } from "../src/paths";
 import type { RunResult } from "../src/run";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
@@ -64,7 +64,9 @@ describe("Slots across processes (max_parallel = 1)", () => {
 
       const second = startCli(["run", "second", "--json"], repo.path, home.path);
       await waitFor(() => second.stderr().includes("Waiting for a free Slot"));
-      expect(runIds(home.path)).toEqual([firstId!]);
+      // Reserved but queued: it has a run dir, and no Clone until it holds the Slot.
+      const queuedId = runIds(home.path).find((id) => id !== firstId)!;
+      expect(existsSync(runRepoPath(queuedId, home.path))).toBe(false);
 
       const firstDone = await first.finished();
       expect(firstDone.exitCode).toBe(0);
@@ -81,7 +83,7 @@ describe("Slots across processes (max_parallel = 1)", () => {
     }
   }, 120_000);
 
-  test("Ctrl+C on a queued Run stops it before it reserves anything", async () => {
+  test("Ctrl+C on a queued Run stops it, keeps its log and Run result, and cuts no branch", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
@@ -98,9 +100,24 @@ describe("Slots across processes (max_parallel = 1)", () => {
       const secondDone = await second.finished();
       expect(secondDone.exitCode).not.toBe(0);
       expect(secondDone.stderr).toContain("Interrupted while waiting for a Slot");
-      expect(runIds(home.path)).toEqual([firstId!]);
+      const secondId = runIds(home.path).find((id) => id !== firstId)!;
+      const secondResult = JSON.parse(readFileSync(runResultPath(secondId, home.path), "utf8")) as RunResult;
+      expect(secondResult.status).toBe("not-converged");
+      expect(secondResult.reason).toBe("interrupted: SIGINT");
+      expect(secondResult.fetchBack).toBe(false);
+      expect(readFileSync(runLogPath(secondId, home.path), "utf8")).toContain("ended before it held a Slot");
+      expect(existsSync(runRepoPath(secondId, home.path))).toBe(false);
+      const hostBranch = Bun.spawnSync(["git", "-C", repo.path, "branch", "--list", secondResult.branch], { stdout: "pipe" });
+      expect(hostBranch.stdout.toString().trim()).toBe("");
 
       expect((await first.finished()).exitCode).toBe(0);
+      // A Run that ended before its Clone has nothing to bring back, and recover does not name it.
+      const recovered = Bun.spawnSync(["bun", "run", CLI_ENTRY, "recover"], {
+        cwd: repo.path,
+        env: { ...process.env, CRISOL_HOME: home.path },
+        stdout: "pipe",
+      });
+      expect(recovered.stdout.toString().trim()).toBe("Nothing to recover.");
     } finally {
       home.cleanup();
       repo.cleanup();

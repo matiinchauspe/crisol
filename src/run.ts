@@ -1,5 +1,5 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import type { Adapter, AdapterContext } from "./adapter";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type { Adapter, AdapterContext, PreStartDeclaration } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
 import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
@@ -22,11 +22,12 @@ import {
   scanCommitsForWarnings,
   tagExists,
 } from "./git";
-import { crisolHome, runDir, runLockPath, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
+import type { GitIdentity } from "./git";
+import { crisolHome, runDir, runLockPath, runLogPath, runPidPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import { KeychainSecretStore } from "./secret-store";
 import type { SecretStore } from "./secret-store";
-import { acquireSlot, tryLockRun } from "./slots";
-import type { HeldLock } from "./slots";
+import { acquireSlot, adoptLock, tryLockRun } from "./slots";
+import type { HeldLock, Slot } from "./slots";
 
 export type { Gate } from "./gates";
 
@@ -78,7 +79,10 @@ export interface RunResult {
   network: NetworkMode;
   blocked: Blocked[];
   warnings: string[];
-  /** Whether Fetch-back brought the branch into the host repo. `false` leaves it to `crisol recover`. */
+  /**
+   * Whether Fetch-back brought the branch into the host repo. `false` leaves it to `crisol recover`
+   * when the Run made its Clone; a Run that ended before its Slot never cut a branch.
+   */
   fetchBack: boolean;
 }
 
@@ -120,6 +124,13 @@ export interface RunOptions {
    * and treats a signal already aborted, with the signal's name as `reason`, as one received.
    */
   signal?: AbortSignal;
+  /** Set in the process `crisol run --detach` started: the Run is already reserved, and its lock inherited. */
+  detached?: DetachedHandoff;
+}
+
+export interface DetachedHandoff {
+  run: string;
+  lockFd: number;
 }
 
 function generateRunId(): string {
@@ -141,6 +152,8 @@ function isEexist(error: unknown): boolean {
 interface Reservation {
   id: string;
   branch: string;
+  /** The host repo the branch is fetched back into. */
+  host: string;
   lock: HeldLock;
 }
 
@@ -186,7 +199,7 @@ function reserveRun(
       if (!isEexist(error)) throw error;
       continue;
     }
-    return { id, branch, lock: lockRun(id, home, { host: hostRepoPath, branch }) };
+    return { id, branch, host: hostRepoPath, lock: lockRun(id, home, { host: hostRepoPath, branch }) };
   }
   throw new Error(`Could not allocate a unique run id after ${maxAttempts} attempts.`);
 }
@@ -288,9 +301,9 @@ function interruptedError(by: string): Error {
 }
 
 /**
- * Armed as soon as the Run has a dir, and held through teardown and Fetch-back. A later signal
- * is logged and otherwise ignored: Crisol never abandons a teardown half way. SIGKILL remains
- * for that, and `crisol recover` for what it leaves behind.
+ * Armed once the Run holds its Slot (until then the caller's `signal` stops it), and held through
+ * teardown and Fetch-back. A later signal is logged and otherwise ignored: Crisol never abandons
+ * a teardown half way. SIGKILL remains for that, and `crisol recover` for what it leaves behind.
  */
 function armInterruption(logPath: string, alreadyAborted: AbortSignal | undefined): Interruption {
   let by: string | undefined;
@@ -357,12 +370,25 @@ async function tearDown(sandbox: Sandbox | undefined, id: string, logPath: strin
   );
 }
 
-/**
- * Crisol, never the agent, decides done: every declared Gate runs, a red one resumes the same
- * session with its failure, until all are green or the ceiling hits. With no Gate anywhere, the
- * agent's completion report stands in. Fetch-back runs on every exit, whatever `status` is.
- */
-export async function run(options: RunOptions): Promise<RunResult> {
+interface PreparedRun {
+  home: string;
+  hostRepoPath: string;
+  identity: GitIdentity;
+  instructions: string | undefined;
+  baseRef: string;
+  baseSha: string;
+  gates: readonly string[];
+  maxParallel: number;
+  maxIterations: number;
+  ceilingMs: number;
+  adapter: Adapter;
+  preStart: PreStartDeclaration;
+  adapterSecretValues: Record<string, string>;
+  secretEnvNames: string[];
+  image: string;
+}
+
+async function prepareRun(options: RunOptions): Promise<PreparedRun> {
   const home = options.home ?? crisolHome();
   const hostRepoPath = discoverGitRoot(options.cwd);
   if (!hostRepoPath) {
@@ -376,7 +402,6 @@ export async function run(options: RunOptions): Promise<RunResult> {
   const baseRef = options.base ?? currentRefName(hostRepoPath);
   const baseSha = options.baseSha ?? resolveBaseSha(hostRepoPath, baseRef);
   assertBaseReachable(hostRepoPath, baseRef, baseSha);
-  const base = `${baseRef}@${baseSha}`;
 
   if (options.name !== undefined) {
     assertBranchAvailable(hostRepoPath, options.name);
@@ -408,23 +433,205 @@ export async function run(options: RunOptions): Promise<RunResult> {
   // An offline first Run must fail here, never after leaving a Clone and a branch behind.
   const image = await ensureImage();
 
-  // Before the Run reserves anything, so a queued Run leaves no trace on disk.
-  const slot = await acquireSlot({
+  return {
     home,
+    hostRepoPath,
+    identity,
+    instructions,
+    baseRef,
+    baseSha,
+    gates,
     maxParallel,
-    onWait: () => options.onSlotWait?.(maxParallel),
-    signal: options.signal,
-  });
+    maxIterations,
+    ceilingMs,
+    adapter,
+    preStart,
+    adapterSecretValues,
+    secretEnvNames,
+    image,
+  };
+}
 
+function reserveFresh(prepared: PreparedRun, options: RunOptions): Reservation {
+  const { home, hostRepoPath } = prepared;
   let reservation: Reservation | undefined;
   try {
     reservation = reserveRun(hostRepoPath, home, options.name, options.generateRunId ?? generateRunId);
     writeFileSync(runLogPath(reservation.id, home), "");
   } catch (error) {
     reservation?.lock.release();
-    slot.release();
     throw error;
   }
+  appendLog(
+    runLogPath(reservation.id, home),
+    `run ${reservation.id} reserved: task=${JSON.stringify(options.task)} ` +
+      `base=${prepared.baseRef}@${prepared.baseSha} branch=${reservation.branch}`,
+  );
+  return reservation;
+}
+
+/** Before pre-flight, so the process that owns a detached Run holds it from its first step. */
+function adoptReservation(detached: DetachedHandoff, home: string): Reservation {
+  const lockPath = runLockPath(detached.run, home);
+  const lock = adoptLock(detached.lockFd, lockPath);
+  // The detaching process chose the branch and the host repo; the record is where it left them.
+  const record = JSON.parse(readFileSync(lockPath, "utf8")) as RunLockRecord;
+  return { id: detached.run, branch: record.branch, host: record.host, lock };
+}
+
+/** Only for a reservation whose id was never handed to anyone. */
+function discardReservation(reservation: Reservation, home: string): void {
+  rmSync(runDir(reservation.id, home), { recursive: true, force: true });
+  reservation.lock.release();
+}
+
+/**
+ * A Run that ends before it holds a Slot keeps its dir, log and a Run result, like any other Run:
+ * its id may already have been handed out, and only `crisol gc` deletes Run state. It never cut a
+ * branch, so there is nothing to fetch back. Never throws, so the error that ended the Run is the
+ * one its caller sees.
+ */
+function endUnstartedRun(
+  reservation: Reservation,
+  home: string,
+  base: string,
+  signal: AbortSignal | undefined,
+  error: unknown,
+): void {
+  const reason = signal?.aborted
+    ? `interrupted: ${typeof signal.reason === "string" ? signal.reason : "abort"}`
+    : `error: ${errorMessage(error)}`;
+  const result: RunResult = {
+    run: reservation.id,
+    branch: reservation.branch,
+    base,
+    status: "not-converged",
+    reason,
+    iterations: 0,
+    gates: [],
+    network: "open",
+    blocked: [],
+    warnings: [],
+    fetchBack: false,
+  };
+  const logPath = runLogPath(reservation.id, home);
+  try {
+    appendLog(logPath, `ended before it held a Slot (${reason}); no Clone, no branch`);
+    writeFileSync(runResultPath(reservation.id, home), JSON.stringify(result, null, 2));
+    appendLog(logPath, `result written: ${JSON.stringify(result)}`);
+  } catch (writeError) {
+    try {
+      appendLog(logPath, `result.json could not be written: ${errorMessage(writeError)}`);
+    } catch {}
+  } finally {
+    reservation.lock.release();
+  }
+}
+
+export interface DetachedRun {
+  id: string;
+  baseRef: string;
+  baseSha: string;
+  logPath: string;
+  pidPath: string;
+  /** The Run lock: pass `lock.fd` down, then release this process's copy. */
+  lock: HeldLock;
+  /** Removes the run dir, for a detach that could not start its process. */
+  discard(): void;
+  /** Writes the Run result and lets go, for a started process that died before taking over. */
+  end(error: unknown): void;
+}
+
+/** Pre-flight and reservation only, so the terminal still sees a bad base, name or Gate. */
+export async function reserveDetachedRun(options: RunOptions): Promise<DetachedRun> {
+  const prepared = await prepareRun(options);
+  if (options.signal?.aborted) throw interruptedBeforeReserving();
+  const reservation = reserveFresh(prepared, options);
+  const base = `${prepared.baseRef}@${prepared.baseSha}`;
+  return {
+    id: reservation.id,
+    baseRef: prepared.baseRef,
+    baseSha: prepared.baseSha,
+    logPath: runLogPath(reservation.id, prepared.home),
+    pidPath: runPidPath(reservation.id, prepared.home),
+    lock: reservation.lock,
+    discard: () => discardReservation(reservation, prepared.home),
+    end: (error) => endUnstartedRun(reservation, prepared.home, base, undefined, error),
+  };
+}
+
+function interruptedBeforeReserving(): Error {
+  return new Error("Interrupted before the Run was reserved; nothing was left behind.");
+}
+
+/**
+ * Crisol, never the agent, decides done: every declared Gate runs, a red one resumes the same
+ * session with its failure, until all are green or the ceiling hits. With no Gate anywhere, the
+ * agent's completion report stands in. Once the Run holds a Slot, Fetch-back runs on every exit,
+ * whatever `status` is.
+ */
+export async function run(options: RunOptions): Promise<RunResult> {
+  const home = options.home ?? crisolHome();
+  let reservation: Reservation;
+  let prepared: PreparedRun;
+  let base: string;
+  if (options.detached) {
+    reservation = adoptReservation(options.detached, home);
+    base = `${options.base}@${options.baseSha}`;
+    try {
+      writeFileSync(runPidPath(reservation.id, home), String(process.pid));
+      prepared = await prepareRun(options);
+      if (prepared.hostRepoPath !== reservation.host) {
+        throw new Error(`Run ${reservation.id} was reserved for ${reservation.host}, not ${prepared.hostRepoPath}.`);
+      }
+    } catch (error) {
+      endUnstartedRun(reservation, home, base, options.signal, error);
+      throw error;
+    }
+  } else {
+    prepared = await prepareRun(options);
+    await letSignalsLand();
+    // The user never saw an id yet, so a signal in pre-flight leaves nothing, as a failed check does.
+    if (options.signal?.aborted) throw interruptedBeforeReserving();
+    // Reserved before the Slot wait, so `crisol status` can show the Run as queued.
+    reservation = reserveFresh(prepared, options);
+    base = `${prepared.baseRef}@${prepared.baseSha}`;
+    try {
+      writeFileSync(runPidPath(reservation.id, home), String(process.pid));
+    } catch (error) {
+      endUnstartedRun(reservation, home, base, options.signal, error);
+      throw error;
+    }
+  }
+  const {
+    hostRepoPath,
+    identity,
+    instructions,
+    baseSha,
+    gates,
+    maxParallel,
+    maxIterations,
+    ceilingMs,
+    adapter,
+    preStart,
+    adapterSecretValues,
+    secretEnvNames,
+    image,
+  } = prepared;
+
+  let slot: Slot;
+  try {
+    slot = await acquireSlot({
+      home,
+      maxParallel,
+      onWait: () => options.onSlotWait?.(maxParallel),
+      signal: options.signal,
+    });
+  } catch (error) {
+    endUnstartedRun(reservation, home, base, options.signal, error);
+    throw error;
+  }
+
   const { id, branch, lock } = reservation;
   const logPath = runLogPath(id, home);
   const clonePath = runRepoPath(id, home);

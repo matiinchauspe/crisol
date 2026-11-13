@@ -3,11 +3,12 @@ import { listRunSandboxIds, removeRunSandboxes } from "./docker";
 import { branchSha, fetchBack } from "./git";
 import { runLockPath, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import type { RunLockRecord, RunResult } from "./run";
-import { tryLockRun } from "./slots";
+import { probeRunLock } from "./slots";
 
 export type RecoverOutcome =
   | { run: string; kind: "live" }
   | { run: string; kind: "up-to-date" }
+  | { run: string; kind: "never-cut" }
   | { run: string; kind: "recovered"; branch: string; host: string; sha: string }
   | { run: string; kind: "skipped"; why: string }
   | { run: string; kind: "failed"; error: string };
@@ -22,7 +23,8 @@ function appendLog(id: string, home: string, line: string): void {
   appendFileSync(runLogPath(id, home), `[${new Date().toISOString()}] recover: ${line}\n`);
 }
 
-function readRecord(id: string, home: string): RunLockRecord | undefined {
+/** `undefined` while the Run is still being reserved: its record is written only once its lock is held. */
+export function readRunLockRecord(id: string, home: string): RunLockRecord | undefined {
   const lockPath = runLockPath(id, home);
   if (!existsSync(lockPath)) return undefined;
   try {
@@ -62,7 +64,13 @@ async function recoverDeadRun(
   }
 
   const clonePath = runRepoPath(id, home);
-  if (!existsSync(clonePath)) return { run: id, kind: "skipped", why: "it has no Clone" };
+  if (!existsSync(clonePath)) {
+    // A Run result means the Run ended on its own terms before cutting a branch; only a Run that
+    // died there is worth naming.
+    return existsSync(runResultPath(id, home))
+      ? { run: id, kind: "never-cut" }
+      : { run: id, kind: "skipped", why: "it has no Clone" };
+  }
   const cloneSha = branchSha(clonePath, record.branch);
   if (cloneSha === undefined) return { run: id, kind: "skipped", why: `${record.branch} was never cut in its Clone` };
   if (!existsSync(record.host)) return { run: id, kind: "failed", error: `its host repo ${record.host} is gone` };
@@ -98,12 +106,13 @@ export async function recover(home: string): Promise<RecoverReport> {
   }
 
   for (const id of ids) {
-    const record = readRecord(id, home);
+    const record = readRunLockRecord(id, home);
     if (record === undefined) {
       report.outcomes.push({ run: id, kind: "skipped", why: "it has no Run lock record" });
       continue;
     }
-    const lock = tryLockRun(runLockPath(id, home));
+    const lock = probeRunLock(runLockPath(id, home));
+    if (lock === "gone") continue;
     if (!lock) {
       report.outcomes.push({ run: id, kind: "live" });
       continue;

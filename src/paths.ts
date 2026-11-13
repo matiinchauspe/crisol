@@ -45,6 +45,11 @@ export function runLockPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "lock");
 }
 
+/** The pid of the process that owns the Run, so a detached Run can be stopped with `kill`. */
+export function runPidPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "pid");
+}
+
 export function runResultPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "result.json");
 }

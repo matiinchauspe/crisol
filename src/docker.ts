@@ -80,7 +80,8 @@ export function assertDockerReachable(): void {
 export async function ensureImageFromDockerfile(tag: string, dockerfile: string): Promise<string> {
   if (imageExists(tag)) return tag;
 
-  // Not detached: it runs before the Run reserves anything, so a Ctrl+C should kill the build at once.
+  // Not detached: it runs in pre-flight, before the Run has anything to tear down, so a Ctrl+C
+  // should kill the build at once.
   const proc = Bun.spawn(["docker", "build", "-q", "-t", tag, "-"], {
     stdin: new Blob([dockerfile]),
     stdout: "pipe",

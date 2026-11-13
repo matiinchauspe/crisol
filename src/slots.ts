@@ -1,17 +1,23 @@
 import { dlopen, FFIType, read } from "bun:ffi";
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, openSync, statSync } from "node:fs";
+import type { Stats } from "node:fs";
 import { slotPath, slotsDir } from "./paths";
 
 /** A lock taken on one Slot's file; the OS drops it when its process dies, however it dies. */
 export interface HeldLock {
+  /** The fd the lock is held on, so a detached Run can inherit it. */
+  readonly fd: number;
   /** Idempotent. */
   release(): void;
 }
 
 /** The only OS-dependent half of Slots — `acquireSlot` never touches a lock primitive directly. */
 export interface SlotLock {
-  /** Never blocks: `undefined` means another holder has it. */
-  tryLock(path: string): HeldLock | undefined;
+  /**
+   * Never blocks: `undefined` means another holder has it. With `create: false` a missing file
+   * throws ENOENT instead of being made.
+   */
+  tryLock(path: string, options?: { create?: boolean }): HeldLock | undefined;
 }
 
 // Darwin's <sys/fcntl.h> and <sys/errno.h>, checked against the SDK headers.
@@ -49,20 +55,13 @@ function loadLibc(): Libc {
  * SIGKILLed Crisol never keeps the Slot alive.
  */
 export class DarwinFlockSlotLock implements SlotLock {
-  tryLock(path: string): HeldLock | undefined {
+  tryLock(path: string, options: { create?: boolean } = {}): HeldLock | undefined {
     const { flock, errno } = loadLibc();
-    const fd = openSync(path, "a");
+    const fd = openSync(path, options.create === false ? "r" : "a");
     let code: number;
     do {
       if (flock(fd, LOCK_EX | LOCK_NB) === 0) {
-        let held = true;
-        return {
-          release(): void {
-            if (!held) return;
-            held = false;
-            closeSync(fd);
-          },
-        };
+        return heldOn(fd);
       }
       code = errno();
     } while (code === EINTR);
@@ -72,12 +71,58 @@ export class DarwinFlockSlotLock implements SlotLock {
   }
 }
 
+function heldOn(fd: number): HeldLock {
+  let held = true;
+  return {
+    fd,
+    release(): void {
+      if (!held) return;
+      held = false;
+      closeSync(fd);
+    },
+  };
+}
+
+/**
+ * Takes over a lock a parent process took and passed down as `fd`. `flock` belongs to the open
+ * file description, so the inherited fd holds the parent's lock without ever letting go of it.
+ * The inherited fd is not close-on-exec; Bun's spawn still hands a child only the fds it names,
+ * so no `docker exec` that outlives this process keeps the lock. Refuses an fd not open on `path`.
+ */
+export function adoptLock(fd: number, path: string): HeldLock {
+  let inherited: Stats;
+  try {
+    inherited = fstatSync(fd);
+  } catch {
+    throw new Error(`No inherited lock on fd ${fd} for ${path}.`);
+  }
+  const expected = statSync(path);
+  if (inherited.ino !== expected.ino || inherited.dev !== expected.dev) {
+    throw new Error(`fd ${fd} is not open on ${path}.`);
+  }
+  return heldOn(fd);
+}
+
 /**
  * A Run lock is the Slot's primitive on the Run's own dir. The Slot cannot prove a Run alive:
  * once a Run dies, a later Run may take the same Slot.
  */
 export function tryLockRun(path: string, lock: SlotLock = new DarwinFlockSlotLock()): HeldLock | undefined {
   return lock.tryLock(path);
+}
+
+/**
+ * Tries the lock of a Run that already has one, for `status` and `recover`. Never creates the
+ * file: a dir removed under a probe would otherwise get back an empty lock with no record, which
+ * every later probe skips. `"gone"` when the file no longer exists.
+ */
+export function probeRunLock(path: string, lock: SlotLock = new DarwinFlockSlotLock()): HeldLock | undefined | "gone" {
+  try {
+    return lock.tryLock(path, { create: false });
+  } catch (error) {
+    if ((error as { code?: string }).code === "ENOENT") return "gone";
+    throw error;
+  }
 }
 
 export interface Slot {
