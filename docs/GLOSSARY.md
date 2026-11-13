@@ -43,6 +43,13 @@ _Avoid_: Integration, driver, connector
 One of `max_parallel` OS file locks a Run must hold to execute.
 _Avoid_: Worker, thread, lock (a Slot is what a Run holds, not the lock mechanism itself)
 
+**Run lock**:
+The OS file lock a live Run holds on its own dir (`runs/<id>/lock`) from reservation until its
+Run result is written. A Run whose lock can be taken is dead, and `crisol recover` may bring back
+its branch.
+_Avoid_: Slot (a Slot bounds how many Runs execute at once; a dead Run's Slot may already belong to
+another Run), pid file
+
 **Fan-out**:
 Several independent Runs from one `crisol run`, one per Task, all cut from the same base commit.
 Never chained, never merged.

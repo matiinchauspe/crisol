@@ -77,7 +77,9 @@ flowchart LR
    ceiling is `not-converged`.
 5. **Teardown and Fetch-back.** The container is removed, and the branch is fetched back into
    your repo. If the Run fails, Fetch-back still runs, so no work is lost. If it fails too, you
-   see both errors.
+   see both errors. Ctrl+C, `kill` and closing the terminal stop a Run the same way: the
+   container is removed and the branch still comes back with the commits made so far. Only
+   `kill -9` skips this, and `crisol recover` brings that branch back.
 
 ## Requirements
 
@@ -105,6 +107,7 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 ```
 crisol run "<task>"... [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]
 crisol auth
+crisol recover
 ```
 
 | Flag | Default | What it does |
@@ -177,6 +180,20 @@ the same Claude Code version as your host (`claude --version`) under a non-root 
 (Claude Code itself refuses `--dangerously-skip-permissions` as root), and disables commit/PR
 attribution by configuration inside the Sandbox — never by asking the model.
 
+### Recover
+
+```
+crisol recover
+```
+
+Brings back the branch of every Run that died without its Fetch-back, for example after
+`kill -9` or a crash. A Run holds its own lock while it is alive, so recover never touches a live
+Run. For a dead Run, it first removes the Run's container, so the agent cannot keep writing to the
+Clone. Then it fetches the branch into the repo the Run came from, at the Clone's last commit.
+Fetch-back only fast-forwards: a branch you have since moved is reported and left alone, and
+recover never deletes a branch. It prints one line per Run it acted on or left alone, or
+`Nothing to recover.`
+
 ### The ceiling
 
 A Run stops resuming once either of two ceilings hits first: 5 iterations, or 60 minutes of wall
@@ -207,7 +224,8 @@ The fields are only ever added within 0.x, never renamed or removed:
   "gates": [{ "cmd": "bun test", "ok": true }],
   "network": "open",
   "blocked": [],
-  "warnings": []
+  "warnings": [],
+  "fetchBack": true
 }
 ```
 
@@ -216,7 +234,11 @@ The fields are only ever added within 0.x, never renamed or removed:
 default — see [The ceiling](#the-ceiling)), and `unverified` when no Gate is declared anywhere —
 the CLI's `--gate`, else the repo's own `.crisol/config.toml`.
 A red Gate resumes the same agent session with its failing command and output; `iterations`
-counts how many attempts that took. `network` reports `open` until the network wall lands
+counts how many attempts that took. A Run stopped by a signal or an error is `not-converged` too,
+with `reason` set to `interrupted: SIGINT` (or the signal it got) or `error: <message>`. The CLI
+reports that as an error, and its Run result is in `result.json`. `fetchBack` says whether the
+branch reached your repo; `false` means `crisol recover` can still bring it back. A container
+Crisol could not remove is named in `warnings`. `network` reports `open` until the network wall lands
 ([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md)).
 
 ### Where things live
@@ -227,8 +249,9 @@ counts how many attempts that took. `network` reports `open` until the network w
 ├── slots/<n>.lock         # one per Slot; a Run holds one while it executes
 └── runs/<id>/
     ├── repo/              # the Run's Clone
+    ├── lock               # held while the Run is alive; how `crisol recover` tells live from dead
     ├── log                # timestamped log of every stage
-    └── result.json        # the Run result
+    └── result.json        # the Run result, written on every exit
 ```
 
 ## Roadmap
@@ -240,7 +263,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 01 | Walking skeleton | ✅ |
 | 02 | Gates and converge | ✅ |
 | 03 | Slots and fan-out | ✅ |
-| 04 | Fetch-back on every exit, and recover | |
+| 04 | Fetch-back on every exit, and recover | ✅ |
 | 05 | Detach, status, logs | |
 | 06 | Network wall | |
 | 07 | Editable Allowlist, learn and open | |
@@ -259,7 +282,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 ## Vocabulary and decisions
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
-**Gate**, **Adapter**, **Slot**, **Fan-out**, **Secret**, **SecretStore**. Each term is defined in
+**Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Secret**, **SecretStore**. Each term is defined in
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
 [`docs/adr/`](docs/adr/):
 
@@ -272,6 +295,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0007](docs/adr/0007-ticket-08-credential-placeholders.md): `crisol auth` keeps the token off every spawned process's argv, verified against the real `security` CLI; its assumption about `claude setup-token`'s own output convention is not
 - [0008](docs/adr/0008-claude-code-adapter-agent-layer-and-attribution.md): the Claude Code Adapter's Agent layer runs as a non-root `agent` user (Claude Code refuses `--dangerously-skip-permissions` as root) and installs via the native installer (not npm); attribution is disabled by a baked `settings.json` rather than a CLI flag or the Preamble; `PreStartDeclaration` gains `ensureImage` rather than the plain `image: string` ADR 0005 sketched
 - [0009](docs/adr/0009-slots-poll-a-non-blocking-flock.md): a Slot is taken by polling a non-blocking `flock` rather than blocking on it, before the Run reserves anything; a fan-out prints one Run result per line
+- [0010](docs/adr/0010-a-run-lock-proves-liveness-and-signals-never-reach-crisols-children.md): each Run holds its own lock, which is how `crisol recover` tells live from dead; SIGINT, SIGTERM and SIGHUP stop a Run the same way from the moment it is reserved; git and docker children run in their own session; `result.json` is written on every exit and records `fetchBack`
 
 ## Development
 
