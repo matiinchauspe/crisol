@@ -105,7 +105,9 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 ## Usage
 
 ```
-crisol run "<task>"... [--json] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]
+crisol run "<task>"... [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]
+crisol status
+crisol logs <run>
 crisol auth
 crisol recover
 ```
@@ -119,6 +121,7 @@ crisol recover
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
 | `--adapter <fake\|claude-code>` | `fake` | Which Adapter runs the Task. `fake` is the suite's own scripted stand-in; `claude-code` runs the real Claude Code Adapter (`crisol auth` first — see [Credentials](#credentials)). |
 | `--json` | off | Print the Run result as JSON instead of one line — one JSON line per Run when there are several Tasks. |
+| `--detach` | off | Return at once with the run id and let the Run finish in the background. One Task only, and not with `--json`. See [Detach, status and logs](#detach-status-and-logs). |
 
 A repo can declare its own Gates once, in `.crisol/config.toml`:
 
@@ -142,13 +145,48 @@ At most `max_parallel` Runs execute at once (3 by default), across every `crisol
 machine — including ones started from different terminals. A Run must hold one of
 `~/.crisol/slots/<n>.lock` to execute; with none free it waits, printing
 `Waiting for a free Slot`, and never fails for lack of one. The lock is an OS file lock, so a
-Run that dies — even by `kill -9` — gives its Slot back at once. Ctrl+C on a waiting Run stops it
-before it touches anything.
+Run that dies — even by `kill -9` — gives its Slot back at once. A waiting Run already has its run
+id, so `crisol status` shows it as `queued`. Ctrl+C on a waiting Run stops it before it makes its
+Clone, so it cuts no branch. Its log and Run result are kept, like any Run's: `not-converged`,
+`reason: "interrupted: SIGINT"`.
 
 ```toml
 # ~/.crisol/config
 max_parallel = 2
 ```
+
+### Detach, status and logs
+
+```console
+$ crisol run "fix the login bug" --detach
+9f496a56
+Run 9f496a56 detached as pid 41872. `crisol status` shows it; `crisol logs 9f496a56` prints its log; `kill 41872` stops it.
+$ crisol status
+9f496a56  running        crisol/9f496a56  pid 41872
+3c1d07e2  queued         crisol/3c1d07e2  pid 41901
+51b8aa90  verified       crisol/51b8aa90
+$ crisol logs 9f496a56
+```
+
+`--detach` checks everything a Run checks before it starts. A bad base, name or Gate still fails
+right there, and leaves nothing behind. Then it reserves the Run and hands it to a background
+process of its own. Once that process holds the Run, `--detach` prints the id and the process's pid
+and returns. From then on, the Run continues in that background process. Crisol has no daemon: that process owns the Run,
+just as `crisol run` does in the foreground. Closing the terminal does not stop it. To stop it,
+`kill` the pid that `--detach` and `crisol status` show. It then stops like a Run you Ctrl+C: a
+running Run's container is removed and its branch comes back, and a queued Run ends without one. The Run result goes to `result.json`. Anything the Run would have printed,
+including warnings, goes to its log.
+
+`crisol status` lists every Run under `~/.crisol`, oldest first:
+
+| State | Meaning |
+|---|---|
+| `queued` | Reserved, waiting for a free Slot. Shown with the pid of the process that owns it. |
+| `running` | Holds a Slot and has its Clone. Shown with its pid. |
+| `verified` / `unverified` / `not-converged` | Finished; the Run result's Status, followed by its `reason` when there is one. |
+| `dead` | Died without writing a Run result, for example after `kill -9`. If it had made its Clone, `crisol recover` brings back its branch. A Run that died while queued never made one, so there is nothing to bring back. |
+
+`crisol logs <run>` prints that Run's log. An id that is not a Run fails with a plain message.
 
 ### Credentials
 
@@ -237,7 +275,8 @@ A red Gate resumes the same agent session with its failing command and output; `
 counts how many attempts that took. A Run stopped by a signal or an error is `not-converged` too,
 with `reason` set to `interrupted: SIGINT` (or the signal it got) or `error: <message>`. The CLI
 reports that as an error, and its Run result is in `result.json`. `fetchBack` says whether the
-branch reached your repo; `false` means `crisol recover` can still bring it back. A container
+branch reached your repo. When it is `false` and the Run made its Clone, `crisol recover` can still
+bring the branch back. A Run stopped while queued never cut one. A container
 Crisol could not remove is named in `warnings`. `network` reports `open` until the network wall lands
 ([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md)).
 
@@ -247,10 +286,11 @@ Crisol could not remove is named in `warnings`. `network` reports `open` until t
 ~/.crisol/                 # override with CRISOL_HOME
 ├── config                 # optional: max_parallel / max_iterations / timeout_minutes overrides
 ├── slots/<n>.lock         # one per Slot; a Run holds one while it executes
-└── runs/<id>/
-    ├── repo/              # the Run's Clone
-    ├── lock               # held while the Run is alive; how `crisol recover` tells live from dead
-    ├── log                # timestamped log of every stage
+└── runs/<id>/             # made when the Run is reserved, before it waits for a Slot
+    ├── repo/              # the Run's Clone, made once the Run holds a Slot (status: running)
+    ├── lock               # held while the Run is alive; how `status` and `recover` tell live from dead
+    ├── pid                # the process that owns the Run; `status` shows it while that process holds the Run
+    ├── log                # timestamped log of every stage; a detached Run's output too
     └── result.json        # the Run result, written on every exit
 ```
 
@@ -264,7 +304,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 02 | Gates and converge | ✅ |
 | 03 | Slots and fan-out | ✅ |
 | 04 | Fetch-back on every exit, and recover | ✅ |
-| 05 | Detach, status, logs | |
+| 05 | Detach, status, logs | ✅ |
 | 06 | Network wall | |
 | 07 | Editable Allowlist, learn and open | |
 | 08 | Credentials | ✅ |
@@ -282,7 +322,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 ## Vocabulary and decisions
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
-**Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Secret**, **SecretStore**. Each term is defined in
+**Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Detached Run**, **Secret**, **SecretStore**. Each term is defined in
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
 [`docs/adr/`](docs/adr/):
 
@@ -294,8 +334,9 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0006](docs/adr/0006-ticket-02-gate-ladder-and-ceiling-are-placeholders.md): ticket 02's `.crisol/config.toml` parser is a hand-rolled placeholder; the ceiling override (CLI flags and `~/.crisol/config`) is implemented
 - [0007](docs/adr/0007-ticket-08-credential-placeholders.md): `crisol auth` keeps the token off every spawned process's argv, verified against the real `security` CLI; its assumption about `claude setup-token`'s own output convention is not
 - [0008](docs/adr/0008-claude-code-adapter-agent-layer-and-attribution.md): the Claude Code Adapter's Agent layer runs as a non-root `agent` user (Claude Code refuses `--dangerously-skip-permissions` as root) and installs via the native installer (not npm); attribution is disabled by a baked `settings.json` rather than a CLI flag or the Preamble; `PreStartDeclaration` gains `ensureImage` rather than the plain `image: string` ADR 0005 sketched
-- [0009](docs/adr/0009-slots-poll-a-non-blocking-flock.md): a Slot is taken by polling a non-blocking `flock` rather than blocking on it, before the Run reserves anything; a fan-out prints one Run result per line
-- [0010](docs/adr/0010-a-run-lock-proves-liveness-and-signals-never-reach-crisols-children.md): each Run holds its own lock, which is how `crisol recover` tells live from dead; SIGINT, SIGTERM and SIGHUP stop a Run the same way from the moment it is reserved; git and docker children run in their own session; `result.json` is written on every exit and records `fetchBack`
+- [0009](docs/adr/0009-slots-poll-a-non-blocking-flock.md): a Slot is taken by polling a non-blocking `flock` rather than blocking on it, before the Run reserves anything; a fan-out prints one Run result per line (amended by 0011: a Run is now reserved before it waits for a Slot)
+- [0010](docs/adr/0010-a-run-lock-proves-liveness-and-signals-never-reach-crisols-children.md): each Run holds its own lock, which is how `crisol recover` tells live from dead; SIGINT, SIGTERM and SIGHUP stop a Run the same way once it holds its Slot (amended by 0011); git and docker children run in their own session; `result.json` is written on every exit and records `fetchBack`
+- [0011](docs/adr/0011-a-run-is-reserved-before-its-slot-and-a-detached-run-inherits-its-lock.md): a Run is reserved before it waits for a Slot, so `status` can show it queued (reversing part of 0009, amending 0010); a Run stopped while queued keeps its log and Run result; `status` reads state from the run dir alone; a detached Run's process inherits its Run lock as fd 3, so the lock is never free in between
 
 ## Development
 

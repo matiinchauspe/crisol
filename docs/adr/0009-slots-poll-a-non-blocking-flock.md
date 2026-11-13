@@ -46,3 +46,12 @@ fan-out a second output shape that no single-Run caller can parse.
 A name addresses one branch; three Runs cannot share it, and deriving `<name>-1`, `<name>-2` would
 invent names nobody asked for. A caller that needs to address each branch (a `yun-build-plan`
 walk) runs one Task per invocation with its own `--name`.
+
+## Amendment 2026-11-13: a Run is reserved before its Slot
+
+ADR 0011 reverses "a Slot is taken after every pre-flight check and before `reserveRun`". A Run now
+reserves its dir, Run lock and record after pre-flight and before the Slot wait, so `--detach` can
+print its id and `crisol status` can show it queued. A queued Run therefore has a run dir.
+Ctrl+C while it waits ends it with a Run result (`interrupted: <SIGNAL>`), and the dir is kept
+instead of leaving nothing on disk. A Ctrl+C during pre-flight still leaves nothing. The rest of
+this ADR stands.

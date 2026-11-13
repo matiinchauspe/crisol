@@ -50,6 +50,12 @@ its branch.
 _Avoid_: Slot (a Slot bounds how many Runs execute at once; a dead Run's Slot may already belong to
 another Run), pid file
 
+**Detached Run**:
+A Run started with `crisol run --detach`: reserved in the foreground, then run to its Run result by
+a background process of its own, which holds its Run lock. Still one process per Run; Crisol has no
+daemon.
+_Avoid_: Background job, daemon (no long-lived process serves several Runs)
+
 **Fan-out**:
 Several independent Runs from one `crisol run`, one per Task, all cut from the same base commit.
 Never chained, never merged.

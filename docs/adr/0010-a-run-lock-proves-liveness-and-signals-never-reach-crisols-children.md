@@ -88,3 +88,16 @@ Run dirs from every repo share `~/.crisol/runs/`. Recover walks them all, and Fe
 the host named in each Run's lock record, not to the repo recover was started in. Fetch-back only
 fast-forwards. A host branch that has moved past the Clone is reported as failed and never
 overwritten, and recover never deletes a branch.
+
+## Amendment 2026-11-13: signals arm once the Slot is held
+
+ADR 0011 reserves a Run before it waits for a Slot, so "from the moment it is reserved" above no
+longer holds. The Run's own handlers arm once it holds its Slot. During the wait, a signal reaches
+the CLI's handler instead, which ends the wait. The queued Run then writes its Run result
+(`interrupted: <SIGNAL>`) and keeps its dir and log. It has no Clone, so there is no branch to
+fetch back and no Sandbox to tear down. The guarantee for a Run that holds its Slot is unchanged.
+
+The `docker build` exception above ("it runs before the Run reserves anything") holds only for a
+foreground Run. A detached Run's background process takes over its reservation before its own
+pre-flight, so its `docker build` runs with the Run already reserved. That process has its own
+session and no terminal, so no Ctrl+C reaches the build either way.
