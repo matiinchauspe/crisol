@@ -63,7 +63,9 @@ _Avoid_: Batch, matrix, parallel run (parallelism is what Slots bound, across ev
 Fan-out is what one invocation asks for)
 
 **Allowlist**:
-The domains a Sandbox may reach, in three levels.
+The hostnames a Sandbox may reach, merged from three levels: built-in (shipped with Crisol), user
+(`~/.crisol/network`) and repo (`.crisol/network`). Plain hostnames only — it never names a
+port, a wildcard or an IP address.
 _Avoid_: Whitelist, firewall rule
 
 **Project layer / Agent layer**:

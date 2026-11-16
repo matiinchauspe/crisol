@@ -105,7 +105,8 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 ## Usage
 
 ```
-crisol run "<task>"... [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]
+crisol run "<task>"... [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--network <allowlist|learn|open>] [--adapter <fake|claude-code>]
+crisol allow <host> [--repo]
 crisol status
 crisol logs <run>
 crisol auth
@@ -119,6 +120,7 @@ crisol recover
 | `--gate <cmd>` | none | A command whose exit code decides whether the work is right. Repeatable. Any `--gate` replaces your repo's own `.crisol/config.toml` Gates entirely — it never merges with them. |
 | `--max-iterations <n>` | `5` | Overrides how many Gate-fail-then-resume attempts this Run gets before `not-converged`. Must be a positive integer. |
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
+| `--network <allowlist\|learn\|open>` | `allowlist` | `learn` lets the Run reach any host and records which; `open` drops the wall. See [Network](#network). |
 | `--adapter <fake\|claude-code>` | `fake` | Which Adapter runs the Task. `fake` is the suite's own scripted stand-in; `claude-code` runs the real Claude Code Adapter (`crisol auth` first — see [Credentials](#credentials)). |
 | `--json` | off | Print the Run result as JSON instead of one line — one JSON line per Run when there are several Tasks. |
 | `--detach` | off | Return at once with the run id and let the Run finish in the background. One Task only, and not with `--json`. See [Detach, status and logs](#detach-status-and-logs). |
@@ -205,7 +207,7 @@ A host it doesn't name is refused, and every refusal is counted:
 The end-of-run report names each one and the line that would allow it:
 
 ```
-Blocked: api.stripe.com (3 attempts). `crisol allow` is not built yet; once it is, allow it with:
+Blocked: api.stripe.com (3 attempts). Allow it for every repo, or for this repo only, with:
   crisol allow api.stripe.com
   crisol allow api.stripe.com --repo
 ```
@@ -217,8 +219,62 @@ Allowlist that was refused for its form (a bare `CONNECT github.com`, say) gets 
 An allowlisted host reached on any other port is refused too, and its entry carries the port
 (`{ "host": "github.com", "port": 22, "count": 1 }`) — no `crisol allow` line opens a port.
 
-`crisol allow` itself, the user and repo Allowlist levels it edits, and `--network learn`/
-`--network open` are not built yet — see [Roadmap](#roadmap).
+#### Widening the Allowlist
+
+The Allowlist a Run gets is three levels merged:
+
+| Level | Where | Edited by |
+|---|---|---|
+| built-in | inside Crisol | each release |
+| user | `~/.crisol/network` | `crisol allow <host>` |
+| repo | `.crisol/network`, committed | `crisol allow <host> --repo` |
+
+Both files hold one host per line; everything after a `#` is a comment:
+
+```
+# payments
+api.stripe.com   # checkout
+sentry.io
+```
+
+`crisol allow` appends one line, creating the file if needed, and never rewrites what is already
+there. A host added at either level is reachable from the next Run on. Every level takes plain
+public hostnames only — no port, no wildcard, no IP address, and no name that points inside your
+machine or network (`host.docker.internal`, `metadata.google.internal`, anything under `.internal`,
+`.local`, `.localhost`, `.localdomain`, `.svc`, `.arpa`, `.lan`, `.home` or `.corp`). An allowlist
+Run whose user or repo level holds anything else fails before it starts, naming the file and the
+host. `--network learn` and `--network open` read neither level, so a bad line never breaks them.
+
+A repo's `.crisol/network` widens your wall: cloning a repo that carries one lets its Runs reach
+those hosts. The agent can write it too, by committing to it, and once you merge that branch every
+later Run reaches what it added. Crisol shows both and blocks neither. The Run log lists every host
+the user or repo level brought (`allowlist: 8 built-in; user: …; repo: …`). A branch whose changes
+touch `.crisol/network` carries a `warnings` entry naming the hosts it adds. Read that file in a
+review the way you would read a dependency bump.
+
+`--network learn` lets a Run reach any host through the proxy, and records every host the proxy
+connected to in the Run result's `reached`. The Sandbox stays on its `--internal` network, so only
+HTTP and HTTPS through the proxy get out. Git over ssh, `git://`, a remote database, or any tool that
+ignores the proxy variables still fails, and is never in `reached`. At the end, the plain-text report prints a
+`crisol allow <host> --repo` line for each reached host that is neither built in nor on the repo
+level — copy the ones the repo needs. It asks nothing and writes nothing. Hosts on your own user
+level are proposed too, so teammates get them through the repo level. With `--json`, only the Run
+result is printed; `reached` is in it.
+
+`--network open` stands up no wall at all: the Sandbox sits on Docker's default network and
+`network` reads `"open"`.
+
+> [!WARNING]
+> `--network learn` (through its proxy) and `--network open` filter nothing, on any port. The agent can reach the Docker
+> host (`host.docker.internal`) and what listens on it, your LAN, other containers on the default
+> bridge, and cloud metadata endpoints (`169.254.169.254`). Use them on code and data you would
+> let leave your machine.
+
+Package installs with Bun reach only `registry.npmjs.org`, already built in. Upgrading Bun itself
+reaches `api.github.com` (`bun upgrade`) or `bun.sh` (the install script), and a raw file download
+reaches `raw.githubusercontent.com`; those stay off the built-in list — a Run that needs one adds
+it with `crisol allow` or finds it with `--network learn`
+([ADR 0013](docs/adr/0013-allowlist-levels-learn-and-open.md)).
 
 ### Credentials
 
@@ -311,14 +367,16 @@ branch reached your repo. When it is `false` and the Run made its Clone, `crisol
 bring the branch back. A Run stopped while queued never cut one. A container
 Crisol could not remove is named in `warnings`. `network` is `allowlist` by default now that the
 wall exists ([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md),
-[ADR 0012](docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md));
-`learn` and `open` are not built yet. See [Network](#network) for `blocked`.
+[ADR 0012](docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md)),
+and `learn` or `open` with `--network`; a `learn` Run adds `reached`. See [Network](#network) for
+`blocked` and `reached`.
 
 ### Where things live
 
 ```
 ~/.crisol/                 # override with CRISOL_HOME
 ├── config                 # optional: max_parallel / max_iterations / timeout_minutes overrides
+├── network                # optional: the user level of the Allowlist, one host per line
 ├── slots/<n>.lock         # one per Slot; a Run holds one while it executes
 └── runs/<id>/             # made when the Run is reserved, before it waits for a Slot
     ├── repo/              # the Run's Clone, made once the Run holds a Slot (status: running)
@@ -340,7 +398,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 04 | Fetch-back on every exit, and recover | ✅ |
 | 05 | Detach, status, logs | ✅ |
 | 06 | Network wall | ✅ |
-| 07 | Editable Allowlist, learn and open | |
+| 07 | Editable Allowlist, learn and open | ✅ |
 | 08 | Credentials | ✅ |
 | 09 | Commits | |
 | 10 | Text input | |
@@ -372,6 +430,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0010](docs/adr/0010-a-run-lock-proves-liveness-and-signals-never-reach-crisols-children.md): each Run holds its own lock, which is how `crisol recover` tells live from dead; SIGINT, SIGTERM and SIGHUP stop a Run the same way once it holds its Slot (amended by 0011); git and docker children run in their own session; `result.json` is written on every exit and records `fetchBack`
 - [0011](docs/adr/0011-a-run-is-reserved-before-its-slot-and-a-detached-run-inherits-its-lock.md): a Run is reserved before it waits for a Slot, so `status` can show it queued (reversing part of 0009, amending 0010); a Run stopped while queued keeps its log and Run result; `status` reads state from the run dir alone; a detached Run's process inherits its Run lock as fd 3, so the lock is never free in between
 - [0012](docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md): the network wall is tinyproxy on a per-Run `--internal` network, the Allowlist bind-mounted in rather than baked into the image; blocked hosts are counted by parsing tinyproxy's own log; the Sandbox's env carries both casings of `HTTP(S)_PROXY`/`NO_PROXY` (supersedes 0003)
+- [0013](docs/adr/0013-allowlist-levels-learn-and-open.md): the user level is `~/.crisol/network` and the repo level `.crisol/network` (not `network = […]` in `config.toml`, as the spec had it), both one host per line, plain public hostnames only (no `.internal`, `.local`, `.svc` and the like), appended to by `crisol allow`; a branch that touches `.crisol/network` carries a warning; only an allowlist Run reads them; `--network learn` is a filterless proxy whose log yields `reached`, and it prints `crisol allow --repo` lines instead of asking; `--network open` stands up no wall; no Bun host was added to the built-in list
 
 ## Development
 
