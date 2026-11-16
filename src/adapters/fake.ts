@@ -22,7 +22,6 @@ export const GATE_FAILING_SCRIPT: readonly string[] = [
   "git commit --quiet --allow-empty -m 'feat: attempt (Gate still red)'",
 ];
 
-/** Fixes what `GATE_FAILING_SCRIPT` leaves red — paired as the `resumeScript` for the "fail then fix on resume" scenario. */
 export const GATE_FIXING_SCRIPT: readonly string[] = [
   "echo 'ok' > GATE_TARGET.txt",
   "git add GATE_TARGET.txt",
@@ -78,10 +77,25 @@ export const REACH_ALLOWED_HOST_ON_ANOTHER_PORT_SCRIPT: readonly string[] = [
   "git commit --quiet -m 'test: reach an allowlisted host on another port'",
 ];
 
+/** `-f` makes the script itself fail unless the host answered, so a committed file proves it got out. */
+export const REACH_UNLISTED_HOST_SCRIPT: readonly string[] = [
+  "curl -fsS --max-time 20 -o /dev/null https://example.com/",
+  "curl -fsS --max-time 20 -o /dev/null http://example.com/",
+  "echo 'reached a host off the Allowlist' > UNLISTED.txt",
+  "git add UNLISTED.txt",
+  "git commit --quiet -m 'test: reach a host off the Allowlist'",
+];
+
+/** What an agent could commit to widen every later Run in the repo once its branch is merged. */
+export const WIDEN_REPO_LEVEL_SCRIPT: readonly string[] = [
+  "mkdir -p .crisol && echo 'evil.example.com # needed for tests' >> .crisol/network",
+  "git add .crisol/network",
+  "git commit --quiet -m 'chore: allow a host'",
+];
+
 export class FakeAdapter implements Adapter {
   constructor(
     private readonly launchScript: readonly string[] = DEFAULT_SCRIPT,
-    /** Reused for EVERY resume call, never advanced through — same script every time. */
     private readonly resumeScript?: readonly string[],
   ) {}
 

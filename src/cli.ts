@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 import { ClaudeCodeAdapter } from "./adapters/claude-code";
+import { addToRepoAllowlist, addToUserAllowlist, hostsToLearn, learnBaseline, mergedAllowlist } from "./allowlist";
+import type { AllowOutcome } from "./allowlist";
 import { runAuth } from "./auth";
 import { parsePositiveInteger } from "./config";
-import { crisolHome } from "./paths";
+import { discoverGitRoot } from "./git";
+import { crisolHome, repoAllowlistPath, userAllowlistPath } from "./paths";
 import { assertSupportedPlatform } from "./platform";
 import { detachRun, takeDetachedHandoff } from "./detach";
 import { recover } from "./recover";
@@ -10,13 +13,15 @@ import type { RecoverOutcome } from "./recover";
 import { run, runFanOut } from "./run";
 import { listRuns, readRunLog } from "./runs";
 import type { RunEntry } from "./runs";
-import { BUILT_IN_ALLOWLIST, isPlainHostname } from "./network";
-import type { Blocked, RunOptions, RunResult } from "./run";
+import { BUILT_IN_ALLOWLIST, isInternalHostname, isPlainHostname } from "./network";
+import type { Blocked, NetworkMode, RunOptions, RunResult } from "./run";
 import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
   'Usage: crisol run "<task>"... [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
-  "[--max-iterations <n>] [--timeout <minutes>] [--adapter <fake|claude-code>]";
+  "[--max-iterations <n>] [--timeout <minutes>] [--network <allowlist|learn|open>] [--adapter <fake|claude-code>]";
+
+const ALLOW_USAGE = "Usage: crisol allow <host> [--repo]";
 
 const AUTH_USAGE = "Usage: crisol auth";
 
@@ -26,11 +31,12 @@ const STATUS_USAGE = "Usage: crisol status";
 
 const LOGS_USAGE = "Usage: crisol logs <run>";
 
+const NETWORK_MODES: readonly NetworkMode[] = ["allowlist", "learn", "open"];
+
 const ADAPTER_NAMES = ["fake", "claude-code"] as const;
 type AdapterName = (typeof ADAPTER_NAMES)[number];
 
 interface ParsedRunArgs {
-  /** More than one fans out into independent Runs from the same base. */
   tasks: string[];
   json: boolean;
   detach: boolean;
@@ -39,6 +45,7 @@ interface ParsedRunArgs {
   gates: string[];
   maxIterations?: number;
   timeoutMinutes?: number;
+  network: NetworkMode;
   adapterName: AdapterName;
 }
 
@@ -68,6 +75,15 @@ function readAdapterFlagValue(argv: string[], index: number): AdapterName {
   return raw as AdapterName;
 }
 
+function readNetworkFlagValue(argv: string[], index: number): NetworkMode {
+  const raw = readFlagValue(argv, index, "--network");
+  const mode = NETWORK_MODES.find((candidate) => candidate === raw);
+  if (mode === undefined) {
+    throw new Error(`--network must be one of ${NETWORK_MODES.join(", ")}, got "${raw}".\n${USAGE}`);
+  }
+  return mode;
+}
+
 function parseRunArgs(argv: string[]): ParsedRunArgs {
   const tasks: string[] = [];
   let json = false;
@@ -77,6 +93,7 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
   const gates: string[] = [];
   let maxIterations: number | undefined;
   let timeoutMinutes: number | undefined;
+  let network: NetworkMode = "allowlist";
   let adapterName: AdapterName = "fake";
 
   for (let i = 0; i < argv.length; i++) {
@@ -99,6 +116,9 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
       i++;
     } else if (arg === "--timeout") {
       timeoutMinutes = readIntFlagValue(argv, i + 1, "--timeout");
+      i++;
+    } else if (arg === "--network") {
+      network = readNetworkFlagValue(argv, i + 1);
       i++;
     } else if (arg === "--adapter") {
       adapterName = readAdapterFlagValue(argv, i + 1);
@@ -125,11 +145,11 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     );
   }
 
-  return { tasks, json, detach, base, name, gates, maxIterations, timeoutMinutes, adapterName };
+  return { tasks, json, detach, base, name, gates, maxIterations, timeoutMinutes, network, adapterName };
 }
 
 /** The host comes from whatever the agent sent, so only a plain hostname is ever printed unquoted. */
-export function formatBlockedAdvice(blocked: readonly Blocked[]): string {
+export function formatBlockedAdvice(blocked: readonly Blocked[], allowlist: readonly string[]): string {
   return blocked
     .map((entry) => {
       const times = entry.count === 1 ? "1 attempt" : `${entry.count} attempts`;
@@ -144,19 +164,64 @@ export function formatBlockedAdvice(blocked: readonly Blocked[]): string {
       if (!plain) {
         return `Blocked: ${shown} (${times}). The Allowlist names plain hostnames only, so there is nothing to allow.`;
       }
-      if (BUILT_IN_ALLOWLIST.includes(entry.host)) {
+      if (isInternalHostname(entry.host)) {
+        return `Blocked: ${shown} (${times}). It names a host inside your machine or network, which the Allowlist never opens.`;
+      }
+      if (allowlist.includes(entry.host)) {
         return (
           `Blocked: ${shown} (${times}). It is already on the Allowlist; the request was refused ` +
           "for its form, not its host."
         );
       }
       return (
-        `Blocked: ${shown} (${times}). \`crisol allow\` is not built yet; once it is, allow it with:\n` +
+        `Blocked: ${shown} (${times}). Allow it for every repo, or for this repo only, with:\n` +
         `  crisol allow ${shown}\n` +
         `  crisol allow ${shown} --repo`
       );
     })
     .join("\n");
+}
+
+/** Lines to paste, never a question: the user copies only the hosts the repo really needs. */
+export function formatLearnedHosts(hosts: readonly string[]): string {
+  const count = hosts.length === 1 ? "1 host" : `${hosts.length} hosts`;
+  return (
+    `This learn Run reached ${count} neither built in nor on this repo's Allowlist. ` +
+    "Add the ones the repo needs with:\n" +
+    hosts.map((host) => `  crisol allow ${host} --repo`).join("\n")
+  );
+}
+
+function describeAllow({ outcome, host }: { outcome: AllowOutcome; host: string }, level: string, file: string): string {
+  if (outcome === "added") return `Added ${host} to the ${level} Allowlist (${file}).`;
+  if (outcome === "already") return `${host} is already on the ${level} Allowlist (${file}).`;
+  return `${host} is on the built-in Allowlist already.`;
+}
+
+function runAllowCommand(rest: string[]): number {
+  const toRepo = rest.includes("--repo");
+  const hosts = rest.filter((arg) => arg !== "--repo");
+  if (hosts.length !== 1 || hosts[0]!.startsWith("--")) {
+    process.stderr.write(`${ALLOW_USAGE}\n`);
+    return 1;
+  }
+  const host = hosts[0]!;
+  try {
+    if (!toRepo) {
+      const home = crisolHome();
+      console.log(describeAllow(addToUserAllowlist(home, host), "user", userAllowlistPath(home)));
+      return 0;
+    }
+    const hostRepoPath = discoverGitRoot(process.cwd());
+    if (!hostRepoPath) throw new Error(`Not inside a git repo: ${process.cwd()}. --repo edits the repo you run it in.`);
+    const added = addToRepoAllowlist(hostRepoPath, host);
+    const file = repoAllowlistPath(hostRepoPath);
+    console.log(describeAllow(added, "repo", file) + (added.outcome === "added" ? " Commit it to share it." : ""));
+    return 0;
+  } catch (error) {
+    process.stderr.write(`${formatError(error)}\n`);
+    return 1;
+  }
 }
 
 /** An `AggregateError`'s own `.message` drops its causes. */
@@ -280,8 +345,11 @@ async function main(argv: string[]): Promise<number> {
   if (command === "logs") {
     return runLogsCommand(rest);
   }
+  if (command === "allow") {
+    return runAllowCommand(rest);
+  }
   if (command !== "run") {
-    process.stderr.write(`${USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n${STATUS_USAGE}\n${LOGS_USAGE}\n`);
+    process.stderr.write(`${USAGE}\n${ALLOW_USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n${STATUS_USAGE}\n${LOGS_USAGE}\n`);
     return 1;
   }
 
@@ -302,6 +370,7 @@ async function main(argv: string[]): Promise<number> {
     gates: args.gates,
     maxIterations: args.maxIterations,
     ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
+    network: args.network,
     adapter: args.adapterName === "claude-code" ? new ClaudeCodeAdapter() : undefined,
   };
 
@@ -329,12 +398,17 @@ async function main(argv: string[]): Promise<number> {
   const onSignal = (signal: NodeJS.Signals) => interrupt.abort(signal);
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, onSignal);
 
+  // A warning `onWarning` already printed is in the Run result too; printing it again would read as two.
+  const shownWarnings = new Set<string>();
   const options: Omit<RunOptions, "task"> = {
     ...runOptions,
     detached: handoff && { run: handoff.run, lockFd: handoff.lockFd },
     onSlotWait: (maxParallel) =>
       process.stderr.write(`Waiting for a free Slot (max_parallel = ${maxParallel})…\n`),
-    onWarning: (warning) => process.stderr.write(`Warning: ${warning}\n`),
+    onWarning: (warning) => {
+      shownWarnings.add(warning);
+      process.stderr.write(`Warning: ${warning}\n`);
+    },
     signal: interrupt.signal,
   };
 
@@ -349,16 +423,35 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
+  // Each Run already read the Allowlist before it started; a level edited since only shifts advice.
+  const hostRepoPath = discoverGitRoot(process.cwd());
+  let allowlist: readonly string[] = BUILT_IN_ALLOWLIST;
+  let baseline: readonly string[] = BUILT_IN_ALLOWLIST;
+  let baselineError: unknown;
+  try {
+    if (hostRepoPath) allowlist = mergedAllowlist(crisolHome(), hostRepoPath);
+  } catch {}
+  try {
+    if (hostRepoPath) baseline = learnBaseline(hostRepoPath);
+  } catch (error) {
+    baselineError = error;
+  }
+
   let exitCode = 0;
+  const learned = new Set<string>();
   settled.forEach((outcome, index) => {
     if (outcome.status === "fulfilled") {
       const result = outcome.value;
+      for (const host of hostsToLearn(result.reached ?? [], baseline)) learned.add(host);
       if (args.json) {
         console.log(JSON.stringify(result));
       } else {
         const summary = `Run ${result.run}: branch ${result.branch}, status ${result.status}.`;
-        const advice = formatBlockedAdvice(result.blocked);
+        const advice = formatBlockedAdvice(result.blocked, allowlist);
         console.log(advice.length > 0 ? `${summary}\n${advice}` : summary);
+        for (const warning of result.warnings) {
+          if (!shownWarnings.has(warning)) process.stderr.write(`Warning: Run ${result.run}: ${warning}\n`);
+        }
       }
     } else {
       exitCode = 1;
@@ -366,6 +459,13 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(`${prefix}${formatError(outcome.reason)}\n`);
     }
   });
+  // --json is a machine's contract: one Run result per line, and `reached` is already in it.
+  if (!args.json && learned.size > 0) {
+    // Proposals measured against a level that would not parse would include hosts already on it,
+    // and pasting them would fail on the same line.
+    if (baselineError === undefined) console.log(formatLearnedHosts([...learned]));
+    else process.stderr.write(`Cannot propose hosts for the repo level: ${formatError(baselineError)}\n`);
+  }
   return exitCode;
 }
 

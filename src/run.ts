@@ -1,6 +1,8 @@
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Adapter, AdapterContext, PreStartDeclaration } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
+import { allowlistByLevel, repoLevelChangeWarning } from "./allowlist";
+import type { AllowlistEntry } from "./allowlist";
 import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
 import { assertDockerReachable, ensureBaseImage, removeRunSandboxes, startSandbox } from "./docker";
@@ -8,8 +10,9 @@ import type { Sandbox } from "./docker";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
 import type { Gate } from "./gates";
 import { ensureProxyImage, startNetworkWall } from "./network";
-import type { Blocked, NetworkWall } from "./network";
+import type { Blocked, NetworkMode, NetworkWall, WallPolicy } from "./network";
 import {
+  addedLines,
   branchExists,
   checkoutNewBranch,
   cloneLocal,
@@ -25,17 +28,16 @@ import {
   tagExists,
 } from "./git";
 import type { GitIdentity } from "./git";
-import { crisolHome, runDir, runLockPath, runLogPath, runPidPath, runRepoPath, runResultPath, runsRoot } from "./paths";
+import { REPO_ALLOWLIST_FILE, crisolHome, runDir, runLockPath, runLogPath, runPidPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import { KeychainSecretStore } from "./secret-store";
 import type { SecretStore } from "./secret-store";
 import { acquireSlot, adoptLock, tryLockRun } from "./slots";
 import type { HeldLock, Slot } from "./slots";
 
 export type { Gate } from "./gates";
-export type { Blocked } from "./network";
+export type { Blocked, NetworkMode } from "./network";
 
 export type RunStatus = "verified" | "unverified" | "not-converged";
-export type NetworkMode = "allowlist" | "learn" | "open";
 
 const DEFAULT_BRANCH_PREFIX = "crisol";
 
@@ -76,6 +78,7 @@ export interface RunResult {
   gates: Gate[];
   network: NetworkMode;
   blocked: Blocked[];
+  reached?: Blocked[];
   warnings: string[];
   /**
    * Whether Fetch-back brought the branch into the host repo. `false` leaves it to `crisol recover`
@@ -92,15 +95,12 @@ export interface RunLockRecord {
 
 export interface RunOptions {
   task: string;
-  /** Where to discover the host git repo from — normally `process.cwd()`. */
   cwd: string;
   base?: string;
   /** Pins the commit `base` names, so a fan-out cuts every Run from one commit even if the ref moves meanwhile. */
   baseSha?: string;
   name?: string;
-  /** Overrides `crisolHome()`. */
   home?: string;
-  /** Defaults to `FakeAdapter`. */
   adapter?: Adapter;
   /** Test seam: forces a run-id collision. */
   generateRunId?: () => string;
@@ -111,8 +111,8 @@ export interface RunOptions {
   /** `--gate`; absent or empty falls through to the repo's Gates. */
   gates?: readonly string[];
   maxIterations?: number;
-  /** In ms. */
   ceilingMs?: number;
+  network?: NetworkMode;
   /** Defaults to the login Keychain, which a test must never touch. */
   secretStore?: SecretStore;
   /** Called once if every Slot is taken and the Run starts waiting for one. */
@@ -137,6 +137,20 @@ function generateRunId(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 8);
 }
 
+/** Names every host a user or repo level brought, since a cloned repo's level widens this Run unseen. */
+function formatAllowlistLevels(entries: readonly AllowlistEntry[]): string {
+  const builtIn = entries.filter((entry) => entry.level === "built-in").length;
+  const named = (["user", "repo"] as const).map((level) => {
+    const hosts = entries.filter((entry) => entry.level === level).map((entry) => entry.host);
+    return `${level}: ${hosts.length > 0 ? hosts.join(", ") : "none"}`;
+  });
+  return [`${builtIn} built-in`, ...named].join("; ");
+}
+
+function formatCounts(entries: readonly Blocked[]): string {
+  return entries.map((b) => `${b.host}${b.port !== undefined ? `:${b.port}` : ""}=${b.count}`).join(", ");
+}
+
 function appendLog(logPath: string, line: string): void {
   appendFileSync(logPath, `[${new Date().toISOString()}] ${line}\n`);
 }
@@ -152,7 +166,6 @@ function isEexist(error: unknown): boolean {
 interface Reservation {
   id: string;
   branch: string;
-  /** The host repo the branch is fetched back into. */
   host: string;
   lock: HeldLock;
 }
@@ -288,9 +301,7 @@ function resolveAdapterSecretValues(
 const INTERRUPTING_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 
 interface Interruption {
-  /** The first signal received, if any. */
   readonly by: string | undefined;
-  /** Rejects on the first signal. */
   readonly rejected: Promise<never>;
   throwIfInterrupted(): void;
   disarm(): void;
@@ -386,7 +397,8 @@ interface PreparedRun {
   adapterSecretValues: Record<string, string>;
   secretEnvNames: string[];
   image: string;
-  proxyImage: string;
+  proxyImage: string | undefined;
+  allowlist: AllowlistEntry[];
 }
 
 async function prepareRun(options: RunOptions): Promise<PreparedRun> {
@@ -422,6 +434,10 @@ async function prepareRun(options: RunOptions): Promise<PreparedRun> {
   const repoSecretNames = readRepoSecretNames(hostRepoPath);
   assertDeclaredSecretsPresent(repoSecretNames);
 
+  // Only a wall enforces the levels, so only an allowlist Run reads them: a bad line in one fails
+  // that Run now, and never breaks the learn or open escape hatches.
+  const allowlist = (options.network ?? "allowlist") === "allowlist" ? allowlistByLevel(home, hostRepoPath) : [];
+
   assertDockerReachable();
 
   const adapter = options.adapter ?? new FakeAdapter();
@@ -434,7 +450,10 @@ async function prepareRun(options: RunOptions): Promise<PreparedRun> {
   const ensureProxyImageFn = options.ensureProxyImage ?? ensureProxyImage;
   // An offline first Run must fail here, never after leaving a Clone and a branch behind —
   // the Allowlist proxy's image is resolved pre-flight for the same reason the Sandbox's is.
-  const [image, proxyImage] = await Promise.all([ensureImage(), ensureProxyImageFn()]);
+  const [image, proxyImage] = await Promise.all([
+    ensureImage(),
+    options.network === "open" ? undefined : ensureProxyImageFn(),
+  ]);
 
   return {
     home,
@@ -453,6 +472,7 @@ async function prepareRun(options: RunOptions): Promise<PreparedRun> {
     secretEnvNames,
     image,
     proxyImage,
+    allowlist,
   };
 }
 
@@ -499,6 +519,7 @@ function endUnstartedRun(
   reservation: Reservation,
   home: string,
   base: string,
+  network: NetworkMode,
   signal: AbortSignal | undefined,
   error: unknown,
 ): void {
@@ -513,7 +534,7 @@ function endUnstartedRun(
     reason,
     iterations: 0,
     gates: [],
-    network: "allowlist", // the Run's configured mode, even though it never got far enough to stand one up
+    network,
     blocked: [],
     warnings: [],
     fetchBack: false,
@@ -538,11 +559,8 @@ export interface DetachedRun {
   baseSha: string;
   logPath: string;
   pidPath: string;
-  /** The Run lock: pass `lock.fd` down, then release this process's copy. */
   lock: HeldLock;
-  /** Removes the run dir, for a detach that could not start its process. */
   discard(): void;
-  /** Writes the Run result and lets go, for a started process that died before taking over. */
   end(error: unknown): void;
 }
 
@@ -560,7 +578,7 @@ export async function reserveDetachedRun(options: RunOptions): Promise<DetachedR
     pidPath: runPidPath(reservation.id, prepared.home),
     lock: reservation.lock,
     discard: () => discardReservation(reservation, prepared.home),
-    end: (error) => endUnstartedRun(reservation, prepared.home, base, undefined, error),
+    end: (error) => endUnstartedRun(reservation, prepared.home, base, options.network ?? "allowlist", undefined, error),
   };
 }
 
@@ -576,6 +594,7 @@ function interruptedBeforeReserving(): Error {
  */
 export async function run(options: RunOptions): Promise<RunResult> {
   const home = options.home ?? crisolHome();
+  const networkMode = options.network ?? "allowlist";
   let reservation: Reservation;
   let prepared: PreparedRun;
   let base: string;
@@ -589,7 +608,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
         throw new Error(`Run ${reservation.id} was reserved for ${reservation.host}, not ${prepared.hostRepoPath}.`);
       }
     } catch (error) {
-      endUnstartedRun(reservation, home, base, options.signal, error);
+      endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
       throw error;
     }
   } else {
@@ -603,7 +622,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     try {
       writeFileSync(runPidPath(reservation.id, home), String(process.pid));
     } catch (error) {
-      endUnstartedRun(reservation, home, base, options.signal, error);
+      endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
       throw error;
     }
   }
@@ -622,6 +641,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     secretEnvNames,
     image,
     proxyImage,
+    allowlist,
   } = prepared;
 
   let slot: Slot;
@@ -633,7 +653,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
       signal: options.signal,
     });
   } catch (error) {
-    endUnstartedRun(reservation, home, base, options.signal, error);
+    endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
     throw error;
   }
 
@@ -660,6 +680,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
   let sandbox: Sandbox | undefined;
   let wall: NetworkWall | undefined;
   let blocked: Blocked[] = [];
+  let reached: Blocked[] = [];
 
   const converge = async (ctx: AdapterContext): Promise<void> => {
     await adapter.launch(ctx);
@@ -720,10 +741,19 @@ export async function run(options: RunOptions): Promise<RunResult> {
       await letSignalsLand();
       interruption.throwIfInterrupted();
 
-      // The wall goes up BEFORE the Sandbox exists — its network is the Sandbox's only way out,
-      // fixed at `docker run` time like every other pre-start declaration.
-      wall = await startNetworkWall(id, home, proxyImage);
-      appendLog(logPath, `network wall up: ${wall.networkName}`);
+      // Any wall goes up BEFORE the Sandbox exists: the network a container joins is fixed at
+      // `docker run` time, like every other pre-start declaration.
+      if (proxyImage !== undefined && networkMode !== "open") {
+        const policy: WallPolicy =
+          networkMode === "learn"
+            ? { mode: "learn" }
+            : { mode: "allowlist", hosts: allowlist.map((entry) => entry.host) };
+        wall = await startNetworkWall(id, home, proxyImage, policy);
+        appendLog(logPath, `network wall up (${networkMode}): ${wall.networkName}`);
+        if (networkMode === "allowlist") appendLog(logPath, `allowlist: ${formatAllowlistLevels(allowlist)}`);
+      } else {
+        appendLog(logPath, "network open: no wall, the Sandbox is on Docker's default network");
+      }
       await letSignalsLand();
       interruption.throwIfInterrupted();
 
@@ -735,12 +765,12 @@ export async function run(options: RunOptions): Promise<RunResult> {
           GIT_AUTHOR_EMAIL: identity.email,
           GIT_COMMITTER_NAME: identity.name,
           GIT_COMMITTER_EMAIL: identity.email,
-          ...wall.proxyEnv,
+          ...wall?.proxyEnv,
         },
         secretEnvNames,
         secretEnv: adapterSecretValues,
         mounts: preStart.mounts,
-        network: wall.networkName,
+        network: wall?.networkName,
         id,
       });
       appendLog(
@@ -756,6 +786,8 @@ export async function run(options: RunOptions): Promise<RunResult> {
       // Best-effort: a failed scan must not turn a converged Run into a failed one.
       try {
         warnings.push(...scanCommitsForWarnings(clonePath, `${baseSha}..${branch}`, identity));
+        const repoLevelChange = addedLines(clonePath, `${baseSha}..${branch}`, REPO_ALLOWLIST_FILE);
+        if (repoLevelChange !== undefined) warnings.push(repoLevelChangeWarning(repoLevelChange));
       } catch (error) {
         appendLog(logPath, `commit scan failed: ${errorMessage(error)}`);
       }
@@ -767,13 +799,11 @@ export async function run(options: RunOptions): Promise<RunResult> {
     // Read before the proxy container is removed — there is no log left to read after.
     if (wall) {
       try {
-        blocked = await wall.readBlocked();
-        if (blocked.length > 0) {
-          const entries = blocked.map((b) => `${b.host}${b.port !== undefined ? `:${b.port}` : ""}=${b.count}`);
-          appendLog(logPath, `blocked: ${entries.join(", ")}`);
-        }
+        ({ blocked, reached } = await wall.readTraffic());
+        if (blocked.length > 0) appendLog(logPath, `blocked: ${formatCounts(blocked)}`);
+        if (networkMode === "learn" && reached.length > 0) appendLog(logPath, `reached: ${formatCounts(reached)}`);
       } catch (error) {
-        appendLog(logPath, `reading the proxy's blocked hosts failed: ${errorMessage(error)}`);
+        appendLog(logPath, `reading the proxy's log failed: ${errorMessage(error)}`);
       }
     }
 
@@ -821,8 +851,9 @@ export async function run(options: RunOptions): Promise<RunResult> {
       ...(reason !== undefined ? { reason } : {}),
       iterations,
       gates: gateResults,
-      network: "allowlist",
+      network: networkMode,
       blocked,
+      ...(networkMode === "learn" ? { reached } : {}),
       warnings,
       fetchBack: fetchedBack,
     };

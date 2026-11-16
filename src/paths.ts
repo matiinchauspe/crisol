@@ -32,6 +32,17 @@ export function slotsDir(home: string = crisolHome()): string {
   return path.join(home, "slots");
 }
 
+export function userAllowlistPath(home: string = crisolHome()): string {
+  return path.join(home, "network");
+}
+
+/** Relative to the repo root, where git names it in a diff. */
+export const REPO_ALLOWLIST_FILE = ".crisol/network";
+
+export function repoAllowlistPath(hostRepoPath: string): string {
+  return path.join(hostRepoPath, REPO_ALLOWLIST_FILE);
+}
+
 export function runNetworkDir(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "network");
 }

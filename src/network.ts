@@ -3,9 +3,13 @@ import { ensureImageFromDockerfile } from "./docker";
 import type { ExecResult, StopResult } from "./docker";
 import { runNetworkDir, runProxyConfPath, runProxyFilterPath } from "./paths";
 
+export type NetworkMode = "allowlist" | "learn" | "open";
+
+export type WallPolicy = { mode: "allowlist"; hosts: readonly string[] } | { mode: "learn" };
+
 export interface Blocked {
   host: string;
-  /** Set only when the refused port was not the scheme's own (443 for CONNECT, 80 for plain HTTP). */
+  /** Set only when the port is not the scheme's own (443 for CONNECT, 80 for plain HTTP). */
   port?: number;
   count: number;
 }
@@ -26,8 +30,9 @@ const PROXY_PORT = 8888;
 const CONNECT_PORT = 443;
 const HTTP_PORT = 80;
 /**
- * tinyproxy's `-d` keeps it in the foreground, or `docker logs` — where `readBlocked` reads
- * refusals — sees nothing. Without `CMD` the container runs Alpine's `/bin/sh` and exits at once.
+ * tinyproxy's `-d` keeps it in the foreground, or `docker logs` — where `readTraffic` reads
+ * refusals and connections — sees nothing. Without `CMD` the container runs Alpine's `/bin/sh`
+ * and exits at once.
  */
 const PROXY_DOCKERFILE =
   'FROM alpine:3.20\nRUN apk add --no-cache tinyproxy\nCMD ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]\n';
@@ -45,6 +50,22 @@ const PLAIN_HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)
  */
 export function isPlainHostname(host: string): boolean {
   return PLAIN_HOSTNAME.test(host);
+}
+
+/**
+ * Names that resolve to the machine, its containers, the LAN or a cloud metadata service, never to
+ * the public internet — opening one would let every Run reach inside. Each entry is a top-level
+ * label: `internal` (ICANN's private-use TLD, holding `host.docker.internal` and
+ * `metadata.google.internal`), `local` (mDNS, and Kubernetes' `cluster.local`), `localhost`
+ * (loopback, RFC 6761), `localdomain` (the `/etc/hosts` loopback alias), `svc` (Kubernetes
+ * services), `arpa` (reverse DNS and `home.arpa`), and `lan`, `home`, `corp` (never delegated,
+ * used by routers and company DNS).
+ */
+const INTERNAL_TOP_LEVEL_LABELS = ["internal", "local", "localhost", "localdomain", "svc", "arpa", "lan", "home", "corp"];
+
+export function isInternalHostname(host: string): boolean {
+  const labels = host.toLowerCase().split(".");
+  return labels[0] === "localhost" || INTERNAL_TOP_LEVEL_LABELS.includes(labels[labels.length - 1]!);
 }
 
 function escapeForExtendedRegex(literal: string): string {
@@ -73,7 +94,11 @@ export function renderTinyproxyFilter(hosts: readonly string[]): string {
  * bridge, and any container there could otherwise relay through it. No `ConnectPort`: the filter
  * already pins every port, and a `ConnectPort` refusal logs the port without the host.
  */
-export function renderTinyproxyConf(allowedClientCidr: string): string {
+export function renderTinyproxyConf(allowedClientCidr: string, mode: WallPolicy["mode"] = "allowlist"): string {
+  const filter =
+    mode === "learn"
+      ? []
+      : ['Filter "/etc/tinyproxy/filter"', "FilterType ere", "FilterURLs On", "FilterDefaultDeny Yes"];
   return (
     [
       "User nobody",
@@ -86,10 +111,7 @@ export function renderTinyproxyConf(allowedClientCidr: string): string {
       "LogLevel Info",
       "MaxClients 100",
       `Allow ${allowedClientCidr}`,
-      'Filter "/etc/tinyproxy/filter"',
-      "FilterType ere",
-      "FilterURLs On",
-      "FilterDefaultDeny Yes",
+      ...filter,
     ].join("\n") + "\n"
   );
 }
@@ -97,11 +119,11 @@ export function renderTinyproxyConf(allowedClientCidr: string): string {
 const BLOCKED_LOG_LINE = /Proxying refused on filtered url "([^"]+)"/g;
 
 /**
- * A refused CONNECT logs `host:port`, a refused plain HTTP request its whole URL. `URL` reads
+ * tinyproxy names a CONNECT as `host:port` and a plain HTTP request as its whole URL. `URL` reads
  * the host the way tinyproxy routes it, past any `user@`; the `tcp:` scheme has no default
  * port, so a CONNECT's port is never dropped.
  */
-function parseRefusedTarget(target: string): { host: string; port?: number } | undefined {
+function parseTarget(target: string): { host: string; port?: number } | undefined {
   const isHttp = /^http:\/\//i.test(target);
   let url: URL;
   try {
@@ -116,17 +138,48 @@ function parseRefusedTarget(target: string): { host: string; port?: number } | u
   return port === ownPort ? { host } : { host, port };
 }
 
-export function parseBlockedHosts(log: string): Blocked[] {
+function countTargets(rawTargets: Iterable<string>, keep: (host: string) => boolean = () => true): Blocked[] {
   const counts = new Map<string, Blocked>();
-  for (const match of log.matchAll(BLOCKED_LOG_LINE)) {
-    const target = parseRefusedTarget(match[1]!);
-    if (target === undefined) continue;
+  for (const raw of rawTargets) {
+    const target = parseTarget(raw);
+    if (target === undefined || !keep(target.host)) continue;
     const key = `${target.host}:${target.port ?? ""}`;
     const entry = counts.get(key) ?? { ...target, count: 0 };
     entry.count += 1;
     counts.set(key, entry);
   }
   return [...counts.values()];
+}
+
+export function parseBlockedHosts(log: string): Blocked[] {
+  return countTargets([...log.matchAll(BLOCKED_LOG_LINE)].map((match) => match[1]!));
+}
+
+/**
+ * Anchored to tinyproxy's own line prefix, timestamp included, so text the agent put mid-line in a
+ * request is not read as a connection. A bare `\r` still splits a line under the `m` flag and can
+ * forge one; that only adds a host to the lines printed for the user, on a Run that could reach any
+ * host anyway.
+ */
+const LOG_PREFIX = String.raw`^CONNECT +[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}\.\d{3} \[\d+\]: `;
+const REQUEST_LINE = new RegExp(
+  `${LOG_PREFIX}Request \\(file descriptor \\d+\\): (?:CONNECT (\\S+)|[A-Z]+ (http://\\S+)) HTTP/\\d\\.\\d$`,
+  "gm",
+);
+const ESTABLISHED_LINE = new RegExp(
+  `${LOG_PREFIX}Established connection to host "([^"]+)" using file descriptor \\d+\\.$`,
+  "gm",
+);
+
+/**
+ * Every request whose host the proxy connected to at least once. tinyproxy logs the connection
+ * without its port, so a port that failed counts as reached when the same host connected on
+ * another; harmless, since a port is never offered to the Allowlist.
+ */
+export function parseReachedHosts(log: string): Blocked[] {
+  const connected = new Set([...log.matchAll(ESTABLISHED_LINE)].map((match) => match[1]!.toLowerCase()));
+  const requests = [...log.matchAll(REQUEST_LINE)].map((match) => (match[1] ?? match[2])!);
+  return countTargets(requests, (host) => connected.has(host));
 }
 
 /** curl reads only lowercase `http_proxy` (httpoxy); npm, pip and git read the uppercase names. */
@@ -220,7 +273,7 @@ interface StartProxyOptions {
   image: string;
   id: string;
   confPath: string;
-  filterPath: string;
+  filterPath?: string;
 }
 
 /**
@@ -245,8 +298,9 @@ async function startProxyContainer(options: StartProxyOptions): Promise<string> 
     `crisol.run=${id}`,
     "--mount",
     `type=bind,source=${confPath},target=/etc/tinyproxy/tinyproxy.conf,readonly`,
-    "--mount",
-    `type=bind,source=${filterPath},target=/etc/tinyproxy/filter,readonly`,
+    ...(filterPath !== undefined
+      ? ["--mount", `type=bind,source=${filterPath},target=/etc/tinyproxy/filter,readonly`]
+      : []),
     image,
   ];
   const result = await runDocker(args);
@@ -267,8 +321,8 @@ export interface NetworkWall {
   networkName: string;
   /** Not a secret, so it rides the Sandbox's plain `env`. */
   proxyEnv: Record<string, string>;
-  /** Call before `teardown`: the refusals live only in the proxy container's log. */
-  readBlocked(): Promise<Blocked[]>;
+  /** Call before `teardown`: refusals and connections live only in the proxy container's log. */
+  readTraffic(): Promise<{ blocked: Blocked[]; reached: Blocked[] }>;
   /** Never throws and never logs; the caller reports a failed teardown. */
   teardown(): Promise<StopResult>;
 }
@@ -282,6 +336,7 @@ export async function startNetworkWall(
   id: string,
   home: string,
   proxyImage: string,
+  policy: WallPolicy,
   inspectSubnetFn: (name: string) => string | undefined = inspectSubnet,
 ): Promise<NetworkWall> {
   const network = await createInternalNetwork(id);
@@ -295,9 +350,12 @@ export async function startNetworkWall(
     const dir = runNetworkDir(id, home);
     mkdirSync(dir, { recursive: true });
     const confPath = runProxyConfPath(id, home);
-    const filterPath = runProxyFilterPath(id, home);
-    writeFileSync(confPath, renderTinyproxyConf(subnet));
-    writeFileSync(filterPath, renderTinyproxyFilter(BUILT_IN_ALLOWLIST));
+    writeFileSync(confPath, renderTinyproxyConf(subnet, policy.mode));
+    let filterPath: string | undefined;
+    if (policy.mode === "allowlist") {
+      filterPath = runProxyFilterPath(id, home);
+      writeFileSync(filterPath, renderTinyproxyFilter(policy.hosts));
+    }
 
     const container = await startProxyContainer({ image: proxyImage, id, confPath, filterPath });
     try {
@@ -310,9 +368,10 @@ export async function startNetworkWall(
     return {
       networkName: network,
       proxyEnv: buildProxyEnv(container),
-      async readBlocked(): Promise<Blocked[]> {
+      async readTraffic() {
         const logs = await runDocker(["docker", "logs", container]);
-        return parseBlockedHosts(`${logs.stdout}\n${logs.stderr}`);
+        const log = `${logs.stdout}\n${logs.stderr}`;
+        return { blocked: parseBlockedHosts(log), reached: parseReachedHosts(log) };
       },
       async teardown(): Promise<StopResult> {
         const containerRemoved = await removeContainerByName(container);

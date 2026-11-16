@@ -2,10 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 /**
- * The middle rung of the Gate ladder. Read from the HOST repo's working tree —
- * never the Clone, which doesn't exist yet at this point in a Run. A missing file
- * or a file with no `gates` key both yield `[]`: an unconfigured repo is the "none"
- * rung, not an error.
+ * Read from the host repo's working tree: the Clone does not exist yet. An unconfigured repo is
+ * the ladder's "none" rung, not an error.
  */
 export function readRepoGates(hostRepoPath: string): string[] {
   const configPath = path.join(hostRepoPath, ".crisol", "config.toml");
@@ -13,11 +11,7 @@ export function readRepoGates(hostRepoPath: string): string[] {
   return parseGatesArray(readFileSync(configPath, "utf8"));
 }
 
-/**
- * `.crisol/config.toml`'s `env = [...]` — secret env var NAMES a repo declares (never
- * values), read from the host's own environment at launch. Same file, same missing-file
- * rule as `readRepoGates`.
- */
+/** Names only, never values: each is read from the host's own environment at launch. */
 export function readRepoSecretNames(hostRepoPath: string): string[] {
   const configPath = path.join(hostRepoPath, ".crisol", "config.toml");
   if (!existsSync(configPath)) return [];
@@ -31,10 +25,8 @@ function arrayKeyLine(key: string): RegExp {
 }
 
 /**
- * Shared by every single-line, double-quoted string-array key `.crisol/config.toml`
- * carries (`gates`, `env`, ...). Deliberately narrow: only a single-line array is
- * recognised; anything else is silently ignored rather than rejected, so a repo adding
- * one key doesn't break a parse of another already there.
+ * Only a single-line array of double-quoted strings is recognised, and anything else is ignored
+ * rather than rejected, so one key this parser cannot read never breaks another.
  */
 function parseStringArrayKey(text: string, key: string): string[] {
   const match = arrayKeyLine(key).exec(text);
@@ -49,24 +41,20 @@ function parseStringArrayKey(text: string, key: string): string[] {
   return items;
 }
 
-/** Exported for a direct unit test — parsing needs no filesystem. */
 export function parseGatesArray(text: string): string[] {
   return parseStringArrayKey(text, "gates");
 }
 
-/** Exported for a direct unit test — parsing needs no filesystem. */
 export function parseSecretNamesArray(text: string): string[] {
   return parseStringArrayKey(text, "env");
 }
 
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 
-/** Shared by the CLI's flag validation and `extractIntKey` below, so both reject the same values the same way. */
 export function parsePositiveInteger(raw: string): number | undefined {
   return POSITIVE_INTEGER.test(raw) ? Number.parseInt(raw, 10) : undefined;
 }
 
-/** `~/.crisol/config`; an unset key falls through to the built-in default. */
 export interface GlobalConfig {
   maxIterations?: number;
   timeoutMinutes?: number;
@@ -88,11 +76,7 @@ function extractIntKey(text: string, key: string, sourcePath: string): number | 
   return value;
 }
 
-/**
- * Any other key is silently ignored, never rejected — same forward-compat as
- * `parseGatesArray`. `sourcePath` only names the source in a thrown error, so a
- * unit test can pass a fake one without touching disk.
- */
+/** Any other key is ignored, never rejected, so one Crisol version reads another's config. */
 export function parseGlobalConfig(text: string, sourcePath: string): GlobalConfig {
   const config: GlobalConfig = {};
   const maxIterations = extractIntKey(text, "max_iterations", sourcePath);
@@ -104,19 +88,13 @@ export function parseGlobalConfig(text: string, sourcePath: string): GlobalConfi
   return config;
 }
 
-/** `home`, never the host repo — that's `readRepoGates`. A missing file falls through to the built-in default, not an error. */
 export function readGlobalConfig(home: string): GlobalConfig {
   const configPath = path.join(home, "config");
   if (!existsSync(configPath)) return {};
   return parseGlobalConfig(readFileSync(configPath, "utf8"), configPath);
 }
 
-/**
- * `~/.crisol/instructions.md` — injected as agent instructions in every Run when present.
- * `home`, like `readGlobalConfig`, never the host repo or `~/.claude`: the global
- * `~/.claude/CLAUDE.md` is never read or mounted. A missing file is the normal case, not
- * an error.
- */
+/** From Crisol's home, never `~/.claude`: the global `~/.claude/CLAUDE.md` never reaches a Run. */
 export function readInstructions(home: string): string | undefined {
   const instructionsPath = path.join(home, "instructions.md");
   if (!existsSync(instructionsPath)) return undefined;

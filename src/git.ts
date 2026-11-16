@@ -254,3 +254,16 @@ export function scanCommitsForWarnings(
   }
   return warnings;
 }
+
+/** `undefined` when the range leaves `file` untouched; otherwise the lines it adds, without the `+`. */
+export function addedLines(clonePath: string, range: string, file: string): string[] | undefined {
+  const result = run(["git", "-C", clonePath, "diff", "--no-color", "--no-ext-diff", "--unified=0", range, "--", file]);
+  if (result.exitCode !== 0) {
+    throw new Error(`\`git diff ${range} -- ${file}\` failed: ${result.stderr.trim()}`);
+  }
+  if (result.stdout.trim() === "") return undefined;
+  return result.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => line.slice(1));
+}
