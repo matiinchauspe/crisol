@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { listRunSandboxIds, removeRunSandboxes } from "./docker";
 import { branchSha, fetchBack } from "./git";
+import { removeNetworkByRunId } from "./network";
 import { runLockPath, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import type { RunLockRecord, RunResult } from "./run";
 import { probeRunLock } from "./slots";
@@ -17,6 +18,8 @@ export interface RecoverReport {
   outcomes: RecoverOutcome[];
   /** Set when Docker could not be asked for a dead Run's Sandbox. */
   dockerWarning?: string;
+  /** One per dead Run whose Allowlist network outlived it. */
+  networkWarnings: string[];
 }
 
 function appendLog(id: string, home: string, line: string): void {
@@ -56,6 +59,7 @@ async function recoverDeadRun(
   hasSandbox: boolean,
 ): Promise<RecoverOutcome> {
   if (hasSandbox) {
+    // The proxy container carries the same label, so this sweep removes it too.
     const removed = await removeRunSandboxes(id);
     if (!removed.ok) {
       return { run: id, kind: "failed", error: `its Sandbox crisol-${id} could not be removed: ${removed.stderr}` };
@@ -99,10 +103,11 @@ async function recoverDeadRun(
 export async function recover(home: string): Promise<RecoverReport> {
   const ids = existsSync(runsRoot(home)) ? readdirSync(runsRoot(home)).sort() : [];
   const sandboxIds = ids.length > 0 ? listRunSandboxIds() : new Set<string>();
-  const report: RecoverReport = { outcomes: [] };
+  const report: RecoverReport = { outcomes: [], networkWarnings: [] };
   if (sandboxIds === undefined) {
     report.dockerWarning =
-      "Docker could not be asked for leftover Sandboxes; a dead Run's agent may still be writing to its Clone.";
+      "Docker could not be asked for leftover Sandboxes; a dead Run's agent may still be writing to its Clone, " +
+      "and its Allowlist network is left in place.";
   }
 
   for (const id of ids) {
@@ -119,6 +124,17 @@ export async function recover(home: string): Promise<RecoverReport> {
     }
     try {
       report.outcomes.push(await recoverDeadRun(id, home, record, sandboxIds?.has(id) ?? false));
+      // After fetch-back, and only when Docker answered: a network left behind is a leak to report,
+      // never a reason to leave the branch unrecovered.
+      if (sandboxIds !== undefined) {
+        const networkRemoved = await removeNetworkByRunId(id);
+        if (!networkRemoved.ok) {
+          appendLog(id, home, `Allowlist network removal failed: ${networkRemoved.stderr}`);
+          report.networkWarnings.push(
+            `Run ${id}: its Allowlist network crisol-net-${id} could not be removed (${networkRemoved.stderr}).`,
+          );
+        }
+      }
     } finally {
       lock.release();
     }

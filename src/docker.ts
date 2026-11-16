@@ -24,10 +24,14 @@ export interface Sandbox {
   stop(): Promise<StopResult>;
 }
 
-/** A placeholder until the Project and Agent layers exist. */
-export const SKELETON_DOCKERFILE = "FROM alpine:3.20\nRUN apk add --no-cache git bash\n";
+/**
+ * A placeholder until the Project and Agent layers exist. `curl` lets a Sandbox probe the
+ * network from inside itself; the tag moved too, since `ensureImageFromDockerfile` caches by
+ * tag alone and a machine with the pre-curl image under the old tag would keep serving it.
+ */
+export const SKELETON_DOCKERFILE = "FROM alpine:3.20\nRUN apk add --no-cache git bash curl\n";
 
-export const SKELETON_IMAGE_TAG = "crisol-base:0.1.0-skeleton";
+export const SKELETON_IMAGE_TAG = "crisol-base:0.1.1-skeleton";
 
 /**
  * Every `docker` child a Run makes leads its own session: a Ctrl+C or hang-up aimed at
@@ -114,6 +118,7 @@ export interface StartSandboxOptions {
   mounts?: readonly MountSpec[];
   /** Becomes the container's `--name crisol-<id>` and `--label crisol.run=<id>`. */
   id: string;
+  network?: string;
 }
 
 /** For the log only; `buildMountFlag` is what reaches `docker run`. */
@@ -128,7 +133,7 @@ function buildMountFlag(hostPath: string, containerPath: string, mode: "ro" | "r
 }
 
 export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
-  const { image, mountPath, env, secretEnvNames = [], mounts: extraMounts = [], id } = options;
+  const { image, mountPath, env, secretEnvNames = [], mounts: extraMounts = [], id, network } = options;
   const mountArgs = [
     { hostPath: mountPath, containerPath: mountPath, mode: "rw" as const },
     ...extraMounts,
@@ -144,6 +149,7 @@ export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
     "--init", // a real PID1 that forwards SIGTERM instead of `tail -f /dev/null` ignoring it
     "--pull",
     "never", // Crisol's image is always built locally — never let docker try a registry for it
+    ...(network !== undefined ? ["--network", network] : []),
     "--name",
     `crisol-${id}`,
     "--label",

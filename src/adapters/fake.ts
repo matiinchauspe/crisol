@@ -36,6 +36,48 @@ export const CO_AUTHORED_SCRIPT: readonly string[] = [
   'git commit --quiet -m "feat: record the walking-skeleton run" -m "Co-Authored-By: Claude <noreply@anthropic.com>"',
 ];
 
+/** `-f` fails the step on anything short of a 2xx, so the script's own exit code is the assertion. */
+export const REACH_ALLOWED_HOST_SCRIPT: readonly string[] = [
+  "curl -fsS --max-time 20 https://registry.npmjs.org/ > /dev/null",
+  "echo 'reached an allowlisted host' > ALLOWED.txt",
+  "git add ALLOWED.txt",
+  "git commit --quiet -m 'test: reach an allowlisted host'",
+];
+
+/** Twice, so `count: 2` tells a real block from a coincidence; the refusal is expected, hence `|| true`. */
+export const REACH_BLOCKED_HOST_SCRIPT: readonly string[] = [
+  "curl -sS --max-time 20 -o /dev/null https://example.com/ || true",
+  "curl -sS --max-time 20 -o /dev/null https://example.com/ || true",
+  "echo 'attempted a blocked host twice' > BLOCKED.txt",
+  "git add BLOCKED.txt",
+  "git commit --quiet -m 'test: attempt a blocked host'",
+];
+
+/**
+ * The committed file is how a test outside the Sandbox learns whether egress around the proxy got
+ * out. The IP literal needs no DNS, so its failure proves there is no route, not just no resolver.
+ */
+export const DIRECT_EGRESS_SCRIPT: readonly string[] = [
+  "curl -sS --noproxy '*' --max-time 15 https://registry.npmjs.org/ > /dev/null 2>&1 " +
+    "&& echo 'hostname REACHED' > DIRECT.txt || echo 'hostname BLOCKED' > DIRECT.txt",
+  "curl -sS --noproxy '*' --max-time 15 http://1.1.1.1/ > /dev/null 2>&1 " +
+    "&& echo 'ip-literal REACHED' >> DIRECT.txt || echo 'ip-literal BLOCKED' >> DIRECT.txt",
+  "git add DIRECT.txt",
+  "git commit --quiet -m 'test: direct egress bypassing the proxy'",
+];
+
+/**
+ * An allowlisted host on a port the wall never opens, once as plain HTTP and once as a CONNECT
+ * tunnel. Only a refusal answers 403; a proxy that let it through reaches port 22's SSH banner
+ * and answers 503. A refused tunnel's status is `http_connect`, not `http_code`.
+ */
+export const REACH_ALLOWED_HOST_ON_ANOTHER_PORT_SCRIPT: readonly string[] = [
+  "curl -sS --max-time 20 -o /dev/null -w '%{http_code}\\n' http://github.com:22/ > PORT.txt || true",
+  "curl -sS --max-time 20 -o /dev/null -w '%{http_connect}\\n' -p http://github.com:22/ >> PORT.txt || true",
+  "git add PORT.txt",
+  "git commit --quiet -m 'test: reach an allowlisted host on another port'",
+];
+
 export class FakeAdapter implements Adapter {
   constructor(
     private readonly launchScript: readonly string[] = DEFAULT_SCRIPT,

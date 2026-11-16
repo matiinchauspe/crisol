@@ -32,6 +32,18 @@ export function slotsDir(home: string = crisolHome()): string {
   return path.join(home, "slots");
 }
 
+export function runNetworkDir(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "network");
+}
+
+export function runProxyConfPath(id: string, home: string = crisolHome()): string {
+  return path.join(runNetworkDir(id, home), "tinyproxy.conf");
+}
+
+export function runProxyFilterPath(id: string, home: string = crisolHome()): string {
+  return path.join(runNetworkDir(id, home), "filter");
+}
+
 export function slotPath(index: number, home: string = crisolHome()): string {
   return path.join(slotsDir(home), `${index}.lock`);
 }

@@ -10,7 +10,8 @@ import type { RecoverOutcome } from "./recover";
 import { run, runFanOut } from "./run";
 import { listRuns, readRunLog } from "./runs";
 import type { RunEntry } from "./runs";
-import type { RunOptions, RunResult } from "./run";
+import { BUILT_IN_ALLOWLIST, isPlainHostname } from "./network";
+import type { Blocked, RunOptions, RunResult } from "./run";
 import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
@@ -127,6 +128,37 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
   return { tasks, json, detach, base, name, gates, maxIterations, timeoutMinutes, adapterName };
 }
 
+/** The host comes from whatever the agent sent, so only a plain hostname is ever printed unquoted. */
+export function formatBlockedAdvice(blocked: readonly Blocked[]): string {
+  return blocked
+    .map((entry) => {
+      const times = entry.count === 1 ? "1 attempt" : `${entry.count} attempts`;
+      const plain = isPlainHostname(entry.host);
+      const shown = plain ? entry.host : JSON.stringify(entry.host);
+      if (entry.port !== undefined) {
+        return (
+          `Blocked: ${shown}:${entry.port} (${times}). Only HTTPS on 443 and plain HTTP on 80 ` +
+          "leave the Sandbox, whatever the Allowlist names."
+        );
+      }
+      if (!plain) {
+        return `Blocked: ${shown} (${times}). The Allowlist names plain hostnames only, so there is nothing to allow.`;
+      }
+      if (BUILT_IN_ALLOWLIST.includes(entry.host)) {
+        return (
+          `Blocked: ${shown} (${times}). It is already on the Allowlist; the request was refused ` +
+          "for its form, not its host."
+        );
+      }
+      return (
+        `Blocked: ${shown} (${times}). \`crisol allow\` is not built yet; once it is, allow it with:\n` +
+        `  crisol allow ${shown}\n` +
+        `  crisol allow ${shown} --repo`
+      );
+    })
+    .join("\n");
+}
+
 /** An `AggregateError`'s own `.message` drops its causes. */
 export function formatError(error: unknown): string {
   if (error instanceof AggregateError) {
@@ -178,6 +210,7 @@ async function runRecoverCommand(rest: string[]): Promise<number> {
   }
   const report = await recover(crisolHome());
   if (report.dockerWarning) process.stderr.write(`${report.dockerWarning}\n`);
+  for (const warning of report.networkWarnings) process.stderr.write(`Warning: ${warning}\n`);
   const shown = report.outcomes.filter((outcome) => outcome.kind !== "up-to-date" && outcome.kind !== "never-cut");
   if (shown.length === 0) {
     console.log("Nothing to recover.");
@@ -320,11 +353,13 @@ async function main(argv: string[]): Promise<number> {
   settled.forEach((outcome, index) => {
     if (outcome.status === "fulfilled") {
       const result = outcome.value;
-      console.log(
-        args.json
-          ? JSON.stringify(result)
-          : `Run ${result.run}: branch ${result.branch}, status ${result.status}.`,
-      );
+      if (args.json) {
+        console.log(JSON.stringify(result));
+      } else {
+        const summary = `Run ${result.run}: branch ${result.branch}, status ${result.status}.`;
+        const advice = formatBlockedAdvice(result.blocked);
+        console.log(advice.length > 0 ? `${summary}\n${advice}` : summary);
+      }
     } else {
       exitCode = 1;
       const prefix = args.tasks.length > 1 ? `Task ${JSON.stringify(args.tasks[index])}: ` : "";

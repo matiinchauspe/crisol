@@ -7,6 +7,8 @@ import { assertDockerReachable, ensureBaseImage, removeRunSandboxes, startSandbo
 import type { Sandbox } from "./docker";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
 import type { Gate } from "./gates";
+import { ensureProxyImage, startNetworkWall } from "./network";
+import type { Blocked, NetworkWall } from "./network";
 import {
   branchExists,
   checkoutNewBranch,
@@ -30,6 +32,7 @@ import { acquireSlot, adoptLock, tryLockRun } from "./slots";
 import type { HeldLock, Slot } from "./slots";
 
 export type { Gate } from "./gates";
+export type { Blocked } from "./network";
 
 export type RunStatus = "verified" | "unverified" | "not-converged";
 export type NetworkMode = "allowlist" | "learn" | "open";
@@ -57,11 +60,6 @@ export function resolveCeiling(
     maxIterations: perRun.maxIterations ?? globalConfig.maxIterations ?? defaults.maxIterations,
     ceilingMs: perRun.ceilingMs ?? configCeilingMs ?? defaults.ceilingMs,
   };
-}
-
-export interface Blocked {
-  host: string;
-  count: number;
 }
 
 /**
@@ -108,6 +106,8 @@ export interface RunOptions {
   generateRunId?: () => string;
   /** Test seam: a real `docker build` cannot be made to fail on demand. */
   ensureImage?: () => Promise<string>;
+  /** Test seam: a real proxy-image build cannot be made to fail on demand either. */
+  ensureProxyImage?: () => Promise<string>;
   /** `--gate`; absent or empty falls through to the repo's Gates. */
   gates?: readonly string[];
   maxIterations?: number;
@@ -386,6 +386,7 @@ interface PreparedRun {
   adapterSecretValues: Record<string, string>;
   secretEnvNames: string[];
   image: string;
+  proxyImage: string;
 }
 
 async function prepareRun(options: RunOptions): Promise<PreparedRun> {
@@ -430,8 +431,10 @@ async function prepareRun(options: RunOptions): Promise<PreparedRun> {
   const secretEnvNames = Array.from(new Set([...preStart.envNames, ...repoSecretNames]));
 
   const ensureImage = options.ensureImage ?? preStart.ensureImage ?? ensureBaseImage;
-  // An offline first Run must fail here, never after leaving a Clone and a branch behind.
-  const image = await ensureImage();
+  const ensureProxyImageFn = options.ensureProxyImage ?? ensureProxyImage;
+  // An offline first Run must fail here, never after leaving a Clone and a branch behind —
+  // the Allowlist proxy's image is resolved pre-flight for the same reason the Sandbox's is.
+  const [image, proxyImage] = await Promise.all([ensureImage(), ensureProxyImageFn()]);
 
   return {
     home,
@@ -449,6 +452,7 @@ async function prepareRun(options: RunOptions): Promise<PreparedRun> {
     adapterSecretValues,
     secretEnvNames,
     image,
+    proxyImage,
   };
 }
 
@@ -509,7 +513,7 @@ function endUnstartedRun(
     reason,
     iterations: 0,
     gates: [],
-    network: "open",
+    network: "allowlist", // the Run's configured mode, even though it never got far enough to stand one up
     blocked: [],
     warnings: [],
     fetchBack: false,
@@ -617,6 +621,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     adapterSecretValues,
     secretEnvNames,
     image,
+    proxyImage,
   } = prepared;
 
   let slot: Slot;
@@ -653,6 +658,8 @@ export async function run(options: RunOptions): Promise<RunResult> {
   let resultError: unknown;
   let fetchedBack = false;
   let sandbox: Sandbox | undefined;
+  let wall: NetworkWall | undefined;
+  let blocked: Blocked[] = [];
 
   const converge = async (ctx: AdapterContext): Promise<void> => {
     await adapter.launch(ctx);
@@ -713,6 +720,13 @@ export async function run(options: RunOptions): Promise<RunResult> {
       await letSignalsLand();
       interruption.throwIfInterrupted();
 
+      // The wall goes up BEFORE the Sandbox exists — its network is the Sandbox's only way out,
+      // fixed at `docker run` time like every other pre-start declaration.
+      wall = await startNetworkWall(id, home, proxyImage);
+      appendLog(logPath, `network wall up: ${wall.networkName}`);
+      await letSignalsLand();
+      interruption.throwIfInterrupted();
+
       sandbox = await startSandbox({
         image,
         mountPath: clonePath,
@@ -721,10 +735,12 @@ export async function run(options: RunOptions): Promise<RunResult> {
           GIT_AUTHOR_EMAIL: identity.email,
           GIT_COMMITTER_NAME: identity.name,
           GIT_COMMITTER_EMAIL: identity.email,
+          ...wall.proxyEnv,
         },
         secretEnvNames,
         secretEnv: adapterSecretValues,
         mounts: preStart.mounts,
+        network: wall.networkName,
         id,
       });
       appendLog(
@@ -748,10 +764,37 @@ export async function run(options: RunOptions): Promise<RunResult> {
       appendLog(logPath, `primary error: ${errorMessage(error)}`);
     }
 
+    // Read before the proxy container is removed — there is no log left to read after.
+    if (wall) {
+      try {
+        blocked = await wall.readBlocked();
+        if (blocked.length > 0) {
+          const entries = blocked.map((b) => `${b.host}${b.port !== undefined ? `:${b.port}` : ""}=${b.count}`);
+          appendLog(logPath, `blocked: ${entries.join(", ")}`);
+        }
+      } catch (error) {
+        appendLog(logPath, `reading the proxy's blocked hosts failed: ${errorMessage(error)}`);
+      }
+    }
+
     const teardownWarning = await tearDown(sandbox, id, logPath);
     if (teardownWarning !== undefined) {
       warnings.push(teardownWarning);
       options.onWarning?.(teardownWarning);
+    }
+
+    if (wall) {
+      const wallTeardown = await wall.teardown();
+      if (wallTeardown.ok) {
+        appendLog(logPath, `network wall ${wall.networkName} torn down`);
+      } else {
+        const wallWarning = `Allowlist proxy/network for Run ${id} could not be fully removed ` +
+          `(${wallTeardown.stderr || "docker failed"}); remove \`crisol-proxy-${id}\` and ` +
+          `\`${wall.networkName}\` by hand.`;
+        appendLog(logPath, `network wall teardown FAILED: ${wallTeardown.stderr}`);
+        warnings.push(wallWarning);
+        options.onWarning?.(wallWarning);
+      }
     }
 
     try {
@@ -778,8 +821,8 @@ export async function run(options: RunOptions): Promise<RunResult> {
       ...(reason !== undefined ? { reason } : {}),
       iterations,
       gates: gateResults,
-      network: "open", // no Allowlist wall yet
-      blocked: [],
+      network: "allowlist",
+      blocked,
       warnings,
       fetchBack: fetchedBack,
     };
