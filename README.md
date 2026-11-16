@@ -33,9 +33,9 @@ $ crisol run "fix the login bug with + in emails" --json
 
 > [!NOTE]
 > **Crisol is a walking skeleton.** Every stage of a Run below works end to end today, including
-> Gates, converge and least-privilege credentials. `crisol run` still defaults to a scripted
-> stand-in Adapter; the real Claude Code Adapter exists (`--adapter claude-code`) but isn't the
-> default yet, and the network wall is still open. See [Roadmap](#roadmap).
+> Gates, converge, least-privilege credentials and the Allowlist network wall. `crisol run` still
+> defaults to a scripted stand-in Adapter; the real Claude Code Adapter exists
+> (`--adapter claude-code`) but isn't the default yet. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -188,6 +188,38 @@ including warnings, goes to its log.
 
 `crisol logs <run>` prints that Run's log. An id that is not a Run fails with a plain message.
 
+### Network
+
+Every Sandbox sits on its own Docker `--internal` network — no route out at all except through a
+proxy that allows HTTPS `CONNECT` on port 443 (and plain HTTP on port 80) to an Allowlist, with no
+TLS interception and no certificate anywhere in the image. The built-in Allowlist covers the Anthropic API and the package
+registries a Run needs to install dependencies (`registry.npmjs.org`, `github.com`,
+`codeload.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`,
+`pypi.org`, `files.pythonhosted.org`).
+A host it doesn't name is refused, and every refusal is counted:
+
+```json
+"blocked": [{ "host": "api.stripe.com", "count": 3 }]
+```
+
+The end-of-run report names each one and the line that would allow it:
+
+```
+Blocked: api.stripe.com (3 attempts). `crisol allow` is not built yet; once it is, allow it with:
+  crisol allow api.stripe.com
+  crisol allow api.stripe.com --repo
+```
+
+Only a plain hostname gets those lines. An IP literal, or a host carrying anything but letters,
+digits, dots and hyphens, is printed quoted with nothing to paste. A host already on the
+Allowlist that was refused for its form (a bare `CONNECT github.com`, say) gets no line either.
+
+An allowlisted host reached on any other port is refused too, and its entry carries the port
+(`{ "host": "github.com", "port": 22, "count": 1 }`) — no `crisol allow` line opens a port.
+
+`crisol allow` itself, the user and repo Allowlist levels it edits, and `--network learn`/
+`--network open` are not built yet — see [Roadmap](#roadmap).
+
 ### Credentials
 
 By default, no secret enters the Sandbox at all — the scripted stand-in Adapter declares none.
@@ -260,7 +292,7 @@ The fields are only ever added within 0.x, never renamed or removed:
   "status": "verified",
   "iterations": 2,
   "gates": [{ "cmd": "bun test", "ok": true }],
-  "network": "open",
+  "network": "allowlist",
   "blocked": [],
   "warnings": [],
   "fetchBack": true
@@ -277,8 +309,10 @@ with `reason` set to `interrupted: SIGINT` (or the signal it got) or `error: <me
 reports that as an error, and its Run result is in `result.json`. `fetchBack` says whether the
 branch reached your repo. When it is `false` and the Run made its Clone, `crisol recover` can still
 bring the branch back. A Run stopped while queued never cut one. A container
-Crisol could not remove is named in `warnings`. `network` reports `open` until the network wall lands
-([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md)).
+Crisol could not remove is named in `warnings`. `network` is `allowlist` by default now that the
+wall exists ([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md),
+[ADR 0012](docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md));
+`learn` and `open` are not built yet. See [Network](#network) for `blocked`.
 
 ### Where things live
 
@@ -305,7 +339,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 03 | Slots and fan-out | ✅ |
 | 04 | Fetch-back on every exit, and recover | ✅ |
 | 05 | Detach, status, logs | ✅ |
-| 06 | Network wall | |
+| 06 | Network wall | ✅ |
 | 07 | Editable Allowlist, learn and open | |
 | 08 | Credentials | ✅ |
 | 09 | Commits | |
@@ -337,6 +371,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0009](docs/adr/0009-slots-poll-a-non-blocking-flock.md): a Slot is taken by polling a non-blocking `flock` rather than blocking on it, before the Run reserves anything; a fan-out prints one Run result per line (amended by 0011: a Run is now reserved before it waits for a Slot)
 - [0010](docs/adr/0010-a-run-lock-proves-liveness-and-signals-never-reach-crisols-children.md): each Run holds its own lock, which is how `crisol recover` tells live from dead; SIGINT, SIGTERM and SIGHUP stop a Run the same way once it holds its Slot (amended by 0011); git and docker children run in their own session; `result.json` is written on every exit and records `fetchBack`
 - [0011](docs/adr/0011-a-run-is-reserved-before-its-slot-and-a-detached-run-inherits-its-lock.md): a Run is reserved before it waits for a Slot, so `status` can show it queued (reversing part of 0009, amending 0010); a Run stopped while queued keeps its log and Run result; `status` reads state from the run dir alone; a detached Run's process inherits its Run lock as fd 3, so the lock is never free in between
+- [0012](docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md): the network wall is tinyproxy on a per-Run `--internal` network, the Allowlist bind-mounted in rather than baked into the image; blocked hosts are counted by parsing tinyproxy's own log; the Sandbox's env carries both casings of `HTTP(S)_PROXY`/`NO_PROXY` (supersedes 0003)
 
 ## Development
 
