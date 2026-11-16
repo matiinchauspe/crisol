@@ -164,8 +164,11 @@ describe("Ctrl+C again while the Run is already stopping", () => {
       expect(runContainers(id)).toEqual([]);
       const log = readLog(id, home.path);
       expect(log.split("\n").filter((line) => line.includes("received SIGINT"))).toHaveLength(3);
-      // Neither child may have been killed: a retry would hide that from the assertions above.
-      expect(tools.hits("docker", "rm")).toHaveLength(1);
+      // Three legitimate removals, never a retry: the Sandbox's own `docker rm -f`, the
+      // Allowlist proxy's own `docker rm -f`, and `docker network rm` for the wall's network —
+      // the wrapper matches "rm" as a bare argv word, so `network rm` counts here too. A retry
+      // would add a FOURTH hit, which this still catches.
+      expect(tools.hits("docker", "rm")).toHaveLength(3);
       expect(tools.hits("git", "fetch")).toHaveLength(1);
       expect(log).not.toContain("FAILED to stop");
     } finally {

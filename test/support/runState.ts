@@ -46,11 +46,23 @@ export function runContainers(id: string): string[] {
   return proc.stdout.toString("utf8").trim().split("\n").filter(Boolean);
 }
 
-/** For tests whose Run Crisol could not tear down itself (SIGKILL, a forced stop failure). */
+export function runNetworkExists(id: string): boolean {
+  const name = `crisol-net-${id}`;
+  const proc = Bun.spawnSync(["docker", "network", "ls", "--filter", `name=${name}`, "--format", "{{.Name}}"], {
+    stdout: "pipe",
+  });
+  return proc.stdout.toString("utf8").split("\n").includes(name);
+}
+
+/**
+ * For tests whose Run Crisol could not tear down itself (SIGKILL, a forced stop failure). The
+ * network goes last: Docker refuses to remove one that still has containers attached.
+ */
 export function removeRunContainers(id: string): void {
   for (const container of runContainers(id)) {
     Bun.spawnSync(["docker", "rm", "-f", container], { stdout: "ignore", stderr: "ignore" });
   }
+  Bun.spawnSync(["docker", "network", "rm", `crisol-net-${id}`], { stdout: "ignore", stderr: "ignore" });
 }
 
 function isAlive(pid: number): boolean {

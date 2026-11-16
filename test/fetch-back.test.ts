@@ -154,7 +154,9 @@ describe("a Sandbox that fails to stop", () => {
       const warning = `Sandbox crisol-${id} could not be removed`;
       expect((JSON.parse(done.stdout) as RunResult).warnings.join("\n")).toContain(warning);
       expect(done.stderr).toContain(warning);
-      expect(runContainers(id)).toHaveLength(1);
+      // `docker rm` fails for every container now, not just the Sandbox's: the Allowlist
+      // proxy's own removal fails the same way and is left running too.
+      expect(runContainers(id)).toHaveLength(2);
     } finally {
       if (id) removeRunContainers(id);
       tools.cleanup();

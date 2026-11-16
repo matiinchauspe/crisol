@@ -14,6 +14,7 @@ import {
   removeRunContainers,
   runContainers,
   runIds,
+  runNetworkExists,
 } from "./support/runState";
 
 describe("crisol recover", () => {
@@ -41,6 +42,7 @@ describe("crisol recover", () => {
       expect(refSha(repo.path, branch)).toBe(cloneSha(id, home.path, branch)!);
       // A dead Run's agent could otherwise keep committing to the Clone after recover read it.
       expect(runContainers(id)).toEqual([]);
+      expect(runNetworkExists(id)).toBe(false);
       expect(readLog(id, home.path)).toContain("recover: fetch-back complete");
     } finally {
       if (id) removeRunContainers(id);
@@ -64,7 +66,8 @@ describe("crisol recover", () => {
       expect(recovered.exitCode).toBe(0);
       expect(recovered.stdout).toContain(`Run ${id}: live`);
       expect(refSha(repo.path, `crisol/${id}`)).toBeUndefined();
-      expect(runContainers(id)).toHaveLength(1);
+      // The Sandbox AND the Allowlist proxy — both share the Run's label, both alive.
+      expect(runContainers(id)).toHaveLength(2);
       expect(readLog(id, home.path)).not.toContain("recover:");
 
       process.kill(-cli.proc.pid, "SIGINT");
@@ -90,6 +93,31 @@ describe("crisol recover", () => {
       const recovered = await runCli(["recover"], { cwd: repo.path, home: home.path });
 
       expect(recovered.exitCode).toBe(0);
+      expect(refSha(repo.path, result.branch)).toBe(ahead);
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+
+  test("with Docker unreachable it still fetches back, and warns instead of removing the network", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const result = JSON.parse(done.stdout) as RunResult;
+      Bun.spawnSync(["git", "-C", runRepoPath(result.run, home.path), "commit", "--quiet", "--allow-empty", "-m", "late"]);
+      const ahead = cloneSha(result.run, home.path, result.branch)!;
+
+      const recovered = await runCli(["recover"], {
+        cwd: repo.path,
+        home: home.path,
+        env: { DOCKER_HOST: "unix:///nonexistent-crisol-test.sock" },
+      });
+
+      expect(recovered.exitCode).toBe(0);
+      expect(recovered.stdout).toContain(`Run ${result.run}: recovered ${result.branch}`);
+      expect(recovered.stderr).toContain("Docker could not be asked");
       expect(refSha(repo.path, result.branch)).toBe(ahead);
     } finally {
       home.cleanup();

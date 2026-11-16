@@ -149,9 +149,14 @@ describe("Slots across processes (max_parallel = 1)", () => {
       // The killed Run never got to finish: it was SIGKILLed, not drained.
       expect(existsSync(runResultPath(firstId, home.path))).toBe(false);
     } finally {
-      // SIGKILL skips Crisol's own teardown, so the first Run's Sandbox is this test's to remove.
+      // SIGKILL skips Crisol's own teardown, so the first Run's Sandbox, its Allowlist proxy
+      // and its network are this test's to remove.
       if (firstId !== undefined) {
-        Bun.spawnSync(["docker", "rm", "-f", `crisol-${firstId}`], { stdout: "ignore", stderr: "ignore" });
+        Bun.spawnSync(["docker", "rm", "-f", `crisol-${firstId}`, `crisol-proxy-${firstId}`], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        Bun.spawnSync(["docker", "network", "rm", `crisol-net-${firstId}`], { stdout: "ignore", stderr: "ignore" });
       }
       home.cleanup();
       repo.cleanup();

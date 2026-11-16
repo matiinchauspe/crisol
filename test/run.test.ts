@@ -43,7 +43,7 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
           status: "unverified",
           iterations: 1,
           gates: [],
-          network: "open",
+          network: "allowlist",
           blocked: [],
           warnings: [],
         });
