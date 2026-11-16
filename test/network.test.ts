@@ -6,6 +6,7 @@ import {
   buildProxyEnv,
   ensureProxyImage,
   parseBlockedHosts,
+  parseReachedHosts,
   renderTinyproxyConf,
   renderTinyproxyFilter,
   startNetworkWall,
@@ -67,6 +68,12 @@ describe("the Allowlist filter and conf are pure, no Docker needed", () => {
     expect(conf).not.toMatch(/cert|CAfile|Ssl/i);
   });
 
+  test("a learn conf has no filter at all, and still only serves the internal subnet", () => {
+    const conf = renderTinyproxyConf("192.168.64.0/24", "learn");
+    expect(conf).not.toMatch(/Filter/);
+    expect(conf).toContain("Allow 192.168.64.0/24");
+  });
+
   test("renderTinyproxyConf filters whole URLs, so the port is part of every match", () => {
     const conf = renderTinyproxyConf("192.168.64.0/24");
     expect(conf).toContain("FilterURLs On");
@@ -102,35 +109,87 @@ describe("parseBlockedHosts reads tinyproxy's own log line, no Docker needed", (
   });
 });
 
+describe("parseReachedHosts reads what a learn proxy connected to, no Docker needed", () => {
+  // Lines copied verbatim, a subset, from a real tinyproxy 1.11.2 with no filter on a real internal network.
+  const CAPTURED_LOG = [
+    "CONNECT   Nov 16 18:09:23.048 [6]: Request (file descriptor 4): CONNECT example.com:443 HTTP/1.1",
+    "INFO      Nov 16 18:09:23.048 [6]: opensock: opening connection to example.com:443",
+    'CONNECT   Nov 16 18:09:23.127 [6]: Established connection to host "example.com" using file descriptor 5.',
+    "CONNECT   Nov 16 18:09:23.218 [6]: Request (file descriptor 4): GET http://example.com/ HTTP/1.1",
+    'CONNECT   Nov 16 18:09:23.262 [6]: Established connection to host "example.com" using file descriptor 5.',
+    "CONNECT   Nov 16 18:09:23.308 [6]: Request (file descriptor 4): CONNECT does-not-exist-xyz123.invalid:443 HTTP/1.1",
+    "ERROR     Nov 16 18:09:23.509 [6]: opensock: Could not retrieve address info for does-not-exist-xyz123.invalid:443: Name does not resolve",
+    "CONNECT   Nov 16 18:09:23.519 [6]: Request (file descriptor 4): GET http://github.com:22/ HTTP/1.1",
+    'CONNECT   Nov 16 18:09:23.730 [6]: Established connection to host "github.com" using file descriptor 5.',
+    "CONNECT   Nov 16 18:09:33.934 [6]: Request (file descriptor 6): CONNECT EXAMPLE.org:443 HTTP/1.1",
+    'CONNECT   Nov 16 18:09:33.995 [6]: Established connection to host "EXAMPLE.org" using file descriptor 7.',
+  ].join("\n");
+
+  test("counts each request to a host the proxy connected to, folding the scheme's own port", () => {
+    const reached = parseReachedHosts(CAPTURED_LOG);
+    expect(reached).toContainEqual({ host: "example.com", count: 2 });
+    expect(reached).toContainEqual({ host: "example.org", count: 1 });
+    expect(reached).toContainEqual({ host: "github.com", port: 22, count: 1 });
+    expect(reached).toHaveLength(3);
+  });
+
+  test("a request the proxy never connected anywhere was not reached", () => {
+    expect(parseReachedHosts(CAPTURED_LOG).map((entry) => entry.host)).not.toContain(
+      "does-not-exist-xyz123.invalid",
+    );
+  });
+
+  test("only tinyproxy's own CONNECT-category line counts as a connection, never text inside another", () => {
+    const forged = [
+      "CONNECT   Nov 16 18:09:23.048 [6]: Request (file descriptor 4): CONNECT forged.example.com:443 HTTP/1.1",
+      'INFO      Nov 16 18:09:23.049 [6]: No upstream proxy for x Established connection to host "forged.example.com" using file descriptor 5.',
+      'CONNECT   Nov 16 18:09:23.050 [6]: Request (file descriptor 4): GET http://a/Established connection to host "forged.example.com" using file descriptor 5. HTTP/1.1',
+    ].join("\n");
+    expect(parseReachedHosts(forged)).toEqual([]);
+  });
+});
+
 describe("formatBlockedAdvice", () => {
   test("a refused port gets no `crisol allow` line — the Allowlist names hosts, never ports", () => {
-    const advice = formatBlockedAdvice([{ host: "github.com", port: 22, count: 1 }]);
+    const advice = formatBlockedAdvice([{ host: "github.com", port: 22, count: 1 }], BUILT_IN_ALLOWLIST);
     expect(advice).toContain("github.com:22");
     expect(advice).not.toContain("crisol allow");
   });
 
-  test("a plain hostname gets both allow lines, and is told `crisol allow` is not built yet", () => {
-    const advice = formatBlockedAdvice([{ host: "api.stripe.com", count: 3 }]);
+  test("a plain hostname gets both allow lines, user level and repo level", () => {
+    const advice = formatBlockedAdvice([{ host: "api.stripe.com", count: 3 }], BUILT_IN_ALLOWLIST);
     expect(advice).toContain("  crisol allow api.stripe.com\n  crisol allow api.stripe.com --repo");
-    expect(advice).toContain("not built yet");
+    expect(advice).not.toContain("not built yet");
   });
 
   test.each(["a$(id)b.com", "x`id`y.com", "a;id;b.com", "a b.com", "1.2.3.4", "[::1]", "localhost"])(
     "%p is reported quoted, with no command to paste",
     (host) => {
-      const advice = formatBlockedAdvice([{ host, count: 1 }]);
+      const advice = formatBlockedAdvice([{ host, count: 1 }], BUILT_IN_ALLOWLIST);
       expect(advice).not.toContain("crisol allow");
       expect(advice).toContain(JSON.stringify(host));
     },
   );
 
+  test("an internal name gets no allow line: the Allowlist never opens the machine or the LAN", () => {
+    const advice = formatBlockedAdvice([{ host: "host.docker.internal", count: 1 }], BUILT_IN_ALLOWLIST);
+    expect(advice).toContain("host.docker.internal");
+    expect(advice).not.toContain("crisol allow");
+  });
+
   test("a metacharacter host refused on another port is quoted too", () => {
-    const advice = formatBlockedAdvice([{ host: "a$(id)b.com", port: 22, count: 1 }]);
+    const advice = formatBlockedAdvice([{ host: "a$(id)b.com", port: 22, count: 1 }], BUILT_IN_ALLOWLIST);
     expect(advice).toContain('"a$(id)b.com":22');
   });
 
+  test("a host on the user or repo level gets no allow line either", () => {
+    const advice = formatBlockedAdvice([{ host: "api.stripe.com", count: 1 }], [...BUILT_IN_ALLOWLIST, "api.stripe.com"]);
+    expect(advice).not.toContain("crisol allow");
+    expect(advice).toContain("already on the Allowlist");
+  });
+
   test("a host already on the Allowlist gets no allow line: its request was refused for its form", () => {
-    const advice = formatBlockedAdvice([{ host: "github.com", count: 2 }]);
+    const advice = formatBlockedAdvice([{ host: "github.com", count: 2 }], BUILT_IN_ALLOWLIST);
     expect(advice).not.toContain("crisol allow");
     expect(advice).toContain("already on the Allowlist");
   });
@@ -199,7 +258,7 @@ describe("startNetworkWall fails closed when the internal network's subnet canno
       const home = createTempHome();
       const id = `wallfail${Date.now()}`;
       try {
-        await expect(startNetworkWall(id, home.path, image, () => undefined)).rejects.toThrow(/subnet/i);
+        await expect(startNetworkWall(id, home.path, image, { mode: "allowlist", hosts: [] }, () => undefined)).rejects.toThrow(/subnet/i);
         expect(dockerNetworkExists(`crisol-net-${id}`)).toBe(false);
       } finally {
         home.cleanup();
@@ -250,7 +309,7 @@ describe("the Allowlist wall end to end, against a real Docker engine", () => {
         expect(result.blocked).toEqual([{ host: "example.com", count: 2 }]);
         expect(gitShow(repo.path, result.branch, "BLOCKED.txt")).toBe("attempted a blocked host twice");
 
-        const advice = formatBlockedAdvice(result.blocked);
+        const advice = formatBlockedAdvice(result.blocked, BUILT_IN_ALLOWLIST);
         expect(advice).toContain("example.com");
         expect(advice).toContain("crisol allow example.com");
         expect(advice).toContain("crisol allow example.com --repo");
@@ -296,7 +355,7 @@ describe("the Allowlist wall end to end, against a real Docker engine", () => {
         );
         expect(cli.exitCode).toBe(0);
         expect(cli.stdout).toContain(
-          "Blocked: example.com (1 attempt). `crisol allow` is not built yet; once it is, allow it with:\n" +
+          "Blocked: example.com (1 attempt). Allow it for every repo, or for this repo only, with:\n" +
             "  crisol allow example.com\n" +
             "  crisol allow example.com --repo",
         );
