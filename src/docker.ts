@@ -118,6 +118,8 @@ export interface StartSandboxOptions {
   /** Becomes the container's `--name crisol-<id>` and `--label crisol.run=<id>`. */
   id: string;
   network?: string;
+  /** Joined after creation when it differs from `network`. */
+  servicesNetwork?: string;
 }
 
 /** For the log only; `buildMountFlag` is what reaches `docker run`. */
@@ -165,9 +167,48 @@ export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
   ];
 }
 
+export async function connectNetwork(network: string, container: string): Promise<void> {
+  const proc = Bun.spawn(["docker", "network", "connect", network, container], {
+    env: process.env,
+    stdout: "pipe",
+    stderr: "pipe",
+    ...DETACHED,
+  });
+  const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+  if (exitCode !== 0) {
+    throw new Error(`docker network connect failed (${network} <- ${container}): ${stderr.trim()}`);
+  }
+}
+
+function spawnFailure(error: unknown): ExecResult {
+  return { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+}
+
+/** One detached, piped `docker` subcommand that never throws. */
+export async function runDocker(args: string[]): Promise<ExecResult> {
+  try {
+    const proc = Bun.spawn(args, { env: process.env, stdout: "pipe", stderr: "pipe", ...DETACHED });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { exitCode, stdout, stderr };
+  } catch (error) {
+    return spawnFailure(error);
+  }
+}
+
+/** By name, not by the shared label: a label sweep would also take the Sandbox, whose removal is reported apart. */
+export async function removeContainerByName(name: string): Promise<StopResult> {
+  const result = await runDocker(["docker", "rm", "-f", name]);
+  if (result.exitCode === 0 || /no such container/i.test(result.stderr)) return { ok: true, stderr: "" };
+  return { ok: false, stderr: result.stderr.trim() };
+}
+
 /** Kept alive with `tail -f /dev/null` (busybox has no `sleep infinity`) so the Adapter can `exec` into it repeatedly. */
 export async function startSandbox(options: StartSandboxOptions): Promise<Sandbox> {
-  const { mountPath, mounts: extraMounts = [], secretEnv = {} } = options;
+  const { mountPath, mounts: extraMounts = [], secretEnv = {}, network, servicesNetwork } = options;
   const mounts = [
     formatMount(mountPath, mountPath, "rw"),
     ...extraMounts.map((m) => formatMount(m.hostPath, m.containerPath, m.mode)),
@@ -188,6 +229,13 @@ export async function startSandbox(options: StartSandboxOptions): Promise<Sandbo
     throw new Error(`docker run failed: ${stderr.trim()}`);
   }
   const containerId = stdout.trim();
+
+  // Docker refuses to mix the default bridge with a user-defined network in one `--network` list
+  // (verified live), so open mode's internet-carrying bridge and a bare Services network can only
+  // combine by joining the second one after creation.
+  if (servicesNetwork !== undefined && servicesNetwork !== network) {
+    await connectNetwork(servicesNetwork, containerId);
+  }
 
   return {
     containerId,

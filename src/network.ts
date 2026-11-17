@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { ensureImageFromDockerfile } from "./docker";
+import { connectNetwork, ensureImageFromDockerfile, removeContainerByName, runDocker } from "./docker";
 import type { ExecResult, StopResult } from "./docker";
 import { runNetworkDir, runProxyConfPath, runProxyFilterPath } from "./paths";
 
@@ -196,10 +196,6 @@ export function buildProxyEnv(proxyHost: string): Record<string, string> {
   };
 }
 
-function spawnFailure(error: unknown): ExecResult {
-  return { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
-}
-
 /**
  * Detached into its own session so a signal aimed at Crisol cannot kill a `docker network` call
  * half way. Never throws: a missing `docker` binary comes back as a failed result, so a teardown
@@ -210,21 +206,7 @@ function runDockerSync(args: string[]): ExecResult {
     const proc = Bun.spawnSync(args, { env: process.env, stdout: "pipe", stderr: "pipe", detached: true });
     return { exitCode: proc.exitCode, stdout: proc.stdout.toString("utf8"), stderr: proc.stderr.toString("utf8") };
   } catch (error) {
-    return spawnFailure(error);
-  }
-}
-
-async function runDocker(args: string[]): Promise<ExecResult> {
-  try {
-    const proc = Bun.spawn(args, { env: process.env, stdout: "pipe", stderr: "pipe", detached: true });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    return { exitCode, stdout, stderr };
-  } catch (error) {
-    return spawnFailure(error);
+    return { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -236,7 +218,11 @@ function proxyContainerName(id: string): string {
   return `crisol-proxy-${id}`;
 }
 
-async function createInternalNetwork(id: string): Promise<string> {
+/**
+ * Open mode also creates this network bare, for Services; `recover`'s sweep by name already
+ * removes it.
+ */
+export async function createInternalNetwork(id: string): Promise<string> {
   const name = networkName(id);
   const result = await runDocker(["docker", "network", "create", "--internal", "--label", `crisol.run=${id}`, name]);
   if (result.exitCode !== 0) {
@@ -255,15 +241,6 @@ function inspectSubnet(name: string): string | undefined {
 async function removeNetwork(name: string): Promise<StopResult> {
   const result = await runDocker(["docker", "network", "rm", name]);
   if (result.exitCode === 0 || /not found/i.test(result.stderr)) {
-    return { ok: true, stderr: "" };
-  }
-  return { ok: false, stderr: result.stderr.trim() };
-}
-
-/** By name, not by the shared label: a label sweep would also take the Sandbox, whose removal is reported apart. */
-async function removeContainerByName(name: string): Promise<StopResult> {
-  const result = await runDocker(["docker", "rm", "-f", name]);
-  if (result.exitCode === 0 || /no such container/i.test(result.stderr)) {
     return { ok: true, stderr: "" };
   }
   return { ok: false, stderr: result.stderr.trim() };
@@ -310,13 +287,6 @@ async function startProxyContainer(options: StartProxyOptions): Promise<string> 
   return name;
 }
 
-async function connectToNetwork(network: string, container: string): Promise<void> {
-  const result = await runDocker(["docker", "network", "connect", network, container]);
-  if (result.exitCode !== 0) {
-    throw new Error(`docker network connect failed (${network} <- ${container}): ${result.stderr.trim()}`);
-  }
-}
-
 export interface NetworkWall {
   networkName: string;
   /** Not a secret, so it rides the Sandbox's plain `env`. */
@@ -359,7 +329,7 @@ export async function startNetworkWall(
 
     const container = await startProxyContainer({ image: proxyImage, id, confPath, filterPath });
     try {
-      await connectToNetwork(network, container);
+      await connectNetwork(network, container);
     } catch (error) {
       await removeContainerByName(container);
       throw error;

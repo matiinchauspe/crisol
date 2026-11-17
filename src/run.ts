@@ -9,8 +9,10 @@ import { assertDockerReachable, ensureBaseImage, removeRunSandboxes, startSandbo
 import type { Sandbox } from "./docker";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
 import type { Gate } from "./gates";
-import { ensureProxyImage, startNetworkWall } from "./network";
+import { createInternalNetwork, ensureProxyImage, removeNetworkByRunId, startNetworkWall } from "./network";
 import type { Blocked, NetworkMode, NetworkWall, WallPolicy } from "./network";
+import { readRepoServices, startServices } from "./services";
+import type { ServiceRuntime, ServiceSpec } from "./services";
 import {
   addedLines,
   branchExists,
@@ -401,6 +403,7 @@ interface PreparedRun {
   image: string;
   proxyImage: string | undefined;
   allowlist: AllowlistEntry[];
+  services: ServiceSpec[];
 }
 
 /**
@@ -447,6 +450,10 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
   // that Run now, and never breaks the learn or open escape hatches.
   const allowlist = (options.network ?? "allowlist") === "allowlist" ? allowlistByLevel(home, hostRepoPath) : [];
 
+  // Validated before any side effect, like every other `.crisol/` declaration: a bad compose key
+  // fails the Run here, before a Clone or a branch exists.
+  const services = readRepoServices(hostRepoPath);
+
   assertDockerReachable();
 
   const adapter: Adapter = options.adapter ?? new FakeAdapter();
@@ -489,6 +496,7 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
     image,
     proxyImage,
     allowlist,
+    services,
   };
 }
 
@@ -660,6 +668,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     image,
     proxyImage,
     allowlist,
+    services,
   } = prepared;
 
   let slot: Slot;
@@ -697,6 +706,9 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   let fetchedBack = false;
   let sandbox: Sandbox | undefined;
   let wall: NetworkWall | undefined;
+  let serviceRuntime: ServiceRuntime | undefined;
+  /** Set only when Services created their own network because no wall did (open mode); teardown removes it only then. */
+  let bareServicesNetwork: string | undefined;
   let blocked: Blocked[] = [];
   let reached: Blocked[] = [];
 
@@ -775,6 +787,26 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       await letSignalsLand();
       interruption.throwIfInterrupted();
 
+      // Services, like the wall, go up before the Sandbox exists: the agent starts only once every
+      // healthcheck passes, so a never-healthy service fails the Run before any iteration is spent.
+      let servicesNetwork: string | undefined;
+      if (services.length > 0) {
+        servicesNetwork = wall?.networkName;
+        if (servicesNetwork === undefined) {
+          // Open mode stood up no wall, so Services get a bare internal network of their own.
+          servicesNetwork = await createInternalNetwork(id);
+          bareServicesNetwork = servicesNetwork;
+        }
+        serviceRuntime = await startServices(id, servicesNetwork, services);
+        appendLog(logPath, `services up on ${servicesNetwork}: ${services.map((service) => service.name).join(", ")}`);
+        await letSignalsLand();
+        interruption.throwIfInterrupted();
+        await serviceRuntime.waitHealthy();
+        appendLog(logPath, "services healthy");
+      }
+      await letSignalsLand();
+      interruption.throwIfInterrupted();
+
       sandbox = await startSandbox({
         image,
         mountPath: clonePath,
@@ -789,6 +821,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         secretEnv: adapterSecretValues,
         mounts: preStart.mounts,
         network: wall?.networkName,
+        servicesNetwork,
         id,
       });
       appendLog(
@@ -829,6 +862,35 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     if (teardownWarning !== undefined) {
       warnings.push(teardownWarning);
       options.onWarning?.(teardownWarning);
+    }
+
+    // Before the wall's own network removal below: `docker network rm` refuses a network that
+    // still has an attached container, and a service container is exactly that.
+    if (serviceRuntime) {
+      const servicesTeardown = await serviceRuntime.teardown();
+      if (servicesTeardown.ok) {
+        appendLog(logPath, "services torn down");
+      } else {
+        const servicesWarning =
+          `Service container(s) for Run ${id} could not be fully removed ` +
+          `(${servicesTeardown.stderr || "docker failed"}); remove them with \`docker rm -f\` by name ` +
+          `(crisol-svc-${id}-<service>).`;
+        appendLog(logPath, `services teardown FAILED: ${servicesTeardown.stderr}`);
+        warnings.push(servicesWarning);
+        options.onWarning?.(servicesWarning);
+      }
+    }
+    if (bareServicesNetwork !== undefined) {
+      const servicesNetworkRemoved = await removeNetworkByRunId(id);
+      if (!servicesNetworkRemoved.ok) {
+        const networkWarning =
+          `Services network ${bareServicesNetwork} for Run ${id} could not be removed ` +
+          `(${servicesNetworkRemoved.stderr || "docker failed"}); remove it with ` +
+          `\`docker network rm ${bareServicesNetwork}\`.`;
+        appendLog(logPath, `services network teardown FAILED: ${servicesNetworkRemoved.stderr}`);
+        warnings.push(networkWarning);
+        options.onWarning?.(networkWarning);
+      }
     }
 
     if (wall) {
