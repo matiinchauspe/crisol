@@ -18,7 +18,7 @@ import type { Blocked, NetworkMode, RunOptions, RunResult } from "./run";
 import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
-  'Usage: crisol run "<task>"... [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
+  'Usage: crisol run ("<task>"... | --file <md>) [--context <md>]... [--prompt <name>] [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
   "[--max-iterations <n>] [--timeout <minutes>] [--network <allowlist|learn|open>] [--adapter <fake|claude-code>]";
 
 const ALLOW_USAGE = "Usage: crisol allow <host> [--repo]";
@@ -38,6 +38,9 @@ type AdapterName = (typeof ADAPTER_NAMES)[number];
 
 interface ParsedRunArgs {
   tasks: string[];
+  file?: string;
+  context: string[];
+  template?: string;
   json: boolean;
   detach: boolean;
   base?: string;
@@ -86,6 +89,9 @@ function readNetworkFlagValue(argv: string[], index: number): NetworkMode {
 
 function parseRunArgs(argv: string[]): ParsedRunArgs {
   const tasks: string[] = [];
+  let file: string | undefined;
+  const context: string[] = [];
+  let template: string | undefined;
   let json = false;
   let detach = false;
   let base: string | undefined;
@@ -102,6 +108,17 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
       json = true;
     } else if (arg === "--detach") {
       detach = true;
+    } else if (arg === "--file") {
+      if (file !== undefined) throw new Error(`--file names the one Task; pass it once.\n${USAGE}`);
+      file = readFlagValue(argv, i + 1, "--file");
+      i++;
+    } else if (arg === "--context") {
+      context.push(readFlagValue(argv, i + 1, "--context"));
+      i++;
+    } else if (arg === "--prompt") {
+      if (template !== undefined) throw new Error(`--prompt names one template; pass it once.\n${USAGE}`);
+      template = readFlagValue(argv, i + 1, "--prompt");
+      i++;
     } else if (arg === "--base") {
       base = readFlagValue(argv, i + 1, "--base");
       i++;
@@ -130,7 +147,10 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     }
   }
 
-  if (tasks.length === 0) {
+  if (file !== undefined && tasks.length > 0) {
+    throw new Error(`--file is the Task; it cannot be combined with a Task phrase.\n${USAGE}`);
+  }
+  if (file === undefined && tasks.length === 0) {
     throw new Error(USAGE);
   }
   if (tasks.length > 1 && name !== undefined) {
@@ -145,7 +165,7 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     );
   }
 
-  return { tasks, json, detach, base, name, gates, maxIterations, timeoutMinutes, network, adapterName };
+  return { tasks, file, context, template, json, detach, base, name, gates, maxIterations, timeoutMinutes, network, adapterName };
 }
 
 /** The host comes from whatever the agent sent, so only a plain hostname is ever printed unquoted. */
@@ -364,6 +384,8 @@ async function main(argv: string[]): Promise<number> {
   const handoff = takeDetachedHandoff();
   const runOptions: Omit<RunOptions, "task"> = {
     cwd: process.cwd(),
+    template: args.template,
+    context: args.context,
     base: handoff?.base ?? args.base,
     baseSha: handoff?.baseSha,
     name: args.name,
@@ -377,7 +399,7 @@ async function main(argv: string[]): Promise<number> {
   if (args.detach) {
     try {
       const { id, pid } = await detachRun(
-        { ...runOptions, task: args.tasks[0]! },
+        { ...runOptions, task: args.tasks[0], file: args.file },
         ["run", ...rest.filter((arg) => arg !== "--detach")],
       );
       console.log(id);
@@ -415,8 +437,8 @@ async function main(argv: string[]): Promise<number> {
   let settled: PromiseSettledResult<RunResult>[];
   try {
     settled =
-      args.tasks.length === 1
-        ? await Promise.allSettled([run({ ...options, task: args.tasks[0]! })])
+      args.tasks.length <= 1
+        ? await Promise.allSettled([run({ ...options, task: args.tasks[0], file: args.file })])
         : await runFanOut(args.tasks, options);
   } catch (error) {
     process.stderr.write(`${formatError(error)}\n`);

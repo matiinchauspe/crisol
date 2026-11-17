@@ -4,7 +4,6 @@ export interface ExecResult {
   stderr: string;
 }
 
-/** One extra bind mount an Adapter declares pre-start. */
 export interface MountSpec {
   hostPath: string;
   containerPath: string;
@@ -19,15 +18,15 @@ export interface StopResult {
 export interface Sandbox {
   readonly containerId: string;
   readonly mounts: readonly string[];
-  exec(cmd: string[]): Promise<ExecResult>;
+  /** `stdin`, not argv, carries text of any size: Linux caps one argv string at 128 KiB. */
+  exec(cmd: string[], stdin?: string): Promise<ExecResult>;
   /** Reports whether teardown actually succeeded — callers must never log "stopped" when `ok` is false. */
   stop(): Promise<StopResult>;
 }
 
 /**
- * A placeholder until the Project and Agent layers exist. `curl` lets a Sandbox probe the
- * network from inside itself; the tag moved too, since `ensureImageFromDockerfile` caches by
- * tag alone and a machine with the pre-curl image under the old tag would keep serving it.
+ * The Project layer: a placeholder until Crisol reads a repo's own `.crisol/Dockerfile`.
+ * `curl` lets a Sandbox probe the network from inside itself.
  */
 export const SKELETON_DOCKERFILE = "FROM alpine:3.20\nRUN apk add --no-cache git bash curl\n";
 
@@ -193,10 +192,11 @@ export async function startSandbox(options: StartSandboxOptions): Promise<Sandbo
   return {
     containerId,
     mounts,
-    async exec(cmd: string[]): Promise<ExecResult> {
+    async exec(cmd: string[], stdin?: string): Promise<ExecResult> {
       try {
-        const execProc = Bun.spawn(["docker", "exec", containerId, ...cmd], {
+        const execProc = Bun.spawn(["docker", "exec", ...(stdin === undefined ? [] : ["-i"]), containerId, ...cmd], {
           env: process.env,
+          ...(stdin === undefined ? {} : { stdin: new Blob([stdin]) }),
           stdout: "pipe",
           stderr: "pipe",
           ...DETACHED,

@@ -1,40 +1,29 @@
 import type { MountSpec, Sandbox } from "./docker";
 
-/**
- * Everything the Sandbox needs before it starts, consumed once by `startSandbox` — never
- * by `exec` after the container is running, since the token must be Sandbox env and mounts
- * must exist at `docker run` time; neither can be bolted on afterward. `authenticate` and
- * `wireHooks` contribute to these fields instead of running against a live Sandbox.
- */
+/** Consumed at `docker run`: a running container cannot gain env or bind mounts. */
 export interface PreStartDeclaration {
-  /** Secret env var NAMES only, never values — passed as a bare `-e NAME` so the value is read from the spawned docker process's own env and never lands on the docker argv. */
+  /** Names only: a bare `-e NAME` takes the value from docker's own env, so it never lands on the argv. */
   envNames: readonly string[];
-  /** Empty until Tenaza rides inside; then wires the agent's hooks to Tenaza's config/state mounts. */
   mounts: readonly MountSpec[];
-  /**
-   * Ensures the Agent layer image exists (building it if missing) and resolves to its tag —
-   * a closure, not a plain string, because the build itself is async while `declarePreStart`
-   * is not. Undefined (the fake Adapter, and any Adapter with nothing to layer) falls through
-   * to Crisol's own base image in `run.ts`.
-   */
+  /** A closure because the build is async and `declarePreStart` is not. Absent, the Run uses Crisol's base image. */
   ensureImage?: () => Promise<string>;
 }
 
 export interface AdapterContext {
-  /** Already started: Clone bind-mounted at `repoPath`, everything pre-start already wired in. */
   sandbox: Sandbox;
   /** Identical path inside and outside the Sandbox. */
   repoPath: string;
-  /** Raw text; preamble prepending not yet implemented. */
-  task: string;
-  /** `~/.crisol/instructions.md`'s content, when present — never the global `~/.claude/CLAUDE.md`, which is not mounted. */
+  /** The full prompt — Preamble, Task and Context — to send the agent over stdin, never argv. */
+  prompt: string;
+  /** `~/.crisol/instructions.md`, when present; the global `~/.claude/CLAUDE.md` never reaches a Run. */
   instructions?: string;
 }
 
 export interface Adapter {
-  /** Read by `startSandbox` before `docker run` executes. */
   declarePreStart(): PreStartDeclaration;
-  /** Launches the agent unattended — no human in the loop. */
+  /** Replaces Crisol's default wording. It must name every Gate it is given, or the Run fails before launch. */
+  preamble?(gates: readonly string[]): string;
+  /** Unattended: no human is in the loop to answer a prompt. */
   launch(ctx: AdapterContext): Promise<void>;
   reportCompletion(ctx: AdapterContext): Promise<boolean>;
   /** Continues the SAME agent session — never a fresh one. */

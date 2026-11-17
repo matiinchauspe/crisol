@@ -2,9 +2,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 /**
- * The only place CRISOL_HOME is read, so every caller agrees on where Run state lives.
- * An empty string is treated as unset, not as "resolve relative to cwd"; a configured
- * value is `path.resolve`d so a relative value can't scatter state under the cwd.
+ * The only place CRISOL_HOME is read, so every caller agrees where Run state lives. An empty one
+ * counts as unset, and a relative one is resolved, so state never scatters under the cwd.
  */
 export function crisolHome(): string {
   const configured = process.env.CRISOL_HOME;
@@ -43,6 +42,14 @@ export function repoAllowlistPath(hostRepoPath: string): string {
   return path.join(hostRepoPath, REPO_ALLOWLIST_FILE);
 }
 
+export function userPromptPath(name: string, home: string = crisolHome()): string {
+  return path.join(home, "prompts", `${name}.md`);
+}
+
+export function repoPromptPath(hostRepoPath: string, name: string): string {
+  return path.join(hostRepoPath, ".crisol", "prompts", `${name}.md`);
+}
+
 export function runNetworkDir(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "network");
 }
@@ -71,6 +78,11 @@ export function runLockPath(id: string, home: string = crisolHome()): string {
 /** The pid of the process that owns the Run, so a detached Run can be stopped with `kill`. */
 export function runPidPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "pid");
+}
+
+/** What the agent received, written before the Run starts; a detached Run's process reads it from here. */
+export function runPromptPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "prompt");
 }
 
 export function runResultPath(id: string, home: string = crisolHome()): string {

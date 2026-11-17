@@ -28,11 +28,13 @@ import {
   tagExists,
 } from "./git";
 import type { GitIdentity } from "./git";
-import { REPO_ALLOWLIST_FILE, crisolHome, runDir, runLockPath, runLogPath, runPidPath, runRepoPath, runResultPath, runsRoot } from "./paths";
+import { REPO_ALLOWLIST_FILE, crisolHome, runDir, runLockPath, runLogPath, runPidPath, runPromptPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import { KeychainSecretStore } from "./secret-store";
 import type { SecretStore } from "./secret-store";
 import { acquireSlot, adoptLock, tryLockRun } from "./slots";
 import type { HeldLock, Slot } from "./slots";
+import { assertPreambleNamesGates, buildPrompt, defaultPreamble, resolveSharedInputs, resolveTask } from "./task";
+import type { ResolvedInputs, TaskInput } from "./task";
 
 export type { Gate } from "./gates";
 export type { Blocked, NetworkMode } from "./network";
@@ -93,8 +95,7 @@ export interface RunLockRecord {
   branch: string;
 }
 
-export interface RunOptions {
-  task: string;
+export interface RunOptions extends TaskInput {
   cwd: string;
   base?: string;
   /** Pins the commit `base` names, so a fan-out cuts every Run from one commit even if the ref moves meanwhile. */
@@ -386,6 +387,7 @@ interface PreparedRun {
   hostRepoPath: string;
   identity: GitIdentity;
   instructions: string | undefined;
+  prompt: string;
   baseRef: string;
   baseSha: string;
   gates: readonly string[];
@@ -401,7 +403,12 @@ interface PreparedRun {
   allowlist: AllowlistEntry[];
 }
 
-async function prepareRun(options: RunOptions): Promise<PreparedRun> {
+/**
+ * `savedPrompt` is the prompt the detaching process resolved, so a detached Run never re-reads a
+ * user's path. `sharedInputs` is a fan-out's Template and `--context` files, read once by its
+ * caller for the same reason.
+ */
+async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInputs?: ResolvedInputs): Promise<PreparedRun> {
   const home = options.home ?? crisolHome();
   const hostRepoPath = discoverGitRoot(options.cwd);
   if (!hostRepoPath) {
@@ -411,6 +418,8 @@ async function prepareRun(options: RunOptions): Promise<PreparedRun> {
   // Every validation below runs BEFORE any side effect — no mkdir, no clone, no docker run.
   const identity = readIdentity(hostRepoPath);
   const instructions = readInstructions(home);
+  const resolved =
+    savedPrompt === undefined ? resolveTask(options, options.cwd, home, hostRepoPath, sharedInputs) : undefined;
 
   const baseRef = options.base ?? currentRefName(hostRepoPath);
   const baseSha = options.baseSha ?? resolveBaseSha(hostRepoPath, baseRef);
@@ -440,7 +449,13 @@ async function prepareRun(options: RunOptions): Promise<PreparedRun> {
 
   assertDockerReachable();
 
-  const adapter = options.adapter ?? new FakeAdapter();
+  const adapter: Adapter = options.adapter ?? new FakeAdapter();
+  let prompt = savedPrompt ?? "";
+  if (resolved !== undefined) {
+    const preamble = adapter.preamble?.(gates) ?? defaultPreamble(gates);
+    assertPreambleNamesGates(preamble, gates);
+    prompt = buildPrompt(preamble, resolved);
+  }
   const preStart = adapter.declarePreStart();
   const secretStore = options.secretStore ?? new KeychainSecretStore();
   const adapterSecretValues = resolveAdapterSecretValues(secretStore, preStart.envNames);
@@ -460,6 +475,7 @@ async function prepareRun(options: RunOptions): Promise<PreparedRun> {
     hostRepoPath,
     identity,
     instructions,
+    prompt,
     baseRef,
     baseSha,
     gates,
@@ -482,13 +498,14 @@ function reserveFresh(prepared: PreparedRun, options: RunOptions): Reservation {
   try {
     reservation = reserveRun(hostRepoPath, home, options.name, options.generateRunId ?? generateRunId);
     writeFileSync(runLogPath(reservation.id, home), "");
+    writeFileSync(runPromptPath(reservation.id, home), prepared.prompt);
   } catch (error) {
     reservation?.lock.release();
     throw error;
   }
   appendLog(
     runLogPath(reservation.id, home),
-    `run ${reservation.id} reserved: task=${JSON.stringify(options.task)} ` +
+    `run ${reservation.id} reserved: prompt in ${runPromptPath(reservation.id, home)} ` +
       `base=${prepared.baseRef}@${prepared.baseSha} branch=${reservation.branch}`,
   );
   return reservation;
@@ -592,7 +609,7 @@ function interruptedBeforeReserving(): Error {
  * agent's completion report stands in. Once the Run holds a Slot, Fetch-back runs on every exit,
  * whatever `status` is.
  */
-export async function run(options: RunOptions): Promise<RunResult> {
+export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): Promise<RunResult> {
   const home = options.home ?? crisolHome();
   const networkMode = options.network ?? "allowlist";
   let reservation: Reservation;
@@ -603,7 +620,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     base = `${options.base}@${options.baseSha}`;
     try {
       writeFileSync(runPidPath(reservation.id, home), String(process.pid));
-      prepared = await prepareRun(options);
+      prepared = await prepareRun(options, readFileSync(runPromptPath(reservation.id, home), "utf8"));
       if (prepared.hostRepoPath !== reservation.host) {
         throw new Error(`Run ${reservation.id} was reserved for ${reservation.host}, not ${prepared.hostRepoPath}.`);
       }
@@ -612,7 +629,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
       throw error;
     }
   } else {
-    prepared = await prepareRun(options);
+    prepared = await prepareRun(options, undefined, sharedInputs);
     await letSignalsLand();
     // The user never saw an id yet, so a signal in pre-flight leaves nothing, as a failed check does.
     if (options.signal?.aborted) throw interruptedBeforeReserving();
@@ -630,6 +647,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     hostRepoPath,
     identity,
     instructions,
+    prompt,
     baseSha,
     gates,
     maxParallel,
@@ -664,7 +682,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
 
   appendLog(
     logPath,
-    `run ${id} starting: task=${JSON.stringify(options.task)} base=${base} branch=${branch} ` +
+    `run ${id} starting: base=${base} branch=${branch} ` +
       `slot=${slot.index}/${maxParallel}`,
   );
 
@@ -779,7 +797,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
       );
 
       await Promise.race([
-        converge({ sandbox, repoPath: clonePath, task: options.task, instructions }),
+        converge({ sandbox, repoPath: clonePath, prompt, instructions }),
         interruption.rejected,
       ]);
 
@@ -884,17 +902,21 @@ export async function run(options: RunOptions): Promise<RunResult> {
 /**
  * Independent Runs, one per Task, all cut from the commit `base` names at the moment of the
  * call — never chained, never merged. Each settles on its own, so one failing Run never
- * hides the others' branches.
+ * hides the others' branches. `file` is excluded: a fan-out's Tasks are phrases, never one file
+ * replayed under each of them (`resolveTask` also refuses the combination, for a caller that
+ * bypasses this type).
  */
 export async function runFanOut(
   tasks: readonly string[],
-  options: Omit<RunOptions, "task" | "name" | "baseSha">,
+  options: Omit<RunOptions, "task" | "name" | "baseSha" | "file">,
 ): Promise<PromiseSettledResult<RunResult>[]> {
   const hostRepoPath = discoverGitRoot(options.cwd);
   if (!hostRepoPath) {
     throw new Error(`Not inside a git repo: ${options.cwd}`);
   }
+  const home = options.home ?? crisolHome();
   const base = options.base ?? currentRefName(hostRepoPath);
   const baseSha = resolveBaseSha(hostRepoPath, base);
-  return Promise.allSettled(tasks.map((task) => run({ ...options, task, base, baseSha })));
+  const sharedInputs = resolveSharedInputs(options, options.cwd, home, hostRepoPath);
+  return Promise.allSettled(tasks.map((task) => run({ ...options, task, base, baseSha }, sharedInputs)));
 }
