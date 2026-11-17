@@ -10,6 +10,12 @@ export interface MountSpec {
   mode: "ro" | "rw";
 }
 
+/** A named, long-lived Docker volume — unlike `MountSpec`, never torn down with the Run. */
+export interface VolumeMountSpec {
+  volume: string;
+  containerPath: string;
+}
+
 export interface StopResult {
   ok: boolean;
   stderr: string;
@@ -25,12 +31,21 @@ export interface Sandbox {
 }
 
 /**
- * The Project layer: a placeholder until Crisol reads a repo's own `.crisol/Dockerfile`.
- * `curl` lets a Sandbox probe the network from inside itself.
+ * Crisol's own Project layer: what a Run gets when the repo carries no `.crisol/Dockerfile`.
+ * `bash` and `curl` round out the list for what the fake Adapter's own scripts and the Allowlist
+ * probes need. `BUN_INSTALL=/usr/local` lands `bun` in a world-readable, already-on-`PATH`
+ * directory, so the Agent layer's later non-root `USER agent` can still run it — verified live: a
+ * `/root`-installed `bun` is unreadable to uid 1000, since `/root` is `0700`.
  */
-export const SKELETON_DOCKERFILE = "FROM alpine:3.20\nRUN apk add --no-cache git bash curl\n";
+export const DEFAULT_PROJECT_DOCKERFILE = [
+  "FROM alpine:3.20",
+  "RUN apk add --no-cache git bash curl nodejs npm python3 github-cli ripgrep",
+  "ENV BUN_INSTALL=/usr/local",
+  "RUN curl -fsSL https://bun.sh/install | bash",
+  "",
+].join("\n");
 
-export const SKELETON_IMAGE_TAG = "crisol-base:0.1.1-skeleton";
+export const DEFAULT_PROJECT_IMAGE_TAG = "crisol-base:0.2.0";
 
 /**
  * Every `docker` child a Run makes leads its own session: a Ctrl+C or hang-up aimed at
@@ -97,8 +112,15 @@ export async function ensureImageFromDockerfile(tag: string, dockerfile: string)
   return tag;
 }
 
-export async function ensureBaseImage(tag: string = SKELETON_IMAGE_TAG): Promise<string> {
-  return ensureImageFromDockerfile(tag, SKELETON_DOCKERFILE);
+export async function ensureDefaultProjectImage(tag: string = DEFAULT_PROJECT_IMAGE_TAG): Promise<string> {
+  return ensureImageFromDockerfile(tag, DEFAULT_PROJECT_DOCKERFILE);
+}
+
+/** Short: enough to key a cache tag, not a security boundary. */
+export function contentHash(parts: readonly string[]): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(parts.join("\u0000"));
+  return hasher.digest("hex").slice(0, 12);
 }
 
 export interface StartSandboxOptions {
@@ -115,6 +137,7 @@ export interface StartSandboxOptions {
   /** Merged into the spawned docker CLI's env only, never into `process.env` or the argv. */
   secretEnv?: Record<string, string>;
   mounts?: readonly MountSpec[];
+  volumeMounts?: readonly VolumeMountSpec[];
   /** Becomes the container's `--name crisol-<id>` and `--label crisol.run=<id>`. */
   id: string;
   network?: string;
@@ -133,12 +156,27 @@ function buildMountFlag(hostPath: string, containerPath: string, mode: "ro" | "r
   return ["--mount", spec];
 }
 
+/** `docker run` auto-creates a named volume on first use — verified live — so there is no separate `ensureVolume`. */
+function buildVolumeMountFlag(volume: string, containerPath: string): string[] {
+  return ["--mount", `type=volume,source=${volume},target=${containerPath}`];
+}
+
 export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
-  const { image, mountPath, env, secretEnvNames = [], mounts: extraMounts = [], id, network } = options;
+  const {
+    image,
+    mountPath,
+    env,
+    secretEnvNames = [],
+    mounts: extraMounts = [],
+    volumeMounts = [],
+    id,
+    network,
+  } = options;
   const mountArgs = [
     { hostPath: mountPath, containerPath: mountPath, mode: "rw" as const },
     ...extraMounts,
   ].flatMap((m) => buildMountFlag(m.hostPath, m.containerPath, m.mode));
+  const volumeMountArgs = volumeMounts.flatMap((v) => buildVolumeMountFlag(v.volume, v.containerPath));
   const envArgs = Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
   const secretArgs = secretEnvNames.flatMap((name) => ["-e", name]);
 
@@ -156,6 +194,7 @@ export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
     "--label",
     `crisol.run=${id}`,
     ...mountArgs,
+    ...volumeMountArgs,
     "-w",
     mountPath,
     ...envArgs,
@@ -206,6 +245,44 @@ export async function removeContainerByName(name: string): Promise<StopResult> {
   return { ok: false, stderr: result.stderr.trim() };
 }
 
+/** Never exposed to an Adapter, which must stay non-root. */
+async function dockerExec(containerId: string, cmd: string[], opts: { stdin?: string; user?: string } = {}): Promise<ExecResult> {
+  const { stdin, user } = opts;
+  try {
+    const execProc = Bun.spawn(
+      [
+        "docker",
+        "exec",
+        ...(user !== undefined ? ["-u", user] : []),
+        ...(stdin === undefined ? [] : ["-i"]),
+        containerId,
+        ...cmd,
+      ],
+      {
+        env: process.env,
+        ...(stdin === undefined ? {} : { stdin: new Blob([stdin]) }),
+        stdout: "pipe",
+        stderr: "pipe",
+        ...DETACHED,
+      },
+    );
+    const [out, err, code] = await Promise.all([
+      new Response(execProc.stdout).text(),
+      new Response(execProc.stderr).text(),
+      execProc.exited,
+    ]);
+    return { exitCode: code, stdout: out, stderr: err };
+  } catch (error) {
+    // `Bun.spawn` throws synchronously when the binary is missing; callers handle one shape only.
+    return spawnFailure(error);
+  }
+}
+
+/** Root exists in every image, whatever `USER` it declares. */
+export async function execAsRoot(containerId: string, cmd: string[]): Promise<ExecResult> {
+  return dockerExec(containerId, cmd, { user: "root" });
+}
+
 /** Kept alive with `tail -f /dev/null` (busybox has no `sleep infinity`) so the Adapter can `exec` into it repeatedly. */
 export async function startSandbox(options: StartSandboxOptions): Promise<Sandbox> {
   const { mountPath, mounts: extraMounts = [], secretEnv = {}, network, servicesNetwork } = options;
@@ -240,26 +317,8 @@ export async function startSandbox(options: StartSandboxOptions): Promise<Sandbo
   return {
     containerId,
     mounts,
-    async exec(cmd: string[], stdin?: string): Promise<ExecResult> {
-      try {
-        const execProc = Bun.spawn(["docker", "exec", ...(stdin === undefined ? [] : ["-i"]), containerId, ...cmd], {
-          env: process.env,
-          ...(stdin === undefined ? {} : { stdin: new Blob([stdin]) }),
-          stdout: "pipe",
-          stderr: "pipe",
-          ...DETACHED,
-        });
-        const [out, err, code] = await Promise.all([
-          new Response(execProc.stdout).text(),
-          new Response(execProc.stderr).text(),
-          execProc.exited,
-        ]);
-        return { exitCode: code, stdout: out, stderr: err };
-      } catch (error) {
-        // `Bun.spawn` throws synchronously when the binary is missing; callers handle one shape only.
-        const message = error instanceof Error ? error.message : String(error);
-        return { exitCode: -1, stdout: "", stderr: message };
-      }
+    exec(cmd: string[], stdin?: string): Promise<ExecResult> {
+      return dockerExec(containerId, cmd, { stdin });
     },
     stop(): Promise<StopResult> {
       return removeContainers([containerId]);

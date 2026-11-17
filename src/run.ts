@@ -5,12 +5,15 @@ import { allowlistByLevel, repoLevelChangeWarning } from "./allowlist";
 import type { AllowlistEntry } from "./allowlist";
 import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
-import { assertDockerReachable, ensureBaseImage, removeRunSandboxes, startSandbox } from "./docker";
+import { PACKAGE_CACHE_MOUNT, PACKAGE_CACHE_VOLUME, detectPackageManager, installDependencies } from "./dependencies";
+import type { PackageManager } from "./dependencies";
+import { assertDockerReachable, ensureImageFromDockerfile, removeRunSandboxes, startSandbox } from "./docker";
 import type { Sandbox } from "./docker";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
 import type { Gate } from "./gates";
 import { createInternalNetwork, ensureProxyImage, removeNetworkByRunId, startNetworkWall } from "./network";
 import type { Blocked, NetworkMode, NetworkWall, WallPolicy } from "./network";
+import { readProjectDockerfile, resolveProjectLayer } from "./project-layer";
 import { readRepoServices, startServices } from "./services";
 import type { ServiceRuntime, ServiceSpec } from "./services";
 import {
@@ -454,6 +457,8 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
   // fails the Run here, before a Clone or a branch exists.
   const services = readRepoServices(hostRepoPath);
 
+  const projectLayer = resolveProjectLayer(readProjectDockerfile(hostRepoPath));
+
   assertDockerReachable();
 
   const adapter: Adapter = options.adapter ?? new FakeAdapter();
@@ -463,12 +468,17 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
     assertPreambleNamesGates(preamble, gates);
     prompt = buildPrompt(preamble, resolved);
   }
-  const preStart = adapter.declarePreStart();
+  const preStart = adapter.declarePreStart(projectLayer.tag);
   const secretStore = options.secretStore ?? new KeychainSecretStore();
   const adapterSecretValues = resolveAdapterSecretValues(secretStore, preStart.envNames);
   const secretEnvNames = Array.from(new Set([...preStart.envNames, ...repoSecretNames]));
 
-  const ensureImage = options.ensureImage ?? preStart.ensureImage ?? ensureBaseImage;
+  // `options.ensureImage` is a test seam that bypasses both layers.
+  const ensureImage = async (): Promise<string> => {
+    if (options.ensureImage !== undefined) return options.ensureImage();
+    await ensureImageFromDockerfile(projectLayer.tag, projectLayer.dockerfile);
+    return preStart.ensureImage !== undefined ? preStart.ensureImage() : projectLayer.tag;
+  };
   const ensureProxyImageFn = options.ensureProxyImage ?? ensureProxyImage;
   // An offline first Run must fail here, never after leaving a Clone and a branch behind —
   // the Allowlist proxy's image is resolved pre-flight for the same reason the Sandbox's is.
@@ -771,6 +781,13 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       await letSignalsLand();
       interruption.throwIfInterrupted();
 
+      // Detected from the Clone, at `baseSha` — never the host's own working tree, which may sit
+      // on a different commit entirely.
+      const packageManager: PackageManager | undefined = detectPackageManager(clonePath);
+      if (packageManager !== undefined) {
+        appendLog(logPath, `package manager detected: ${packageManager}`);
+      }
+
       // Any wall goes up BEFORE the Sandbox exists: the network a container joins is fixed at
       // `docker run` time, like every other pre-start declaration.
       if (proxyImage !== undefined && networkMode !== "open") {
@@ -820,6 +837,10 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         secretEnvNames,
         secretEnv: adapterSecretValues,
         mounts: preStart.mounts,
+        volumeMounts:
+          packageManager !== undefined
+            ? [{ volume: PACKAGE_CACHE_VOLUME, containerPath: PACKAGE_CACHE_MOUNT }]
+            : [],
         network: wall?.networkName,
         servicesNetwork,
         id,
@@ -828,6 +849,14 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         logPath,
         `sandbox ${sandbox.containerId} started from ${image}, mounts=${sandbox.mounts.join(",")}`,
       );
+
+      // Before the agent launches, so a broken install fails the Run with `iterations: 0`.
+      if (packageManager !== undefined) {
+        await installDependencies(sandbox, packageManager);
+        appendLog(logPath, `dependencies installed with ${packageManager}`);
+      }
+      await letSignalsLand();
+      interruption.throwIfInterrupted();
 
       await Promise.race([
         converge({ sandbox, repoPath: clonePath, prompt, instructions }),

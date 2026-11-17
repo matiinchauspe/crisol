@@ -1,5 +1,5 @@
 import type { Adapter, AdapterContext, PreStartDeclaration } from "../adapter";
-import { SKELETON_IMAGE_TAG, ensureImageFromDockerfile } from "../docker";
+import { contentHash, ensureImageFromDockerfile } from "../docker";
 import { CLAUDE_TOKEN_SECRET_NAME } from "../secret-store";
 
 const VERSION_PATTERN = /^(\d+\.\d+\.\d+)/;
@@ -72,11 +72,21 @@ export function buildAgentLayerDockerfile(options: { baseImage: string; claudeCo
   ].join("\n");
 }
 
-/** Computed, not built, so `declarePreStart` stays sync. */
-export function buildAgentLayerSpec(options: { baseImage: string; claudeCodeVersion: string }): AgentLayerSpec {
-  const { baseImage, claudeCodeVersion } = options;
+/**
+ * No Linux Tenaza binary ships in this image yet; a fixed placeholder keeps this input stable,
+ * and a real version changes the tag once.
+ */
+export const TENAZA_VERSION_PLACEHOLDER = "none";
+
+/** A change to any of the three hashed inputs rebuilds the Agent layer on the next Run. */
+export function buildAgentLayerSpec(options: {
+  baseImage: string;
+  claudeCodeVersion: string;
+  tenazaVersion?: string;
+}): AgentLayerSpec {
+  const { baseImage, claudeCodeVersion, tenazaVersion = TENAZA_VERSION_PLACEHOLDER } = options;
   return {
-    tag: `crisol-agent-claude-code:${claudeCodeVersion}`,
+    tag: `crisol-agent-claude-code:${contentHash([baseImage, claudeCodeVersion, tenazaVersion])}`,
     dockerfile: buildAgentLayerDockerfile({ baseImage, claudeCodeVersion }),
   };
 }
@@ -149,9 +159,9 @@ export class ClaudeCodeAdapter implements Adapter {
     this.hostVersion = options.hostVersion ?? hostClaudeVersion;
   }
 
-  declarePreStart(): PreStartDeclaration {
+  declarePreStart(projectImage: string): PreStartDeclaration {
     const claudeCodeVersion = this.hostVersion();
-    const { tag, dockerfile } = buildAgentLayerSpec({ baseImage: SKELETON_IMAGE_TAG, claudeCodeVersion });
+    const { tag, dockerfile } = buildAgentLayerSpec({ baseImage: projectImage, claudeCodeVersion });
     return {
       envNames: [CLAUDE_TOKEN_SECRET_NAME],
       mounts: [],
