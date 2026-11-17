@@ -30,3 +30,19 @@ export interface Adapter {
   /** Continues the SAME agent session — never a fresh one. */
   resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<void>;
 }
+
+/**
+ * Thrown from `launch` or `resumeWithFeedback` when the agent CLI itself refuses to proceed — a
+ * rate limit, an exhausted quota, or a failed authentication — never a red Gate. Only the Adapter
+ * can tell the two apart, so classifying one is its job: `category` becomes the Run result's
+ * `reason: "provider: <category>"`, and the Run stops without spending another iteration on it.
+ */
+export class ProviderFailureError extends Error {
+  constructor(
+    readonly category: string,
+    message: string = category,
+  ) {
+    super(message);
+    this.name = "ProviderFailureError";
+  }
+}

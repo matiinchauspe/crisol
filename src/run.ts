@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { ProviderFailureError } from "./adapter";
 import type { Adapter, AdapterContext, PreStartDeclaration } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
 import { allowlistByLevel, repoLevelChangeWarning } from "./allowlist";
@@ -7,7 +8,14 @@ import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames 
 import type { GlobalConfig } from "./config";
 import { PACKAGE_CACHE_MOUNT, PACKAGE_CACHE_VOLUME, detectPackageManager, installDependencies } from "./dependencies";
 import type { PackageManager } from "./dependencies";
-import { assertDockerReachable, ensureImageFromDockerfile, removeRunSandboxes, startSandbox } from "./docker";
+import {
+  DEFAULT_SANDBOX_CPUS,
+  DEFAULT_SANDBOX_MEMORY,
+  assertDockerReachable,
+  ensureImageFromDockerfile,
+  removeRunSandboxes,
+  startSandbox,
+} from "./docker";
 import type { Sandbox } from "./docker";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
 import type { Gate } from "./gates";
@@ -57,6 +65,13 @@ export function resolveMaxParallel(globalConfig: GlobalConfig): number {
   return globalConfig.maxParallel ?? DEFAULT_MAX_PARALLEL;
 }
 
+export function resolveCapacityLimits(globalConfig: GlobalConfig): { cpus: number; memory: string } {
+  return {
+    cpus: globalConfig.cpus ?? DEFAULT_SANDBOX_CPUS,
+    memory: globalConfig.memory ?? DEFAULT_SANDBOX_MEMORY,
+  };
+}
+
 /** Per Run beats `~/.crisol/config` beats the default, each knob on its own. */
 export function resolveCeiling(
   perRun: { maxIterations?: number; ceilingMs?: number },
@@ -94,6 +109,19 @@ export interface RunResult {
   fetchBack: boolean;
 }
 
+/**
+ * Carried on a `run()` rejection when the Run result was still computed and written. `cli.ts`
+ * prints it under `--json` even though the Run failed.
+ */
+export interface RunFailure {
+  result?: RunResult;
+}
+
+function attachResult(error: unknown, result: RunResult): unknown {
+  if (error instanceof Error) (error as Error & RunFailure).result = result;
+  return error;
+}
+
 /** What the Run lock file holds, for `crisol recover` to find a dead Run's branch and host repo. */
 export interface RunLockRecord {
   host: string;
@@ -125,6 +153,8 @@ export interface RunOptions extends TaskInput {
   onSlotWait?: (maxParallel: number) => void;
   /** Called with each warning the human must act on now, such as a Sandbox left running. */
   onWarning?: (warning: string) => void;
+  /** Called once a provider failure is caught, so a sibling Task still waiting for a Slot can give up rather than start into the same outage. */
+  onProviderFailure?: (reason: string) => void;
   /**
    * Aborts a Run still waiting for a Slot. A Run past its Slot stops on its own signal handlers,
    * and treats a signal already aborted, with the signal's name as `reason`, as one received.
@@ -399,6 +429,8 @@ interface PreparedRun {
   maxParallel: number;
   maxIterations: number;
   ceilingMs: number;
+  cpus: number;
+  memory: string;
   adapter: Adapter;
   preStart: PreStartDeclaration;
   adapterSecretValues: Record<string, string>;
@@ -445,6 +477,7 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
     globalConfig,
     { maxIterations: DEFAULT_MAX_ITERATIONS, ceilingMs: DEFAULT_CEILING_MS },
   );
+  const { cpus, memory } = resolveCapacityLimits(globalConfig);
 
   const repoSecretNames = readRepoSecretNames(hostRepoPath);
   assertDeclaredSecretsPresent(repoSecretNames);
@@ -499,6 +532,8 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
     maxParallel,
     maxIterations,
     ceilingMs,
+    cpus,
+    memory,
     adapter,
     preStart,
     adapterSecretValues,
@@ -548,7 +583,7 @@ function discardReservation(reservation: Reservation, home: string): void {
  * A Run that ends before it holds a Slot keeps its dir, log and a Run result, like any other Run:
  * its id may already have been handed out, and only `crisol gc` deletes Run state. It never cut a
  * branch, so there is nothing to fetch back. Never throws, so the error that ended the Run is the
- * one its caller sees.
+ * one its caller sees; returns the result it computed so the caller can attach it to that error.
  */
 function endUnstartedRun(
   reservation: Reservation,
@@ -557,7 +592,7 @@ function endUnstartedRun(
   network: NetworkMode,
   signal: AbortSignal | undefined,
   error: unknown,
-): void {
+): RunResult {
   const reason = signal?.aborted
     ? `interrupted: ${typeof signal.reason === "string" ? signal.reason : "abort"}`
     : `error: ${errorMessage(error)}`;
@@ -586,6 +621,7 @@ function endUnstartedRun(
   } finally {
     reservation.lock.release();
   }
+  return result;
 }
 
 export interface DetachedRun {
@@ -643,8 +679,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         throw new Error(`Run ${reservation.id} was reserved for ${reservation.host}, not ${prepared.hostRepoPath}.`);
       }
     } catch (error) {
-      endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
-      throw error;
+      const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
+      throw attachResult(error, result);
     }
   } else {
     prepared = await prepareRun(options, undefined, sharedInputs);
@@ -657,8 +693,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     try {
       writeFileSync(runPidPath(reservation.id, home), String(process.pid));
     } catch (error) {
-      endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
-      throw error;
+      const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
+      throw attachResult(error, result);
     }
   }
   const {
@@ -671,6 +707,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     maxParallel,
     maxIterations,
     ceilingMs,
+    cpus,
+    memory,
     adapter,
     preStart,
     adapterSecretValues,
@@ -690,8 +728,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       signal: options.signal,
     });
   } catch (error) {
-    endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
-    throw error;
+    const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
+    throw attachResult(error, result);
   }
 
   const { id, branch, lock } = reservation;
@@ -844,11 +882,14 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         network: wall?.networkName,
         servicesNetwork,
         id,
+        cpus,
+        memory,
       });
       appendLog(
         logPath,
         `sandbox ${sandbox.containerId} started from ${image}, mounts=${sandbox.mounts.join(",")}`,
       );
+      appendLog(logPath, `sandbox capacity: cpus=${cpus}, memory=${memory}`);
 
       // Before the agent launches, so a broken install fails the Run with `iterations: 0`.
       if (packageManager !== undefined) {
@@ -874,6 +915,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     } catch (error) {
       primaryError = error;
       appendLog(logPath, `primary error: ${errorMessage(error)}`);
+      if (error instanceof ProviderFailureError) options.onProviderFailure?.(`provider: ${error.category}`);
     }
 
     // Read before the proxy container is removed — there is no log left to read after.
@@ -950,7 +992,13 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
 
     if (primaryError !== undefined) {
       status = "not-converged";
-      reason = interruption.by !== undefined ? `interrupted: ${interruption.by}` : `error: ${errorMessage(primaryError)}`;
+      if (interruption.by !== undefined) {
+        reason = `interrupted: ${interruption.by}`;
+      } else if (primaryError instanceof ProviderFailureError) {
+        reason = `provider: ${primaryError.category}`;
+      } else {
+        reason = `error: ${errorMessage(primaryError)}`;
+      }
     }
     const result: RunResult = {
       run: id,
@@ -976,11 +1024,16 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       appendLog(logPath, `result.json could not be written: ${errorMessage(error)}`);
     }
 
+    // A provider failure resolves rather than rejects, as long as nothing else also went wrong.
+    if (primaryError instanceof ProviderFailureError && fetchBackError === undefined && resultError === undefined) {
+      return result;
+    }
+
     const errors = [primaryError, fetchBackError].filter((error) => error !== undefined);
     if (errors.length === 2) {
-      throw new AggregateError(errors, "Run failed and Fetch-back also failed");
+      throw attachResult(new AggregateError(errors, "Run failed and Fetch-back also failed"), result);
     }
-    if (errors.length === 1) throw errors[0];
+    if (errors.length === 1) throw attachResult(errors[0], result);
     if (resultError !== undefined) throw resultError;
     return result;
   } finally {

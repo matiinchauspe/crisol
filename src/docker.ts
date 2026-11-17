@@ -47,6 +47,10 @@ export const DEFAULT_PROJECT_DOCKERFILE = [
 
 export const DEFAULT_PROJECT_IMAGE_TAG = "crisol-base:0.2.0";
 
+/** The Sandbox's own cap, overridable in `~/.crisol/config` — never the Allowlist proxy's or a Service's. */
+export const DEFAULT_SANDBOX_CPUS = 2;
+export const DEFAULT_SANDBOX_MEMORY = "4g";
+
 /**
  * Every `docker` child a Run makes leads its own session: a Ctrl+C or hang-up aimed at
  * Crisol's process group must not kill a `docker run` mid-create or a `docker rm` mid-teardown,
@@ -143,6 +147,8 @@ export interface StartSandboxOptions {
   network?: string;
   /** Joined after creation when it differs from `network`. */
   servicesNetwork?: string;
+  cpus?: number;
+  memory?: string;
 }
 
 /** For the log only; `buildMountFlag` is what reaches `docker run`. */
@@ -171,6 +177,8 @@ export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
     volumeMounts = [],
     id,
     network,
+    cpus = DEFAULT_SANDBOX_CPUS,
+    memory = DEFAULT_SANDBOX_MEMORY,
   } = options;
   const mountArgs = [
     { hostPath: mountPath, containerPath: mountPath, mode: "rw" as const },
@@ -188,6 +196,10 @@ export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
     "--init", // a real PID1 that forwards SIGTERM instead of `tail -f /dev/null` ignoring it
     "--pull",
     "never", // Crisol's image is always built locally — never let docker try a registry for it
+    "--cpus",
+    String(cpus),
+    "--memory",
+    memory,
     ...(network !== undefined ? ["--network", network] : []),
     "--name",
     `crisol-${id}`,

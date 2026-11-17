@@ -59,6 +59,8 @@ export interface GlobalConfig {
   maxIterations?: number;
   timeoutMinutes?: number;
   maxParallel?: number;
+  cpus?: number;
+  memory?: string;
 }
 
 function intKeyLine(key: string): RegExp {
@@ -76,6 +78,46 @@ function extractIntKey(text: string, key: string, sourcePath: string): number | 
   return value;
 }
 
+const POSITIVE_DECIMAL = /^[0-9]+(\.[0-9]+)?$/;
+
+/** `--cpus` takes a decimal, unlike every other knob here, which is a whole number. */
+export function parsePositiveNumber(raw: string): number | undefined {
+  if (!POSITIVE_DECIMAL.test(raw)) return undefined;
+  const value = Number.parseFloat(raw);
+  return value > 0 ? value : undefined;
+}
+
+function extractNumberKey(text: string, key: string, sourcePath: string): number | undefined {
+  const match = intKeyLine(key).exec(text);
+  if (!match) return undefined;
+  const raw = match[1] ?? "";
+  const value = parsePositiveNumber(raw);
+  if (value === undefined) {
+    throw new Error(`${sourcePath}: "${key}" must be a positive number, got "${raw}".`);
+  }
+  return value;
+}
+
+const DOCKER_MEMORY_SIZE = /^([0-9]+)([bBkKmMgG]?)$/;
+
+/** `docker run --memory`'s own syntax: a byte count, or one with a `b`/`k`/`m`/`g` suffix. */
+export function parseDockerMemorySize(raw: string): string | undefined {
+  const match = DOCKER_MEMORY_SIZE.exec(raw);
+  if (!match || Number.parseInt(match[1]!, 10) <= 0) return undefined;
+  return raw;
+}
+
+function extractMemoryKey(text: string, key: string, sourcePath: string): string | undefined {
+  const match = intKeyLine(key).exec(text);
+  if (!match) return undefined;
+  const raw = match[1] ?? "";
+  const value = parseDockerMemorySize(raw);
+  if (value === undefined) {
+    throw new Error(`${sourcePath}: "${key}" must be a Docker memory size (for example "4g"), got "${raw}".`);
+  }
+  return value;
+}
+
 /** Any other key is ignored, never rejected, so one Crisol version reads another's config. */
 export function parseGlobalConfig(text: string, sourcePath: string): GlobalConfig {
   const config: GlobalConfig = {};
@@ -85,6 +127,10 @@ export function parseGlobalConfig(text: string, sourcePath: string): GlobalConfi
   if (timeoutMinutes !== undefined) config.timeoutMinutes = timeoutMinutes;
   const maxParallel = extractIntKey(text, "max_parallel", sourcePath);
   if (maxParallel !== undefined) config.maxParallel = maxParallel;
+  const cpus = extractNumberKey(text, "cpus", sourcePath);
+  if (cpus !== undefined) config.cpus = cpus;
+  const memory = extractMemoryKey(text, "memory", sourcePath);
+  if (memory !== undefined) config.memory = memory;
   return config;
 }
 

@@ -1,3 +1,4 @@
+import { ProviderFailureError } from "../adapter";
 import type { Adapter, AdapterContext, PreStartDeclaration } from "../adapter";
 
 /**
@@ -93,10 +94,16 @@ export const WIDEN_REPO_LEVEL_SCRIPT: readonly string[] = [
   "git commit --quiet -m 'chore: allow a host'",
 ];
 
+export interface ProviderFailure {
+  category: string;
+  message?: string;
+}
+
 export class FakeAdapter implements Adapter {
   constructor(
     private readonly launchScript: readonly string[] = DEFAULT_SCRIPT,
     private readonly resumeScript?: readonly string[],
+    private readonly providerFailure?: ProviderFailure,
   ) {}
 
   // Fake Adapter never calls a real provider or wires into Tenaza — nothing to declare.
@@ -105,6 +112,9 @@ export class FakeAdapter implements Adapter {
   }
 
   async launch(ctx: AdapterContext): Promise<void> {
+    if (this.providerFailure) {
+      throw new ProviderFailureError(this.providerFailure.category, this.providerFailure.message);
+    }
     await this.runScript(ctx, this.launchScript);
   }
 
@@ -131,4 +141,9 @@ export class FakeAdapter implements Adapter {
       }
     }
   }
+}
+
+/** Fails `launch` immediately — the same timing a real rate limit, quota or auth failure would have. */
+export function simulateProviderFailure(category: string, message?: string): FakeAdapter {
+  return new FakeAdapter(DEFAULT_SCRIPT, undefined, { category, message });
 }

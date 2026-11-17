@@ -14,7 +14,7 @@ import { run, runFanOut } from "./run";
 import { listRuns, readRunLog } from "./runs";
 import type { RunEntry } from "./runs";
 import { BUILT_IN_ALLOWLIST, isInternalHostname, isPlainHostname } from "./network";
-import type { Blocked, NetworkMode, RunOptions, RunResult } from "./run";
+import type { Blocked, NetworkMode, RunFailure, RunOptions, RunResult } from "./run";
 import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
@@ -431,6 +431,8 @@ async function main(argv: string[]): Promise<number> {
       shownWarnings.add(warning);
       process.stderr.write(`Warning: ${warning}\n`);
     },
+    // Shared across a fan-out's Runs, so this also gives up a sibling still waiting for a Slot.
+    onProviderFailure: (reason) => interrupt.abort(reason),
     signal: interrupt.signal,
   };
 
@@ -479,6 +481,10 @@ async function main(argv: string[]): Promise<number> {
       exitCode = 1;
       const prefix = args.tasks.length > 1 ? `Task ${JSON.stringify(args.tasks[index])}: ` : "";
       process.stderr.write(`${prefix}${formatError(outcome.reason)}\n`);
+      // The Run still computed and wrote a result (a provider failure, an interruption, a red
+      // Gate that also lost Fetch-back…) — `--json` prints it even though the Run failed.
+      const failedResult = (outcome.reason as RunFailure | undefined)?.result;
+      if (args.json && failedResult !== undefined) console.log(JSON.stringify(failedResult));
     }
   });
   // --json is a machine's contract: one Run result per line, and `reached` is already in it.
