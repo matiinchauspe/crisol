@@ -340,6 +340,41 @@ the same Claude Code version as your host (`claude --version`) under a non-root 
 (Claude Code itself refuses `--dangerously-skip-permissions` as root), and disables commit/PR
 attribution by configuration inside the Sandbox — never by asking the model.
 
+### Services
+
+A repo whose e2e tests need something like Postgres declares it once, in `.crisol/services.yml`,
+restricted to four keys per service:
+
+```yaml
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: crisol
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+```
+
+Any other key — `ports`, `volumes`, `depends_on`, anything compose otherwise allows — fails the Run
+before anything happens, naming it. Each declared Service gets its own container, one per Run,
+reachable from inside the Sandbox by its name alone (`db:5432`) — never by its real container name,
+which carries the run id so two parallel Runs' same-named Services never collide. It is destroyed
+with the Run.
+
+The agent launches only once every Service that declares a `healthcheck` reports healthy; one that
+never does fails the Run before any iteration is spent, with `iterations: 0`. `environment` takes a
+mapping or compose's `KEY=VALUE` list form; `command` takes a list (exec form) or a single string
+(run through the image's shell, like compose's shell form); `healthcheck.test` is `["CMD", …]`,
+`["CMD-SHELL", "<cmd>"]`, or `["NONE"]`, with optional `interval`, `timeout`, `retries` and
+`start_period` passed straight to Docker's own healthcheck.
+
+A Service normally joins the same network the Allowlist wall already put the Sandbox on.
+`--network open` stands up no wall, so a Run whose repo declares one gets a network just for that,
+and the Sandbox joins both it and its usual internet-carrying default network.
+
 ### Recover
 
 ```
@@ -438,7 +473,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 08 | Credentials | ✅ |
 | 09 | Commits | |
 | 10 | Text input | ✅ |
-| 11 | Services | |
+| 11 | Services | ✅ |
 | 12 | Two-layer image and dependencies | |
 | 13 | Provider failure and capacity | |
 | 14 | Claude Code Adapter | ✅ |
@@ -451,7 +486,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
 **Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Detached Run**, **Secret**, **SecretStore**,
-**Preamble**, **Context**, **Template**. Each term is defined in
+**Service**, **Preamble**, **Context**, **Template**. Each term is defined in
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
 [`docs/adr/`](docs/adr/):
 
@@ -469,6 +504,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0012](docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md): the network wall is tinyproxy on a per-Run `--internal` network, the Allowlist bind-mounted in rather than baked into the image; blocked hosts are counted by parsing tinyproxy's own log; the Sandbox's env carries both casings of `HTTP(S)_PROXY`/`NO_PROXY` (supersedes 0003)
 - [0013](docs/adr/0013-allowlist-levels-learn-and-open.md): the user level is `~/.crisol/network` and the repo level `.crisol/network` (not `network = […]` in `config.toml`, as the spec had it), both one host per line, plain public hostnames only (no `.internal`, `.local`, `.svc` and the like), appended to by `crisol allow`; a branch that touches `.crisol/network` carries a warning; only an allowlist Run reads them; `--network learn` is a filterless proxy whose log yields `reached`, and it prints `crisol allow --repo` lines instead of asking; `--network open` stands up no wall; no Bun host was added to the built-in list
 - [0014](docs/adr/0014-the-prompt-travels-over-stdin-and-is-resolved-once.md): the agent receives one prompt (Preamble, Task, Context) over stdin, never argv; every input file is read once, in the process the user launched, and the prompt is saved to `runs/<id>/prompt`, which a detached Run's process reads; templates are looked up repo, then user, then built-in
+- [0015](docs/adr/0015-services-share-the-runs-network-and-health-gate-on-docker-run---health-cmd.md): `.crisol/services.yml` is read by a hand-rolled YAML subset parser, not a dependency; a Service joins the wall's network when one exists, else a bare network of its own (reusing `crisol-net-<id>`, so `crisol recover` already sweeps it for free); health-gating runs on `docker run --health-cmd`, polled through `docker inspect`; open mode plus a Service joins the Sandbox to a second network after creation, since Docker refuses to mix the default bridge with a user-defined network at creation time
 
 ## Development
 

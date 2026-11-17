@@ -79,6 +79,13 @@ The hostnames a Sandbox may reach, merged from three levels: built-in (shipped w
 port, a wildcard or an IP address.
 _Avoid_: Whitelist, firewall rule
 
+**Service**:
+A container `.crisol/services.yml` declares, one instance per Run, reachable by its own name on
+the Run's network, destroyed with it. The agent launches only once every Service's healthcheck
+passes; one that never becomes healthy fails the Run before any iteration is spent.
+_Avoid_: Dependency, sidecar (a Service is scoped to one Run, like the Sandbox — never shared or
+long-lived across Runs)
+
 **Project layer / Agent layer**:
 The two image layers: the project's toolchain, and the agent on top.
 _Avoid_: Base image, Docker layer (those name the mechanism; Project layer / Agent layer name
