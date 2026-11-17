@@ -105,7 +105,7 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 ## Usage
 
 ```
-crisol run "<task>"... [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--network <allowlist|learn|open>] [--adapter <fake|claude-code>]
+crisol run ("<task>"... | --file <md>) [--context <md>]... [--prompt <name>] [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--network <allowlist|learn|open>] [--adapter <fake|claude-code>]
 crisol allow <host> [--repo]
 crisol status
 crisol logs <run>
@@ -115,6 +115,9 @@ crisol recover
 
 | Flag | Default | What it does |
 |---|---|---|
+| `--file <md>` | none | The file's content is the Task, in place of a phrase. One file, and not beside a phrase. |
+| `--context <md>` | none | A reference file the agent gets after the Task, in its own section, marked as reference rather than work. Repeatable. |
+| `--prompt <name>` | none | Wraps the Task in a template. See [The Task the agent gets](#the-task-the-agent-gets). |
 | `--base <ref>` | your current `HEAD` | Branch, tag or sha to cut the Run's branch from. It must be reachable from a local branch, a tag or `HEAD`, because that is all the Clone receives. To use `origin/main`, check it out or fast-forward a local branch onto it first. |
 | `--name <branch>` | `crisol/<id>` | The branch name the Run leaves in your repo. Refused before anything happens if it clashes with an existing branch, a tag, or a branch path (for example `feat` vs `feat/x`). Only with a single Task. |
 | `--gate <cmd>` | none | A command whose exit code decides whether the work is right. Repeatable. Any `--gate` replaces your repo's own `.crisol/config.toml` Gates entirely — it never merges with them. |
@@ -129,6 +132,37 @@ A repo can declare its own Gates once, in `.crisol/config.toml`:
 
 ```toml
 gates = ["bun test", "bun run typecheck"]
+```
+
+### The Task the agent gets
+
+Crisol never reads a tracker: the Task is the text you give it. The agent receives, in order:
+
+1. **The Preamble**: it is in a sandbox, the Gates this Run will check (by command), commit and do
+   not push, and say so when the network blocks something rather than work around it. A
+   `--detach`ed Run names the Gates its own background process re-resolves from
+   `.crisol/config.toml`, not necessarily the ones the launching terminal saw — they can drift if
+   that file changes in between (see ADR 0014's "Not addressed").
+2. **The Task**, inside `<task>` tags, after `--prompt`'s template is applied.
+3. **Each `--context` file**, inside its own `<reference file="…">` tags.
+
+A template is a Markdown file whose only variable is `{{task}}`. Crisol looks for `--prompt <name>`
+in three places, and the first found wins:
+
+1. `.crisol/prompts/<name>.md` in your repo;
+2. `~/.crisol/prompts/<name>.md`;
+3. Crisol's built-in templates (`fix-bug`).
+
+A template that uses any other `{{…}}`, or lacks `{{task}}`, fails the Run before anything happens.
+A name starts with a letter or digit, followed by letters, digits, `-` and `_`.
+
+`--file`, `--context` and templates must be UTF-8 text: a file with a NUL byte or invalid UTF-8 is
+refused before anything happens, as is an empty one. Every file is read once, by the `crisol run`
+you launched, even with `--detach`, so a temporary file can go as soon as the command returns.
+The prompt the agent received is kept in `runs/<id>/prompt`.
+
+```bash
+crisol run --file tickets/42.md --context docs/spec.md --prompt fix-bug
 ```
 
 ### Several Tasks at once
@@ -377,11 +411,13 @@ and `learn` or `open` with `--network`; a `learn` Run adds `reached`. See [Netwo
 ~/.crisol/                 # override with CRISOL_HOME
 ├── config                 # optional: max_parallel / max_iterations / timeout_minutes overrides
 ├── network                # optional: the user level of the Allowlist, one host per line
+├── prompts/<name>.md      # optional: your own `--prompt` templates
 ├── slots/<n>.lock         # one per Slot; a Run holds one while it executes
 └── runs/<id>/             # made when the Run is reserved, before it waits for a Slot
     ├── repo/              # the Run's Clone, made once the Run holds a Slot (status: running)
     ├── lock               # held while the Run is alive; how `status` and `recover` tell live from dead
     ├── pid                # the process that owns the Run; `status` shows it while that process holds the Run
+    ├── prompt             # the Preamble, Task and Context the agent received
     ├── log                # timestamped log of every stage; a detached Run's output too
     └── result.json        # the Run result, written on every exit
 ```
@@ -401,7 +437,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 07 | Editable Allowlist, learn and open | ✅ |
 | 08 | Credentials | ✅ |
 | 09 | Commits | |
-| 10 | Text input | |
+| 10 | Text input | ✅ |
 | 11 | Services | |
 | 12 | Two-layer image and dependencies | |
 | 13 | Provider failure and capacity | |
@@ -414,7 +450,8 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 ## Vocabulary and decisions
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
-**Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Detached Run**, **Secret**, **SecretStore**. Each term is defined in
+**Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Detached Run**, **Secret**, **SecretStore**,
+**Preamble**, **Context**, **Template**. Each term is defined in
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
 [`docs/adr/`](docs/adr/):
 
@@ -431,6 +468,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0011](docs/adr/0011-a-run-is-reserved-before-its-slot-and-a-detached-run-inherits-its-lock.md): a Run is reserved before it waits for a Slot, so `status` can show it queued (reversing part of 0009, amending 0010); a Run stopped while queued keeps its log and Run result; `status` reads state from the run dir alone; a detached Run's process inherits its Run lock as fd 3, so the lock is never free in between
 - [0012](docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md): the network wall is tinyproxy on a per-Run `--internal` network, the Allowlist bind-mounted in rather than baked into the image; blocked hosts are counted by parsing tinyproxy's own log; the Sandbox's env carries both casings of `HTTP(S)_PROXY`/`NO_PROXY` (supersedes 0003)
 - [0013](docs/adr/0013-allowlist-levels-learn-and-open.md): the user level is `~/.crisol/network` and the repo level `.crisol/network` (not `network = […]` in `config.toml`, as the spec had it), both one host per line, plain public hostnames only (no `.internal`, `.local`, `.svc` and the like), appended to by `crisol allow`; a branch that touches `.crisol/network` carries a warning; only an allowlist Run reads them; `--network learn` is a filterless proxy whose log yields `reached`, and it prints `crisol allow --repo` lines instead of asking; `--network open` stands up no wall; no Bun host was added to the built-in list
+- [0014](docs/adr/0014-the-prompt-travels-over-stdin-and-is-resolved-once.md): the agent receives one prompt (Preamble, Task, Context) over stdin, never argv; every input file is read once, in the process the user launched, and the prompt is saved to `runs/<id>/prompt`, which a detached Run's process reads; templates are looked up repo, then user, then built-in
 
 ## Development
 

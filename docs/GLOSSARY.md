@@ -8,9 +8,20 @@ One Task executed in one Sandbox, from launch to Run result. Identified by a run
 _Avoid_: Job, execution, invocation
 
 **Task**:
-The text a Run works on: a phrase or a ticket file, plus optional Context files.
-_Avoid_: Prompt, request (the Preamble and the Adapter turn it into a prompt; the Task itself is
-the human's own input, before that)
+The text a Run works on: a phrase, or the content of a `--file`, after any Template is applied.
+Context is never part of it.
+_Avoid_: Prompt, request (the prompt is what the agent receives: the Preamble, the Task and any
+Context together)
+
+**Context**:
+A file given with `--context`, handed to the agent after the Task, in its own section marked as
+reference material rather than work. UTF-8 text only.
+_Avoid_: Attachment, input (Context informs the Task; it is not something to act on)
+
+**Template**:
+A Markdown file named by `--prompt` that wraps the Task, whose only variable is `{{task}}`. Found
+in the repo's `.crisol/prompts/`, then `~/.crisol/prompts/`, then Crisol's built-in ones.
+_Avoid_: Prompt (the flag is `--prompt`, but what it names is a Template, not the prompt itself)
 
 **Sandbox**:
 The container a Run executes in, on its own internal network.
@@ -74,9 +85,10 @@ _Avoid_: Base image, Docker layer (those name the mechanism; Project layer / Age
 what each one is FOR)
 
 **Preamble**:
-The fixed text Crisol prepends to every Task.
-_Avoid_: System prompt, header (the Preamble is specific to the Task text, and the Adapter may
-tune its wording — it is not a generic system prompt)
+The text Crisol puts before every Task: the agent is in a sandbox, the Run's Gates by command,
+commit and do not push, report a network block rather than work around it. An Adapter may replace
+its wording, but it must still name every Gate.
+_Avoid_: System prompt, header (the Preamble travels with the Task, not as a system prompt)
 
 **Secret**:
 An env var NAME an Adapter or a repo declares — never its value. Resolved to a value from
