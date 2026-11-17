@@ -14,7 +14,7 @@ import type { ExecResult, Sandbox, StopResult } from "../src/docker";
 
 describe("parseClaudeVersionOutput (ticket 14)", () => {
   test("parses the real host's captured `claude --version` shape", () => {
-    // Captured for real from the host, same as crisol ADR 0007's setup-token fixture.
+    // Captured from a real host.
     expect(parseClaudeVersionOutput("2.1.283 (Claude Code)\n")).toBe("2.1.283");
   });
 
@@ -33,13 +33,10 @@ describe("buildAgentLayerDockerfile (ticket 14)", () => {
     });
     expect(dockerfile).toContain("FROM crisol-base:test");
     expect(dockerfile).toContain("bash -s 9.9.9");
-    // commit/pr take the trailer STRING to use (empty hides it) — never a boolean, which the
-    // real CLI's own schema validation rejects (verified with `claude doctor`).
     expect(dockerfile).toContain('"commit":""');
     expect(dockerfile).toContain('"pr":""');
     expect(dockerfile).toContain('"sessionUrl":false');
     expect(dockerfile).not.toContain("latest");
-    // The Preamble never carries this — it's a settings.json file inside the Sandbox.
     expect(dockerfile).toContain("/home/agent/.claude/settings.json");
   });
 
@@ -67,7 +64,6 @@ describe("buildAgentLayerDockerfile (ticket 14)", () => {
     const installLine = dockerfile.indexOf("install.sh");
     expect(userLine).toBeGreaterThan(-1);
     expect(installLine).toBeGreaterThan(userLine);
-    // Never switches back to root afterward — every later instruction stays as `agent`.
     expect(dockerfile).not.toContain("USER root");
   });
 
@@ -96,27 +92,26 @@ describe("buildAgentLayerSpec (ticket 14)", () => {
 
 describe("buildLaunchArgs / buildResumeArgs (ticket 14)", () => {
   test("launch runs unattended, as JSON, with no --resume", () => {
-    const args = buildLaunchArgs({ binary: "claude", task: "fix the bug" });
-    expect(args).toEqual(["claude", "-p", "fix the bug", "--dangerously-skip-permissions", "--output-format", "json"]);
+    const args = buildLaunchArgs({ binary: "claude" });
+    expect(args).toEqual(["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json"]);
   });
 
   test("launch appends instructions via --append-system-prompt when present", () => {
-    const args = buildLaunchArgs({ binary: "claude", task: "fix the bug", instructions: "always use conventional commits" });
+    const args = buildLaunchArgs({ binary: "claude", instructions: "always use conventional commits" });
     expect(args).toContain("--append-system-prompt");
     expect(args).toContain("always use conventional commits");
   });
 
   test("launch never appends --append-system-prompt when instructions are absent", () => {
-    const args = buildLaunchArgs({ binary: "claude", task: "fix the bug" });
+    const args = buildLaunchArgs({ binary: "claude" });
     expect(args).not.toContain("--append-system-prompt");
   });
 
   test("resume carries --resume <sessionId> — the SAME session, never a fresh one", () => {
-    const args = buildResumeArgs({ binary: "claude", sessionId: "sess-123", feedback: "Gate failed: bun test" });
+    const args = buildResumeArgs({ binary: "claude", sessionId: "sess-123" });
     expect(args).toEqual([
       "claude",
       "-p",
-      "Gate failed: bun test",
       "--resume",
       "sess-123",
       "--dangerously-skip-permissions",
@@ -142,18 +137,17 @@ describe("parseCliOutput (ticket 14)", () => {
   });
 });
 
-/**
- * An in-memory Sandbox double — no Docker, no real `claude` binary — so these tests exercise
- * the REAL `ClaudeCodeAdapter`'s argv-building and session-tracking logic without either.
- */
-function fakeSandbox(responses: string[]): { sandbox: Sandbox; calls: string[][] } {
+/** No Docker and no real `claude`, so the real Adapter's argv and session logic run alone. */
+function fakeSandbox(responses: string[]): { sandbox: Sandbox; calls: string[][]; stdins: (string | undefined)[] } {
   const calls: string[][] = [];
+  const stdins: (string | undefined)[] = [];
   let i = 0;
   const sandbox: Sandbox = {
     containerId: "fake",
     mounts: [],
-    async exec(cmd: string[]): Promise<ExecResult> {
+    async exec(cmd: string[], stdin?: string): Promise<ExecResult> {
       calls.push(cmd);
+      stdins.push(stdin);
       const stdout = responses[Math.min(i, responses.length - 1)]!;
       i++;
       return { exitCode: 0, stdout, stderr: "" };
@@ -162,11 +156,11 @@ function fakeSandbox(responses: string[]): { sandbox: Sandbox; calls: string[][]
       return { ok: true, stderr: "" };
     },
   };
-  return { sandbox, calls };
+  return { sandbox, calls, stdins };
 }
 
-function fakeContext(sandbox: Sandbox, task = "fix the bug"): AdapterContext {
-  return { sandbox, repoPath: "/clone", task };
+function fakeContext(sandbox: Sandbox, prompt = "fix the bug"): AdapterContext {
+  return { sandbox, repoPath: "/clone", prompt };
 }
 
 describe("ClaudeCodeAdapter.declarePreStart (ticket 14)", () => {
@@ -179,32 +173,25 @@ describe("ClaudeCodeAdapter.declarePreStart (ticket 14)", () => {
   });
 
   test("never calls the host `claude --version` when hostVersion is overridden", () => {
-    // If this ever shelled out for real, a garbled/absent `claude` on the test machine
-    // would make this test flaky instead of deterministic — proof the seam is load-bearing.
+    // Shelling out for real would make this depend on the test machine's `claude`.
     expect(() => new ClaudeCodeAdapter({ hostVersion: () => "1.0.0" }).declarePreStart()).not.toThrow();
   });
 });
 
 describe("ClaudeCodeAdapter.launch / resumeWithFeedback (ticket 14, fake Sandbox — never the real agent)", () => {
-  test("launch execs the binary directly (no shell), captures the session id", async () => {
-    const { sandbox, calls } = fakeSandbox([JSON.stringify({ session_id: "sess-aaa", result: "ok" })]);
+  test("launch execs the binary directly (no shell), hands the prompt over stdin", async () => {
+    const { sandbox, calls, stdins } = fakeSandbox([JSON.stringify({ session_id: "sess-aaa", result: "ok" })]);
     const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const prompt = `do the thing\n${"x".repeat(200 * 1024)}`;
 
-    await adapter.launch(fakeContext(sandbox, "do the thing"));
+    await adapter.launch(fakeContext(sandbox, prompt));
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual([
-      "fake-claude",
-      "-p",
-      "do the thing",
-      "--dangerously-skip-permissions",
-      "--output-format",
-      "json",
-    ]);
+    expect(calls).toEqual([["fake-claude", "-p", "--dangerously-skip-permissions", "--output-format", "json"]]);
+    expect(stdins).toEqual([prompt]);
   });
 
   test("resumeWithFeedback reuses the SAME session id launch captured — the ticket's own red Gate", async () => {
-    const { sandbox, calls } = fakeSandbox([
+    const { sandbox, calls, stdins } = fakeSandbox([
       JSON.stringify({ session_id: "sess-aaa", result: "ok" }),
       JSON.stringify({ session_id: "sess-aaa", result: "fixed" }),
     ]);
@@ -217,7 +204,7 @@ describe("ClaudeCodeAdapter.launch / resumeWithFeedback (ticket 14, fake Sandbox
     const resumeArgs = calls[1]!;
     expect(resumeArgs).toContain("--resume");
     expect(resumeArgs[resumeArgs.indexOf("--resume") + 1]).toBe("sess-aaa");
-    expect(resumeArgs).toContain("Gate failed: bun test\n\nFAIL");
+    expect(stdins[1]).toBe("Gate failed: bun test\n\nFAIL");
   });
 
   test("resumeWithFeedback before launch ever ran throws, rather than silently starting a fresh session", async () => {
