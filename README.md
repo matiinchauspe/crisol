@@ -191,6 +191,28 @@ Clone, so it cuts no branch. Its log and Run result are kept, like any Run's: `n
 max_parallel = 2
 ```
 
+### Provider failures and capacity
+
+A rate limit, an exhausted quota or a failed authentication from the agent's own provider is not a
+red Gate: the Run stops at once, without spending an iteration on it, `not-converged` with
+`reason: "provider: <category>"` (for example `provider: rate limit`). With several Tasks at once,
+it also keeps a Run still waiting for a Slot from starting, rather than let it begin only to hit
+the same outage — that Run ends the same way a Ctrl+C-while-queued one does, with
+`reason: "interrupted: provider: <category>"`.
+
+Each Sandbox is capped at 2 CPUs and 4 GB by default, overridable in `~/.crisol/config`:
+
+```toml
+# ~/.crisol/config
+cpus = 4
+memory = 8g
+```
+
+`memory` takes Docker's own size syntax (a byte count, or one with a `b`/`k`/`m`/`g` suffix). The
+cap applies to the Sandbox only — never the Allowlist proxy or a Service container. An unreachable
+Docker engine fails with a plain message naming how to start it (see
+[Requirements](#requirements)), never a raw socket error.
+
 ### Detach, status and logs
 
 ```console
@@ -459,8 +481,12 @@ default — see [The ceiling](#the-ceiling)), and `unverified` when no Gate is d
 the CLI's `--gate`, else the repo's own `.crisol/config.toml`.
 A red Gate resumes the same agent session with its failing command and output; `iterations`
 counts how many attempts that took. A Run stopped by a signal or an error is `not-converged` too,
-with `reason` set to `interrupted: SIGINT` (or the signal it got) or `error: <message>`. The CLI
-reports that as an error, and its Run result is in `result.json`. `fetchBack` says whether the
+with `reason` set to `interrupted: SIGINT` (or the signal it got) or `error: <message>`. A provider
+failure (a rate limit, an exhausted quota, a failed authentication) is `not-converged` with
+`reason: "provider: <category>"`, without spending an iteration on it — see
+[Provider failures and capacity](#provider-failures-and-capacity). The CLI reports any of these as
+an error (exit code 1, the message on stderr), and `--json` still prints the Run result on stdout,
+same as `result.json` holds. `fetchBack` says whether the
 branch reached your repo. When it is `false` and the Run made its Clone, `crisol recover` can still
 bring the branch back. A Run stopped while queued never cut one. A container
 Crisol could not remove is named in `warnings`. `network` is `allowlist` by default now that the
@@ -473,7 +499,7 @@ and `learn` or `open` with `--network`; a `learn` Run adds `reached`. See [Netwo
 
 ```
 ~/.crisol/                 # override with CRISOL_HOME
-├── config                 # optional: max_parallel / max_iterations / timeout_minutes overrides
+├── config                 # optional: max_parallel / max_iterations / timeout_minutes / cpus / memory overrides
 ├── network                # optional: the user level of the Allowlist, one host per line
 ├── prompts/<name>.md      # optional: your own `--prompt` templates
 ├── slots/<n>.lock         # one per Slot; a Run holds one while it executes
@@ -504,7 +530,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 10 | Text input | ✅ |
 | 11 | Services | ✅ |
 | 12 | Two-layer image and dependencies | ✅ |
-| 13 | Provider failure and capacity | |
+| 13 | Provider failure and capacity | ✅ |
 | 14 | Claude Code Adapter | ✅ |
 | 15 | Tenaza inside | |
 | 16 | `crisol gc` | |
@@ -535,6 +561,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0014](docs/adr/0014-the-prompt-travels-over-stdin-and-is-resolved-once.md): the agent receives one prompt (Preamble, Task, Context) over stdin, never argv; every input file is read once, in the process the user launched, and the prompt is saved to `runs/<id>/prompt`, which a detached Run's process reads; templates are looked up repo, then user, then built-in
 - [0015](docs/adr/0015-services-share-the-runs-network-and-health-gate-on-docker-run---health-cmd.md): `.crisol/services.yml` is read by a hand-rolled YAML subset parser, not a dependency; a Service joins the wall's network when one exists, else a bare network of its own (reusing `crisol-net-<id>`, so `crisol recover` already sweeps it for free); health-gating runs on `docker run --health-cmd`, polled through `docker inspect`; open mode plus a Service joins the Sandbox to a second network after creation, since Docker refuses to mix the default bridge with a user-defined network at creation time
 - [0016](docs/adr/0016-two-layer-image-tenaza-absent-cache-key-and-dependency-install.md): the Project layer is read from the host working tree and cached by its own content hash, with Crisol's own default gaining the spec's full toolchain (git, Node, Bun, Python, `gh`, `rg`); the Agent layer's cache key becomes a real hash of (Project layer image, agent version, Tenaza version), the Tenaza component a fixed placeholder until ticket 15 exists; dependency install runs as Crisol's own infra step before the agent launches, the package manager detected from the Clone's own lockfile, its cache in one shared Docker volume fixed up for whichever user owns the Sandbox via `docker exec -u root`
+- [0017](docs/adr/0017-provider-failure-is-adapter-owned-and-resolves-like-a-ceiling.md): a provider failure is a new `ProviderFailureError` only the Adapter can throw (the real Claude Code Adapter's exact wire format is unverified and left generic); it resolves `run()` like the ceiling, rather than rejecting; `--json` now prints the Run result on every exit that computed one, by attaching it to the thrown error rather than changing which exits reject (amends ADR 0010); a provider failure aborts a sibling Run still waiting for its Slot via a new `onProviderFailure` callback; `--cpus`/`--memory` cap the Sandbox container alone, default 2 CPUs / 4 GB, overridable in `~/.crisol/config`
 
 ## Development
 

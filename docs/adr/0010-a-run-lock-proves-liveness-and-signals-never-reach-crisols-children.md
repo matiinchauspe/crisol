@@ -82,6 +82,11 @@ The CLI still reports such a Run as an error: exit 1, with the message on stderr
 prints no Run result for these exits. That was left alone here, and a `--json` caller reads
 `result.json` for them.
 
+**Amendment 2026-11-17 (ticket 13, ADR 0017):** the computed `RunResult` is now attached to the
+thrown error (`attachResult`/`RunFailure` in `run.ts`), and `cli.ts` prints it under `--json` on a
+rejected outcome exactly as it already does on a fulfilled one. Exit code and stderr are
+unchanged — only the missing stdout line was closed.
+
 ## Recover covers every Run dir, each against its own host repo
 
 Run dirs from every repo share `~/.crisol/runs/`. Recover walks them all, and Fetch-back goes to
