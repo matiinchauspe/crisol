@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { run } from "../src/run";
 import { FakeAdapter } from "../src/adapters/fake";
-import { ensureBaseImage, startSandbox } from "../src/docker";
+import { ensureDefaultProjectImage, startSandbox } from "../src/docker";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
@@ -91,7 +91,7 @@ describe("Host ref snapshot before/after a Run (W7b)", () => {
  */
 describe("Sandbox mounts are exactly what was declared, nothing extra (finding 3)", () => {
   test("docker inspect's own Mounts contain exactly the Clone's bind mount, no more", async () => {
-    const image = await ensureBaseImage();
+    const image = await ensureDefaultProjectImage();
     const id = `mounts-exact-${Date.now()}`;
     const mountPath = mkdtempSync(path.join(tmpdir(), "crisol-mount-probe-"));
     const sandbox = await startSandbox({ image, mountPath, env: {}, id });

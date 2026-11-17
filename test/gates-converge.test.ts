@@ -18,7 +18,7 @@ const GATE_CMD = 'echo "content=$(cat GATE_TARGET.txt)" && [ "$(cat GATE_TARGET.
 function recordingAdapter(inner: Adapter): { adapter: Adapter; feedbacks: string[] } {
   const feedbacks: string[] = [];
   const adapter: Adapter = {
-    declarePreStart: () => inner.declarePreStart(),
+    declarePreStart: (projectImage: string) => inner.declarePreStart(projectImage),
     launch: (ctx: AdapterContext) => inner.launch(ctx),
     reportCompletion: (ctx: AdapterContext) => inner.reportCompletion(ctx),
     async resumeWithFeedback(ctx: AdapterContext, feedback: string) {

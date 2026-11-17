@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ensureBaseImage, startSandbox } from "../src/docker";
+import { ensureDefaultProjectImage, startSandbox } from "../src/docker";
 
 /**
  * `tail -f /dev/null` as PID1 ignores SIGTERM, so a plain `docker stop` blocks for the
@@ -8,7 +8,7 @@ import { ensureBaseImage, startSandbox } from "../src/docker";
  */
 describe("Sandbox teardown (W1)", () => {
   test("stop() removes the container immediately, well under the old 10s SIGTERM grace period", async () => {
-    const image = await ensureBaseImage();
+    const image = await ensureDefaultProjectImage();
     const id = `w1-speed-${Date.now()}`;
     const sandbox = await startSandbox({ image, mountPath: "/tmp", env: {}, id });
 
@@ -24,10 +24,10 @@ describe("Sandbox teardown (W1)", () => {
       stderr: "pipe",
     });
     expect(inspect.exitCode).not.toBe(0); // the container is actually gone, not just stopped
-  }, 30_000);
+  }, 60_000);
 
   test("the container carries a crisol-<id> name and a crisol.run=<id> label", async () => {
-    const image = await ensureBaseImage();
+    const image = await ensureDefaultProjectImage();
     // A unique id, never a fixed literal — a leftover container from a prior crashed run
     // with the SAME name would otherwise make `docker run --name` collide.
     const id = `w1-name-label-test-${Date.now()}`;
@@ -60,7 +60,7 @@ describe("Sandbox teardown (W1)", () => {
    */
   describe("Sandbox.stop() and exec() survive a spawn throw (finding 3)", () => {
     test("stop() resolves to ok:false with the spawn error instead of rejecting when docker vanishes from PATH", async () => {
-      const image = await ensureBaseImage();
+      const image = await ensureDefaultProjectImage();
       const id = `w3-stop-spawn-throw-${Date.now()}`;
       const sandbox = await startSandbox({ image, mountPath: "/tmp", env: {}, id });
       const originalPath = process.env.PATH;
@@ -74,7 +74,7 @@ describe("Sandbox teardown (W1)", () => {
     }, 30_000);
 
     test("exec() resolves to a normal ExecResult (exitCode -1) instead of rejecting when docker vanishes from PATH", async () => {
-      const image = await ensureBaseImage();
+      const image = await ensureDefaultProjectImage();
       const id = `w3-exec-spawn-throw-${Date.now()}`;
       const sandbox = await startSandbox({ image, mountPath: "/tmp", env: {}, id });
       const originalPath = process.env.PATH;

@@ -82,11 +82,39 @@ describe("buildAgentLayerDockerfile (ticket 14)", () => {
   });
 });
 
-describe("buildAgentLayerSpec (ticket 14)", () => {
-  test("tags the image by the Claude Code version, so a version bump gets a new tag", () => {
+describe("buildAgentLayerSpec (ticket 12, 14)", () => {
+  test("tags the image by a hash of (Project layer image, agent version, Tenaza version), so a version bump gets a new tag", () => {
     const spec = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "1.2.3" });
-    expect(spec.tag).toBe("crisol-agent-claude-code:1.2.3");
+    expect(spec.tag).toMatch(/^crisol-agent-claude-code:[0-9a-f]{12}$/);
     expect(spec.dockerfile).toContain("1.2.3");
+  });
+
+  test("the same inputs reuse the same tag", () => {
+    const a = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "1.2.3" });
+    const b = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "1.2.3" });
+    expect(a.tag).toBe(b.tag);
+  });
+
+  test("a changed Project layer image changes the tag, agent version held equal", () => {
+    const a = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "1.2.3" });
+    const b = buildAgentLayerSpec({ baseImage: "crisol-project:deadbeefcafe", claudeCodeVersion: "1.2.3" });
+    expect(a.tag).not.toBe(b.tag);
+  });
+
+  test("a changed agent version changes the tag, Project layer image held equal", () => {
+    const a = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "1.2.3" });
+    const b = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "9.9.9" });
+    expect(a.tag).not.toBe(b.tag);
+  });
+
+  test("ticket 15 (Tenaza inside) is not built: an explicit Tenaza version still changes the tag, so a later real one will too", () => {
+    const withoutTenaza = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "1.2.3" });
+    const withTenaza = buildAgentLayerSpec({
+      baseImage: "crisol-base:test",
+      claudeCodeVersion: "1.2.3",
+      tenazaVersion: "0.3.0",
+    });
+    expect(withoutTenaza.tag).not.toBe(withTenaza.tag);
   });
 });
 
@@ -163,10 +191,10 @@ function fakeContext(sandbox: Sandbox, prompt = "fix the bug"): AdapterContext {
   return { sandbox, repoPath: "/clone", prompt };
 }
 
-describe("ClaudeCodeAdapter.declarePreStart (ticket 14)", () => {
+describe("ClaudeCodeAdapter.declarePreStart (ticket 12, 14)", () => {
   test("declares exactly the Claude token by name, no mounts yet, and an ensureImage thunk", () => {
     const adapter = new ClaudeCodeAdapter({ hostVersion: () => "9.9.9" });
-    const declaration = adapter.declarePreStart();
+    const declaration = adapter.declarePreStart("crisol-base:test");
     expect(declaration.envNames).toEqual([CLAUDE_TOKEN_SECRET_NAME]);
     expect(declaration.mounts).toEqual([]);
     expect(typeof declaration.ensureImage).toBe("function");
@@ -174,7 +202,7 @@ describe("ClaudeCodeAdapter.declarePreStart (ticket 14)", () => {
 
   test("never calls the host `claude --version` when hostVersion is overridden", () => {
     // Shelling out for real would make this depend on the test machine's `claude`.
-    expect(() => new ClaudeCodeAdapter({ hostVersion: () => "1.0.0" }).declarePreStart()).not.toThrow();
+    expect(() => new ClaudeCodeAdapter({ hostVersion: () => "1.0.0" }).declarePreStart("crisol-base:test")).not.toThrow();
   });
 });
 

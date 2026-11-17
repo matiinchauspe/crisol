@@ -189,7 +189,7 @@ describe("a default-named Run collides with a plain \"crisol\" branch (failure p
 });
 
 /** `ensureImage` is a test seam, since forcing a REAL `docker build` to fail deterministically isn't practical in a test. */
-describe("ensureBaseImage runs before any side effect (failure path, finding 5)", () => {
+describe("image resolution runs before any side effect (failure path, finding 5)", () => {
   test("an image-resolution failure leaves no run directory, no Clone, and no branch behind", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
