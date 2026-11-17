@@ -375,6 +375,35 @@ A Service normally joins the same network the Allowlist wall already put the San
 `--network open` stands up no wall, so a Run whose repo declares one gets a network just for that,
 and the Sandbox joins both it and its usual internet-carrying default network.
 
+### Image and dependencies
+
+The Sandbox runs on two image layers, both built locally — never from a registry. The **Project
+layer** is your repo's own toolchain: commit a `.crisol/Dockerfile` and every Run builds and
+caches it by its own content, so editing it is the only way to change what's inside. No
+`.crisol/Dockerfile` falls back to Crisol's own default — Alpine with `git`, `bash`, `curl`,
+Node, Bun, Python, `gh` and `rg`. The **Agent layer** is always built by Crisol on top, from the
+Adapter's own definition (for `--adapter claude-code`: the agent CLI pinned to your host's own
+version, see [Credentials](#credentials)); cached by a hash of the Project layer image, the
+agent version and the Tenaza version, so a change to any of the three rebuilds it on the next
+Run.
+
+Dependencies are installed fresh into each Run's own Clone — never shared, never baked into
+either image. The package manager is picked from whichever lockfile is committed:
+
+| Lockfile | Installs with |
+|---|---|
+| `bun.lock` | `bun install` |
+| `pnpm-lock.yaml` | `pnpm install` |
+| `package-lock.json` | `npm ci` |
+| `yarn.lock` | `yarn install` |
+
+A repo with none of the four skips the install entirely. Whichever manager runs, its own cache
+(the pnpm store, bun's cache, npm's cache, yarn's cache) lands in one Docker volume shared across
+every Run, so a later Run's install reuses what an earlier one already downloaded — only the
+installed `node_modules` itself is never shared. `pnpm`/`yarn` are not part of Crisol's own
+default Project layer; a repo whose lockfile needs one supplies it in its own `.crisol/Dockerfile`.
+A failed install fails the Run before the agent ever launches, with `iterations: 0`.
+
 ### Recover
 
 ```
@@ -474,7 +503,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 09 | Commits | |
 | 10 | Text input | ✅ |
 | 11 | Services | ✅ |
-| 12 | Two-layer image and dependencies | |
+| 12 | Two-layer image and dependencies | ✅ |
 | 13 | Provider failure and capacity | |
 | 14 | Claude Code Adapter | ✅ |
 | 15 | Tenaza inside | |
@@ -505,6 +534,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0013](docs/adr/0013-allowlist-levels-learn-and-open.md): the user level is `~/.crisol/network` and the repo level `.crisol/network` (not `network = […]` in `config.toml`, as the spec had it), both one host per line, plain public hostnames only (no `.internal`, `.local`, `.svc` and the like), appended to by `crisol allow`; a branch that touches `.crisol/network` carries a warning; only an allowlist Run reads them; `--network learn` is a filterless proxy whose log yields `reached`, and it prints `crisol allow --repo` lines instead of asking; `--network open` stands up no wall; no Bun host was added to the built-in list
 - [0014](docs/adr/0014-the-prompt-travels-over-stdin-and-is-resolved-once.md): the agent receives one prompt (Preamble, Task, Context) over stdin, never argv; every input file is read once, in the process the user launched, and the prompt is saved to `runs/<id>/prompt`, which a detached Run's process reads; templates are looked up repo, then user, then built-in
 - [0015](docs/adr/0015-services-share-the-runs-network-and-health-gate-on-docker-run---health-cmd.md): `.crisol/services.yml` is read by a hand-rolled YAML subset parser, not a dependency; a Service joins the wall's network when one exists, else a bare network of its own (reusing `crisol-net-<id>`, so `crisol recover` already sweeps it for free); health-gating runs on `docker run --health-cmd`, polled through `docker inspect`; open mode plus a Service joins the Sandbox to a second network after creation, since Docker refuses to mix the default bridge with a user-defined network at creation time
+- [0016](docs/adr/0016-two-layer-image-tenaza-absent-cache-key-and-dependency-install.md): the Project layer is read from the host working tree and cached by its own content hash, with Crisol's own default gaining the spec's full toolchain (git, Node, Bun, Python, `gh`, `rg`); the Agent layer's cache key becomes a real hash of (Project layer image, agent version, Tenaza version), the Tenaza component a fixed placeholder until ticket 15 exists; dependency install runs as Crisol's own infra step before the agent launches, the package manager detected from the Clone's own lockfile, its cache in one shared Docker volume fixed up for whichever user owns the Sandbox via `docker exec -u root`
 
 ## Development
 
