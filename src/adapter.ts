@@ -32,11 +32,25 @@ export interface Adapter {
   reportCompletion(ctx: AdapterContext): Promise<boolean>;
   /** Continues the SAME agent session — never a fresh one. Resolves as `launch` does. */
   resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<string | void>;
+  /**
+   * Where inside the Sandbox the agent keeps its sessions. Crisol mounts a dir of the Run's over
+   * it, so the session outlives the Sandbox and a Continuation finds it again.
+   */
+  readonly sessionStore?: string;
+  /** The session the last turn ran in, which Crisol keeps in the Run dir for a Continuation. */
+  sessionId?(): string | undefined;
+  /**
+   * A Continuation's first turn: resumes `sessionId`, kept from an earlier Sandbox, with a new
+   * request, then resumes it on a red Gate as usual. An Adapter without it cannot continue a Run.
+   * Resolves as `launch` does.
+   */
+  continueSession?(ctx: AdapterContext, sessionId: string, request: string): Promise<string | void>;
 }
 
 /**
- * Thrown from `launch` or `resumeWithFeedback` when the agent CLI itself refuses to proceed — a
- * rate limit, an exhausted quota, or a failed authentication — never a red Gate. Only the Adapter
+ * Thrown from any turn (`launch`, `resumeWithFeedback`, `continueSession`) when the agent CLI itself
+ * refuses to proceed — a rate limit, an exhausted quota, or a failed authentication — never a red
+ * Gate. Only the Adapter
  * can tell the two apart, so classifying one is its job: `category` becomes the Run result's
  * `reason: "provider: <category>"`, and the Run stops without spending another iteration on it.
  */

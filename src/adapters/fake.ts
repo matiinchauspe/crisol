@@ -103,15 +103,32 @@ export interface ProviderFailure {
 export interface FakeMessages {
   launch?: string;
   resume?: string;
+  continue?: string;
+}
+
+export interface FakeSession {
+  /**
+   * A `sessionStore` inside the Sandbox. Launch leaves a file named by the session id there, and a
+   * Continuation fails unless it finds that file, which proves the store outlived the Sandbox.
+   */
+  store?: string;
+  /** Run by a Continuation's first turn. */
+  continueScript?: readonly string[];
 }
 
 export class FakeAdapter implements Adapter {
+  readonly sessionStore: string | undefined;
+  private session: string | undefined;
+
   constructor(
     private readonly launchScript: readonly string[] = DEFAULT_SCRIPT,
     private readonly resumeScript?: readonly string[],
     private readonly providerFailure?: ProviderFailure,
     private readonly messages: FakeMessages = {},
-  ) {}
+    private readonly fakeSession: FakeSession = {},
+  ) {
+    this.sessionStore = fakeSession.store;
+  }
 
   // Fake Adapter never calls a real provider or wires into Tenaza — nothing to declare.
   declarePreStart(): PreStartDeclaration {
@@ -123,10 +140,28 @@ export class FakeAdapter implements Adapter {
       throw new ProviderFailureError(this.providerFailure.category, this.providerFailure.message);
     }
     await this.runScript(ctx, this.launchScript);
+    this.session = `fake-${crypto.randomUUID()}`;
+    if (this.sessionStore !== undefined) {
+      await this.runScript(ctx, [`echo launched > ${this.sessionStore}/${this.session}`]);
+    }
     return this.messages.launch;
   }
 
-  // Synchronous: launch/resumeWithFeedback already finished by the time this is called.
+  sessionId(): string | undefined {
+    return this.session;
+  }
+
+  async continueSession(ctx: AdapterContext, sessionId: string, _request: string): Promise<string | void> {
+    if (this.sessionStore !== undefined) {
+      const found = await ctx.sandbox.exec(["test", "-f", `${this.sessionStore}/${sessionId}`]);
+      if (found.exitCode !== 0) throw new Error(`No session ${sessionId} in ${this.sessionStore}.`);
+    }
+    this.session = sessionId;
+    await this.runScript(ctx, this.fakeSession.continueScript ?? DEFAULT_SCRIPT);
+    return this.messages.continue;
+  }
+
+  // Synchronous: the turn already finished by the time this is called.
   async reportCompletion(_ctx: AdapterContext): Promise<boolean> {
     return true;
   }

@@ -151,11 +151,16 @@ export interface ClaudeCodeAdapterOptions {
   hostVersion?: () => string;
 }
 
-/** One instance per Run: `launch` and `resumeWithFeedback` share its session id. */
+/** One instance per Run: `launch`, `continueSession` and `resumeWithFeedback` share its session id. */
 export class ClaudeCodeAdapter implements Adapter {
   private readonly binary: string;
   private readonly hostVersion: () => string;
-  private sessionId: string | undefined;
+  private session: string | undefined;
+  /**
+   * Only the transcripts, which `--resume` looks up by working directory, never the whole
+   * `~/.claude`: a mount over that would hide the image's settings.json, attribution off included.
+   */
+  readonly sessionStore = `${AGENT_HOME}/.claude/projects`;
 
   constructor(options: ClaudeCodeAdapterOptions = {}) {
     this.binary = options.binary ?? "claude";
@@ -187,11 +192,23 @@ export class ClaudeCodeAdapter implements Adapter {
   }
 
   async resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<string | void> {
-    if (this.sessionId === undefined) {
+    if (this.session === undefined) {
       throw new Error("resumeWithFeedback was called before launch ever captured a session id.");
     }
-    const args = buildResumeArgs({ binary: this.binary, sessionId: this.sessionId });
-    const result = await ctx.sandbox.exec(args, feedback);
+    return this.resume(ctx, this.session, feedback);
+  }
+
+  sessionId(): string | undefined {
+    return this.session;
+  }
+
+  async continueSession(ctx: AdapterContext, sessionId: string, request: string): Promise<string | void> {
+    return this.resume(ctx, sessionId, request);
+  }
+
+  private async resume(ctx: AdapterContext, sessionId: string, message: string): Promise<string | undefined> {
+    const args = buildResumeArgs({ binary: this.binary, sessionId });
+    const result = await ctx.sandbox.exec(args, message);
     if (result.exitCode !== 0) {
       throw new Error(`${this.binary} exited ${result.exitCode}: ${(result.stderr || result.stdout).trim()}`);
     }
@@ -200,7 +217,7 @@ export class ClaudeCodeAdapter implements Adapter {
 
   private takeTurn(stdout: string): string | undefined {
     const output = parseCliOutput(stdout);
-    this.sessionId = output.session_id;
+    this.session = output.session_id;
     return output.result;
   }
 }

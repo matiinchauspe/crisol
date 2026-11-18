@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { ProviderFailureError } from "./adapter";
 import type { Adapter, AdapterContext, PreStartDeclaration } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
@@ -16,7 +16,7 @@ import {
   removeRunSandboxes,
   startSandbox,
 } from "./docker";
-import type { Sandbox } from "./docker";
+import type { MountSpec, Sandbox } from "./docker";
 import { addTrackedSize, runDirSizeBytes } from "./gc";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
 import type { Gate } from "./gates";
@@ -28,6 +28,8 @@ import type { ServiceRuntime, ServiceSpec } from "./services";
 import {
   addedLines,
   branchExists,
+  branchSha,
+  checkoutBranch,
   checkoutNewBranch,
   cloneLocal,
   currentRefName,
@@ -42,7 +44,22 @@ import {
   tagExists,
 } from "./git";
 import type { GitIdentity } from "./git";
-import { REPO_ALLOWLIST_FILE, crisolHome, runDir, runLockPath, runLogPath, runPidPath, runPromptPath, runRepoPath, runResultPath, runsRoot } from "./paths";
+import {
+  REPO_ALLOWLIST_FILE,
+  crisolHome,
+  runDir,
+  runGatesPath,
+  runLockPath,
+  runLogPath,
+  runPidPath,
+  runPromptPath,
+  runRepoPath,
+  runResultPath,
+  runSessionIdPath,
+  runSessionStorePath,
+  runsRoot,
+} from "./paths";
+import { readResult, runsOwningBranch } from "./runs";
 import { KeychainSecretStore } from "./secret-store";
 import type { SecretStore } from "./secret-store";
 import { acquireSlot, adoptLock, tryLockRun } from "./slots";
@@ -173,6 +190,8 @@ export interface RunOptions extends TaskInput {
   signal?: AbortSignal;
   /** Set in the process `crisol run --detach` started: the Run is already reserved, and its lock inherited. */
   detached?: DetachedHandoff;
+  /** `--continue`: the branch of a finished Run to take up again, with the Task as the new request. */
+  continue?: string;
 }
 
 export interface DetachedHandoff {
@@ -450,6 +469,67 @@ interface PreparedRun {
   proxyImage: string | undefined;
   allowlist: AllowlistEntry[];
   services: ServiceSpec[];
+  continued?: ContinuedRun;
+}
+
+interface ContinuedRun {
+  id: string;
+  branch: string;
+  baseRef: string;
+  baseSha: string;
+  sessionId: string;
+  /** Absent for a Run that predates `gates.json`. */
+  gates?: readonly string[];
+}
+
+function readKeptGates(id: string, home: string): readonly string[] | undefined {
+  const file = runGatesPath(id, home);
+  if (!existsSync(file)) return undefined;
+  const gates: unknown = JSON.parse(readFileSync(file, "utf8"));
+  return Array.isArray(gates) && gates.every((gate) => typeof gate === "string") ? gates : undefined;
+}
+
+function readKeptSessionId(id: string, home: string): string | undefined {
+  try {
+    const sessionId = readFileSync(runSessionIdPath(id, home), "utf8").trim();
+    return sessionId === "" ? undefined : sessionId;
+  } catch {
+    return undefined;
+  }
+}
+
+function findContinuedRun(hostRepoPath: string, home: string, branch: string): ContinuedRun {
+  const owners = runsOwningBranch(home, hostRepoPath, branch);
+  if (owners.length === 0) {
+    throw new Error(
+      `No finished Run of ${hostRepoPath} names branch "${branch}" in its Run result, so there is nothing to ` +
+        "continue. `crisol status` lists every Run and its branch.",
+    );
+  }
+  if (owners.length > 1) {
+    throw new Error(
+      `Branch "${branch}" is claimed by ${owners.length} Runs (${owners.join(", ")}); a Continuation takes up ` +
+        "exactly one, so none was started.",
+    );
+  }
+  const id = owners[0]!;
+  if (!existsSync(runRepoPath(id, home))) {
+    throw new Error(`Run ${id}'s Clone is gone (\`crisol gc\` collected it), so branch "${branch}" cannot be continued.`);
+  }
+  const sessionId = readKeptSessionId(id, home);
+  if (sessionId === undefined) {
+    throw new Error(`Run ${id} kept no agent session, so branch "${branch}" cannot be continued.`);
+  }
+  const base = readResult(id, home)!.base;
+  const at = base.lastIndexOf("@");
+  return {
+    id,
+    branch,
+    baseRef: base.slice(0, at),
+    baseSha: base.slice(at + 1),
+    sessionId,
+    gates: readKeptGates(id, home),
+  };
 }
 
 /**
@@ -470,17 +550,23 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
   const resolved =
     savedPrompt === undefined ? resolveTask(options, options.cwd, home, hostRepoPath, sharedInputs) : undefined;
 
-  const baseRef = options.base ?? currentRefName(hostRepoPath);
-  const baseSha = options.baseSha ?? resolveBaseSha(hostRepoPath, baseRef);
-  assertBaseReachable(hostRepoPath, baseRef, baseSha);
-
-  if (options.name !== undefined) {
-    assertBranchAvailable(hostRepoPath, options.name);
+  const continued = options.continue !== undefined ? findContinuedRun(hostRepoPath, home, options.continue) : undefined;
+  let baseRef: string;
+  let baseSha: string;
+  if (continued !== undefined) {
+    ({ baseRef, baseSha } = continued);
   } else {
-    assertDefaultPrefixAvailable(hostRepoPath);
+    baseRef = options.base ?? currentRefName(hostRepoPath);
+    baseSha = options.baseSha ?? resolveBaseSha(hostRepoPath, baseRef);
+    assertBaseReachable(hostRepoPath, baseRef, baseSha);
+    if (options.name !== undefined) {
+      assertBranchAvailable(hostRepoPath, options.name);
+    } else {
+      assertDefaultPrefixAvailable(hostRepoPath);
+    }
   }
 
-  const gates = resolveGates(options.gates, readRepoGates(hostRepoPath));
+  const gates = resolveGates(options.gates, continued?.gates ?? readRepoGates(hostRepoPath));
   const globalConfig = readGlobalConfig(home);
   const maxParallel = resolveMaxParallel(globalConfig);
   const { maxIterations, ceilingMs } = resolveCeiling(
@@ -506,6 +592,9 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
   assertDockerReachable();
 
   const adapter: Adapter = options.adapter ?? new FakeAdapter();
+  if (continued !== undefined && adapter.continueSession === undefined) {
+    throw new Error(`This Adapter cannot continue a session, so branch "${continued.branch}" cannot be continued.`);
+  }
   let prompt = savedPrompt ?? "";
   if (resolved !== undefined) {
     const preamble = adapter.preamble?.(gates) ?? defaultPreamble(gates);
@@ -553,6 +642,7 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
     proxyImage,
     allowlist,
     services,
+    continued,
   };
 }
 
@@ -563,6 +653,7 @@ function reserveFresh(prepared: PreparedRun, options: RunOptions): Reservation {
     reservation = reserveRun(hostRepoPath, home, options.name, options.generateRunId ?? generateRunId);
     writeFileSync(runLogPath(reservation.id, home), "");
     writeFileSync(runPromptPath(reservation.id, home), prepared.prompt);
+    writeFileSync(runGatesPath(reservation.id, home), JSON.stringify(prepared.gates));
   } catch (error) {
     reservation?.lock.release();
     throw error;
@@ -573,6 +664,33 @@ function reserveFresh(prepared: PreparedRun, options: RunOptions): Reservation {
       `base=${prepared.baseRef}@${prepared.baseSha} branch=${reservation.branch}`,
   );
   return reservation;
+}
+
+/**
+ * Re-takes the finished Run's own lock, so a second Continuation of it, or `crisol recover`, waits
+ * out this one. The log is appended to, never reset: it is the only record of earlier rounds.
+ */
+function reserveContinuation(prepared: PreparedRun, continued: ContinuedRun): Reservation {
+  const { home, hostRepoPath } = prepared;
+  const lock = lockRun(continued.id, home, { host: hostRepoPath, branch: continued.branch });
+  appendLog(
+    runLogPath(continued.id, home),
+    `continuation of ${continued.branch} reserved, resuming session ${continued.sessionId}: ` +
+      `prompt ${JSON.stringify(prepared.prompt)}`,
+  );
+  return { id: continued.id, branch: continued.branch, host: hostRepoPath, lock };
+}
+
+/**
+ * A Continuation that ends before its Slot leaves the Run result as the last round wrote it: that
+ * round's branch and status still stand, and this one changed nothing.
+ */
+function endUnstartedContinuation(reservation: Reservation, home: string, signal: AbortSignal | undefined, error: unknown): void {
+  const reason = signal?.aborted ? `interrupted: ${typeof signal.reason === "string" ? signal.reason : "abort"}` : `error: ${errorMessage(error)}`;
+  try {
+    appendLog(runLogPath(reservation.id, home), `continuation ended before it held a Slot (${reason}); the Run result is unchanged`);
+  } catch {}
+  reservation.lock.release();
 }
 
 /** Before pre-flight, so the process that owns a detached Run holds it from its first step. */
@@ -649,6 +767,7 @@ export interface DetachedRun {
 
 /** Pre-flight and reservation only, so the terminal still sees a bad base, name or Gate. */
 export async function reserveDetachedRun(options: RunOptions): Promise<DetachedRun> {
+  if (options.continue !== undefined) throw new Error("A Continuation cannot be detached.");
   const prepared = await prepareRun(options);
   if (options.signal?.aborted) throw interruptedBeforeReserving();
   const reservation = reserveFresh(prepared, options);
@@ -701,11 +820,16 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     // The user never saw an id yet, so a signal in pre-flight leaves nothing, as a failed check does.
     if (options.signal?.aborted) throw interruptedBeforeReserving();
     // Reserved before the Slot wait, so `crisol status` can show the Run as queued.
-    reservation = reserveFresh(prepared, options);
+    reservation =
+      prepared.continued !== undefined ? reserveContinuation(prepared, prepared.continued) : reserveFresh(prepared, options);
     base = `${prepared.baseRef}@${prepared.baseSha}`;
     try {
       writeFileSync(runPidPath(reservation.id, home), String(process.pid));
     } catch (error) {
+      if (prepared.continued !== undefined) {
+        endUnstartedContinuation(reservation, home, options.signal, error);
+        throw error;
+      }
       const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
       throw attachResult(error, result);
     }
@@ -730,6 +854,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     proxyImage,
     allowlist,
     services,
+    continued,
   } = prepared;
 
   let slot: Slot;
@@ -741,6 +866,10 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       signal: options.signal,
     });
   } catch (error) {
+    if (continued !== undefined) {
+      endUnstartedContinuation(reservation, home, options.signal, error);
+      throw error;
+    }
     const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
     throw attachResult(error, result);
   }
@@ -749,10 +878,17 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   const logPath = runLogPath(id, home);
   const clonePath = runRepoPath(id, home);
   const interruption = armInterruption(logPath, options.signal);
+  // Already in the tally from the round that wrote it; counting it again would inflate gc's warning.
+  let talliedBytes = 0;
+  if (continued !== undefined) {
+    try {
+      talliedBytes = runDirSizeBytes(id, home);
+    } catch {}
+  }
 
   appendLog(
     logPath,
-    `run ${id} starting: base=${base} branch=${branch} ` +
+    `run ${id} ${continued !== undefined ? "continuing" : "starting"}: base=${base} branch=${branch} ` +
       `slot=${slot.index}/${maxParallel}`,
   );
 
@@ -773,12 +909,24 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   let blocked: Blocked[] = [];
   let reached: Blocked[] = [];
   let finalMessage: string | undefined;
-  const keepFinalMessage = (message: string | void): void => {
+  /** Where this round's commits start: a Continuation's earlier rounds were scanned when they ran. */
+  let scanFrom = baseSha;
+  const keepTurn = (message: string | void): void => {
     finalMessage = typeof message === "string" ? message : undefined;
+    const session = adapter.sessionId?.();
+    if (session === undefined) return;
+    // Best-effort: losing it costs only a later Continuation, never this Run.
+    try {
+      writeFileSync(runSessionIdPath(id, home), session);
+    } catch (error) {
+      appendLog(logPath, `session id could not be kept: ${errorMessage(error)}`);
+    }
   };
 
   const converge = async (ctx: AdapterContext): Promise<void> => {
-    keepFinalMessage(await adapter.launch(ctx));
+    keepTurn(
+      await (continued !== undefined ? adapter.continueSession!(ctx, continued.sessionId, prompt) : adapter.launch(ctx)),
+    );
     iterations = 1;
     const startedAt = Date.now();
 
@@ -830,22 +978,28 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       }
 
       appendLog(logPath, `resuming with feedback for failing Gate "${firstFailure.cmd}"`);
-      keepFinalMessage(await adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure)));
+      keepTurn(await adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure)));
       iterations += 1;
     }
   };
 
   try {
     try {
-      // Made even when a signal already landed: an interrupted Run still leaves its branch.
-      cloneLocal(hostRepoPath, clonePath);
-      checkoutNewBranch(clonePath, branch, baseSha);
-      appendLog(logPath, `clone ready at ${clonePath}, branch ${branch} cut from ${baseSha}`);
+      if (continued !== undefined) {
+        checkoutBranch(clonePath, branch);
+        scanFrom = branchSha(clonePath, branch) ?? baseSha;
+        appendLog(logPath, `continuing in the Clone at ${clonePath}, branch ${branch} at ${scanFrom}`);
+      } else {
+        // Made even when a signal already landed: an interrupted Run still leaves its branch.
+        cloneLocal(hostRepoPath, clonePath);
+        checkoutNewBranch(clonePath, branch, baseSha);
+        appendLog(logPath, `clone ready at ${clonePath}, branch ${branch} cut from ${baseSha}`);
+      }
       await letSignalsLand();
       interruption.throwIfInterrupted();
 
-      // Detected from the Clone, at `baseSha` — never the host's own working tree, which may sit
-      // on a different commit entirely.
+      // Detected from the Clone, never the host's own working tree, which may sit on a different
+      // commit entirely.
       const packageManager: PackageManager | undefined = detectPackageManager(clonePath);
       if (packageManager !== undefined) {
         appendLog(logPath, `package manager detected: ${packageManager}`);
@@ -887,6 +1041,12 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       await letSignalsLand();
       interruption.throwIfInterrupted();
 
+      const sessionMounts: MountSpec[] = [];
+      if (adapter.sessionStore !== undefined) {
+        mkdirSync(runSessionStorePath(id, home), { recursive: true });
+        sessionMounts.push({ hostPath: runSessionStorePath(id, home), containerPath: adapter.sessionStore, mode: "rw" });
+      }
+
       sandbox = await startSandbox({
         image,
         mountPath: clonePath,
@@ -899,7 +1059,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         },
         secretEnvNames,
         secretEnv: adapterSecretValues,
-        mounts: preStart.mounts,
+        mounts: [...preStart.mounts, ...sessionMounts],
         volumeMounts:
           packageManager !== undefined
             ? [{ volume: PACKAGE_CACHE_VOLUME, containerPath: PACKAGE_CACHE_MOUNT }]
@@ -931,8 +1091,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
 
       // Best-effort: a failed scan must not turn a converged Run into a failed one.
       try {
-        warnings.push(...scanCommitsForWarnings(clonePath, `${baseSha}..${branch}`, identity));
-        const repoLevelChange = addedLines(clonePath, `${baseSha}..${branch}`, REPO_ALLOWLIST_FILE);
+        warnings.push(...scanCommitsForWarnings(clonePath, `${scanFrom}..${branch}`, identity));
+        const repoLevelChange = addedLines(clonePath, `${scanFrom}..${branch}`, REPO_ALLOWLIST_FILE);
         if (repoLevelChange !== undefined) warnings.push(repoLevelChangeWarning(repoLevelChange));
       } catch (error) {
         appendLog(logPath, `commit scan failed: ${errorMessage(error)}`);
@@ -1052,7 +1212,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     }
     // Best-effort: a disk-usage tally must never fail a Run that otherwise finished.
     try {
-      addTrackedSize(home, runDirSizeBytes(id, home));
+      addTrackedSize(home, runDirSizeBytes(id, home) - talliedBytes);
     } catch {}
 
     // A provider failure resolves rather than rejects, as long as nothing else also went wrong.

@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, writeFileSync
 import path from "node:path";
 import type { GlobalConfig } from "./config";
 import { branchSha } from "./git";
-import { runNetworkDir, runRepoPath, runsRoot, runsSizeTrackerPath } from "./paths";
+import { runNetworkDir, runRepoPath, runSessionStorePath, runsRoot, runsSizeTrackerPath } from "./paths";
 import { readRunLockRecord } from "./recover";
 import { readResult } from "./runs";
 
@@ -19,7 +19,7 @@ export interface GcCandidate {
   run: string;
   branch: string;
   host: string;
-  /** `repo/` plus the per-Run `network/` dir — what `collectRun` removes. */
+  /** What `collectRun` removes. */
   sizeBytes: number;
 }
 
@@ -46,9 +46,13 @@ function dirSizeBytes(dirPath: string): number {
   return total;
 }
 
-/** `repo/` plus the per-Run `network/` dir, for one Run only — never the whole of `runs/`. */
+/** One Run only — never the whole of `runs/`. */
 export function runDirSizeBytes(id: string, home: string): number {
-  return dirSizeBytes(runRepoPath(id, home)) + dirSizeBytes(runNetworkDir(id, home));
+  return (
+    dirSizeBytes(runRepoPath(id, home)) +
+    dirSizeBytes(runNetworkDir(id, home)) +
+    dirSizeBytes(runSessionStorePath(id, home))
+  );
 }
 
 function readTrackedSize(home: string): number {
@@ -70,7 +74,7 @@ export function addTrackedSize(home: string, deltaBytes: number): void {
   writeFileSync(runsSizeTrackerPath(home), String(Math.max(0, readTrackedSize(home) + deltaBytes)));
 }
 
-/** The true total: `repo/` + `network/` for every Run dir under `runs/` — explicit and rare, so a full walk here is fine. */
+/** The true total over every Run dir under `runs/` — explicit and rare, so a full walk here is fine. */
 export function measureRunsSizeBytes(home: string): number {
   return existsSync(runsRoot(home))
     ? readdirSync(runsRoot(home)).reduce((sum, id) => sum + runDirSizeBytes(id, home), 0)
@@ -175,8 +179,12 @@ export function planGc(home: string, options: { includeFailed: boolean }): GcPla
   return { collectable, skipped };
 }
 
-/** Keeps `log`, `result.json`, `lock`, `pid` and `prompt` — only `repo/` and the per-Run `network/` dir go. */
+/**
+ * Keeps the Run's record — `log`, `result.json` and the small files beside them. A collected Run
+ * cannot be continued: its Clone and its agent's session go with `repo/` and `sessions/`.
+ */
 export function collectRun(id: string, home: string): void {
   rmSync(runRepoPath(id, home), { recursive: true, force: true });
   rmSync(runNetworkDir(id, home), { recursive: true, force: true });
+  rmSync(runSessionStorePath(id, home), { recursive: true, force: true });
 }

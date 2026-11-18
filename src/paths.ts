@@ -93,3 +93,17 @@ export function runPromptPath(id: string, home: string = crisolHome()): string {
 export function runResultPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "result.json");
 }
+
+/** Mounted over the Adapter's `sessionStore`, so the agent's session outlives its Sandbox. */
+export function runSessionStorePath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "sessions");
+}
+
+export function runSessionIdPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "session-id");
+}
+
+/** So a Continuation given no `--gate` verifies against the Gates its Run had. */
+export function runGatesPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "gates.json");
+}

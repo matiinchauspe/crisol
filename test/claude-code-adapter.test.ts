@@ -281,3 +281,23 @@ describe("ClaudeCodeAdapter.launch / resumeWithFeedback (ticket 14, fake Sandbox
     expect(await adapter.reportCompletion(fakeContext(sandbox))).toBe(true);
   });
 });
+
+describe("ClaudeCodeAdapter.continueSession (ticket 21, fake Sandbox — never the real agent)", () => {
+  test("a fresh Adapter resumes the session it is handed with the request over stdin, then keeps resuming it on a red Gate", async () => {
+    const { sandbox, calls, stdins } = fakeSandbox([
+      JSON.stringify({ session_id: "sess-kept", result: "review applied" }),
+      JSON.stringify({ session_id: "sess-kept", result: "fixed" }),
+    ]);
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+
+    expect(await adapter.continueSession(fakeContext(sandbox), "sess-kept", "rename it, please")).toBe("review applied");
+    await adapter.resumeWithFeedback(fakeContext(sandbox), "Gate failed: bun test");
+
+    expect(calls).toEqual([
+      ["fake-claude", "-p", "--resume", "sess-kept", "--dangerously-skip-permissions", "--output-format", "json"],
+      ["fake-claude", "-p", "--resume", "sess-kept", "--dangerously-skip-permissions", "--output-format", "json"],
+    ]);
+    expect(stdins).toEqual(["rename it, please", "Gate failed: bun test"]);
+    expect(adapter.sessionId()).toBe("sess-kept");
+  });
+});

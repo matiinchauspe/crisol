@@ -23,6 +23,13 @@ export function readResult(id: string, home: string): RunResult | undefined {
   }
 }
 
+/** The finished Runs of `hostRepoPath` whose Run result names `branch`; another repo's same-named branch is not a claim. */
+export function runsOwningBranch(home: string, hostRepoPath: string, branch: string): string[] {
+  return listRunIds(home)
+    .sort()
+    .filter((id) => readResult(id, home)?.branch === branch && readRunLockRecord(id, home)?.host === hostRepoPath);
+}
+
 /** `--detach` removes a reservation it could not start, possibly while this reads it. */
 function bornAt(id: string, home: string): number | undefined {
   try {

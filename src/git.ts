@@ -117,6 +117,10 @@ export function checkoutNewBranch(clonePath: string, name: string, baseSha: stri
   runOrThrow(["git", "-C", clonePath, "checkout", "--quiet", "-b", name, baseSha]);
 }
 
+export function checkoutBranch(clonePath: string, name: string): void {
+  runOrThrow(["git", "-C", clonePath, "checkout", "--quiet", name]);
+}
+
 /** `undefined` when `repoPath` has no such branch, or is not a repo at all. */
 export function branchSha(repoPath: string, name: string): string | undefined {
   const result = run(["git", "-C", repoPath, "rev-parse", "--verify", "--quiet", `refs/heads/${name}`]);
@@ -137,7 +141,8 @@ const FETCH_BACK_ATTEMPTS = 3;
 
 /**
  * The refspec is qualified on both sides: unqualified, git looks up tags before heads and
- * would silently fetch a same-named tag instead of the Run's branch. No `--quiet`, so git's
+ * would silently fetch a same-named tag instead of the Run's branch. No leading `+`, so a host
+ * branch that moved since the Clone last saw it is refused, never overwritten. No `--quiet`, so git's
  * own reason reaches the error. A `git fetch` killed by a signal was stopped, not refused, and
  * fetching again is safe, so it is retried.
  */

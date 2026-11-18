@@ -20,7 +20,7 @@ import type { Blocked, NetworkMode, RunFailure, RunOptions, RunResult } from "./
 import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
-  'Usage: crisol run ("<task>"... | --file <md>) [--context <md>]... [--prompt <name>] [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... ' +
+  'Usage: crisol run ("<task>"... | --file <md>) [--context <md>]... [--prompt <name>] [--json | --detach] [--base <ref>] [--name <branch> | --continue <branch>] [--gate <cmd>]... ' +
   "[--max-iterations <n>] [--timeout <minutes>] [--network <allowlist|learn|open>] [--adapter <fake|claude-code>]";
 
 const ALLOW_USAGE = "Usage: crisol allow <host> [--repo]";
@@ -49,6 +49,7 @@ interface ParsedRunArgs {
   detach: boolean;
   base?: string;
   name?: string;
+  continue?: string;
   gates: string[];
   maxIterations?: number;
   timeoutMinutes?: number;
@@ -100,6 +101,7 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
   let detach = false;
   let base: string | undefined;
   let name: string | undefined;
+  let continued: string | undefined;
   const gates: string[] = [];
   let maxIterations: number | undefined;
   let timeoutMinutes: number | undefined;
@@ -129,6 +131,9 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     } else if (arg === "--name") {
       name = readFlagValue(argv, i + 1, "--name");
       i++;
+    } else if (arg === "--continue") {
+      continued = readFlagValue(argv, i + 1, "--continue");
+      i++;
     } else if (arg === "--gate") {
       gates.push(readFlagValue(argv, i + 1, "--gate"));
       i++;
@@ -157,6 +162,19 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
   if (file === undefined && tasks.length === 0) {
     throw new Error(USAGE);
   }
+  if (continued !== undefined) {
+    const refused = [
+      name !== undefined && "--name",
+      base !== undefined && "--base",
+      detach && "--detach",
+      tasks.length > 1 && `${tasks.length} Tasks`,
+    ].find((flag): flag is string => typeof flag === "string");
+    if (refused !== undefined) {
+      throw new Error(
+        `--continue takes a Run up again on its own branch and base, with one request; it cannot be combined with ${refused}.\n${USAGE}`,
+      );
+    }
+  }
   if (tasks.length > 1 && name !== undefined) {
     throw new Error(`--name names one branch; it cannot be used with ${tasks.length} Tasks.\n${USAGE}`);
   }
@@ -169,7 +187,22 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
     );
   }
 
-  return { tasks, file, context, template, json, detach, base, name, gates, maxIterations, timeoutMinutes, network, adapterName };
+  return {
+    tasks,
+    file,
+    context,
+    template,
+    json,
+    detach,
+    base,
+    name,
+    continue: continued,
+    gates,
+    maxIterations,
+    timeoutMinutes,
+    network,
+    adapterName,
+  };
 }
 
 /** The host comes from whatever the agent sent, so only a plain hostname is ever printed unquoted. */
@@ -463,6 +496,7 @@ async function main(argv: string[]): Promise<number> {
     base: handoff?.base ?? args.base,
     baseSha: handoff?.baseSha,
     name: args.name,
+    continue: args.continue,
     gates: args.gates,
     maxIterations: args.maxIterations,
     ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
