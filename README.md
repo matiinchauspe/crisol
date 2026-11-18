@@ -112,6 +112,7 @@ crisol logs <run>
 crisol auth
 crisol recover
 crisol gc [--include-failed]
+crisol init [--adapter <fake|claude-code>]
 ```
 
 | Flag | Default | What it does |
@@ -135,6 +136,31 @@ A repo can declare its own Gates once, in `.crisol/config.toml`:
 ```toml
 gates = ["bun test", "bun run typecheck"]
 ```
+
+### Onboard a repo
+
+```
+crisol init [--adapter <fake|claude-code>]
+```
+
+Prepares the repo you run it in, and never overwrites a file that is already there:
+
+1. `.crisol/config.toml` with a Gate for each `typecheck`, `lint` and `test` script in
+   `package.json`, run with the package manager its lockfile names (`bun run test`; `npm` with no
+   lockfile). npm's placeholder `test` script, which always fails, is skipped.
+2. `.crisol/network`, empty: the repo level of the Allowlist. No Services.
+3. A `## Sandbox` block appended to `AGENTS.md`, else `CLAUDE.md`, else a new `AGENTS.md`. It
+   declares two entry points for an agent that dispatches work: run one Task, and continue a Run by
+   its branch, both with `--adapter claude-code --json`, and tells it to read `status`, not the exit
+   code. A file that already has a `## Sandbox` heading is left alone, so a second `init` never
+   adds another.
+
+Then it offers a first learn Run (`[y/N]`; anything else declines). Accepting starts one
+`--network learn` Run of a fixed Task, with one iteration, through `--adapter` (the stand-in by
+default), and appends every host it reached that is neither built in nor on the repo level to
+`.crisol/network`. Unlike `crisol run --network learn`, which only prints the lines, this writes
+them: you asked for it, and the file is yours to review before you commit `.crisol/`
+([ADR 0021](docs/adr/0021-crisol-init-writes-only-what-is-missing-and-declares-the-real-adapter.md)).
 
 ### The Task the agent gets
 
@@ -540,12 +566,12 @@ default — see [The ceiling](#the-ceiling)), and `unverified` when no Gate is d
 the CLI's `--gate`, else the repo's own `.crisol/config.toml`.
 A red Gate resumes the same agent session with its failing command and output; `iterations`
 counts how many attempts that took. A Run stopped by a signal or an error is `not-converged` too,
-with `reason` set to `interrupted: SIGINT` (or the signal it got) or `error: <message>`. A provider
-failure (a rate limit, an exhausted quota, a failed authentication) is `not-converged` with
-`reason: "provider: <category>"`, without spending an iteration on it — see
-[Provider failures and capacity](#provider-failures-and-capacity). The CLI reports any of these as
-an error (exit code 1, the message on stderr), and `--json` still prints the Run result on stdout,
-same as `result.json` holds. `fetchBack` says whether the
+with `reason` set to `interrupted: SIGINT` (or the signal it got) or `error: <message>`. The CLI
+reports either as an error (exit code 1, the message on stderr), and `--json` still prints the Run
+result on stdout, same as `result.json` holds. A provider failure (a rate limit, an exhausted
+quota, a failed authentication) is `not-converged` with `reason: "provider: <category>"`, without
+spending an iteration on it, and exits 0 like the ceiling — see
+[Provider failures and capacity](#provider-failures-and-capacity). `fetchBack` says whether the
 branch reached your repo. When it is `false` and the Run made its Clone, `crisol recover` can still
 bring the branch back. A Run stopped while queued never cut one. A container
 Crisol could not remove is named in `warnings`. `network` is `allowlist` by default now that the
@@ -605,14 +631,14 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 14 | Claude Code Adapter | ✅ |
 | 15 | Tenaza inside | |
 | 16 | `crisol gc` | ✅ |
-| 17 | `crisol init` | |
+| 17 | `crisol init` | ✅ |
 | 18 | Release 0.1.0 | |
 
 ## Vocabulary and decisions
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
 **Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Detached Run**, **Secret**, **SecretStore**,
-**Service**, **Preamble**, **Context**, **Template**, **Final message**, **Stop line**, **Continuation**. Each term is defined in
+**Service**, **Preamble**, **Context**, **Template**, **Final message**, **Stop line**, **Continuation**, **Sandbox block**. Each term is defined in
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
 [`docs/adr/`](docs/adr/):
 
@@ -636,6 +662,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0018](docs/adr/0018-gc-ages-runs-by-a-stored-finishedat-and-verifies-the-host-branch-live.md): `RunResult` gains `finishedAt` (a dir's own birthtime cannot be back-dated, verified live) for `crisol gc`'s 7-day rule; "the recorded commit" is read live from the Clone's own branch tip, never persisted; `--include-failed` lifts only the status restriction, never the age or branch-verification checks; the confirmation prompt is one `y`/`yes` comparison with no `--yes` escape hatch (ADR 0013's lesson); `gc` deletes exactly `repo/` and the per-Run `network/` dir; the size-warning threshold is a plain, overridable byte count (`gc_warn_bytes`)
 - [0019](docs/adr/0019-the-final-message-is-what-a-turn-resolves-with-and-the-stop-line-is-its-last-line.md): `launch`/`resumeWithFeedback` resolve with the turn's last message (amends ADR 0005's `Promise<void>`), kept as `finalMessage` from the last iteration only; the Stop line is `CRISOL-STOP: parked` or `CRISOL-STOP: checkpoint`, exact, on the last non-blank line; it is read before the Gates, even with none declared; `parked` and `checkpoint` resolve `run()` and exit 0
 - [0020](docs/adr/0020-a-continuation-re-enters-its-runs-own-dir-and-keeps-only-the-session-transcripts.md): a Continuation keeps its Run's id, dir and lock and rewrites `result.json`; an Adapter names a `sessionStore` Crisol mounts from `runs/<id>/sessions/` (Claude Code: `~/.claude/projects` only, so the image's `settings.json` stays visible); the Gates default to the Run's own, kept in `gates.json`; Fetch-back stays fast-forward only
+- [0021](docs/adr/0021-crisol-init-writes-only-what-is-missing-and-declares-the-real-adapter.md): `crisol init` writes only the files a repo lacks; Gates come from `typecheck`, `lint` and `test` scripts; the `## Sandbox` block declares `--adapter claude-code`, since the default Adapter is still the stand-in; accepting the learn offer writes the reached hosts, which `crisol run --network learn` never does; the CLI's stand-in now ends each turn with a Final message
 
 ## Development
 

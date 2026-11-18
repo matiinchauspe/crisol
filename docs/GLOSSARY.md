@@ -33,6 +33,11 @@ _Avoid_: Prompt (the flag is `--prompt`, but what it names is a Template, not th
 The container a Run executes in, on its own internal network.
 _Avoid_: Container, VM (Sandbox is the domain term; "container" is the mechanism underneath it)
 
+**Sandbox block**:
+The `## Sandbox` section `crisol init` appends to a repo's agent instructions, declaring the two
+entry points an agent that dispatches work calls: run one Task, and continue a Run by its branch.
+_Avoid_: Manifest, config (it is prose an agent reads, not a file Crisol parses)
+
 **Clone**:
 The Run's own local git clone on the host, mounted into the Sandbox.
 _Avoid_: Worktree, workspace, checkout (a worktree shares the host's `.git` and was rejected for
