@@ -111,6 +111,7 @@ crisol status
 crisol logs <run>
 crisol auth
 crisol recover
+crisol gc [--include-failed]
 ```
 
 | Flag | Default | What it does |
@@ -440,6 +441,42 @@ Fetch-back only fast-forwards: a branch you have since moved is reported and lef
 recover never deletes a branch. It prints one line per Run it acted on or left alone, or
 `Nothing to recover.`
 
+### Garbage collection
+
+```
+crisol gc [--include-failed]
+```
+
+Disk is freed only on request. `crisol gc` collects a Run's `repo/` (its Clone) and its Allowlist
+`network/` dir once ALL of these hold: Fetch-back completed, 7 days passed since the Run finished,
+and the branch is still in the host repo at the same commit the Clone cut it from — a branch moved,
+rebased or deleted since is refused, naming why. `log`, `result.json`, `lock`, `pid` and `prompt`
+are never touched, and `gc` never deletes a branch, whatever you confirm. `--include-failed` adds
+`not-converged` Runs to what counts, on top of every other check above — it does not waive any of
+them. A Run still missing its Fetch-back is never collected either way; run `crisol recover` first.
+
+```console
+$ crisol gc
+2 Run(s) ready to collect, freeing ~3.1 GB:
+  9f496a56  crisol/9f496a56  ~1.6 GB
+  3c1d07e2  crisol/3c1d07e2  ~1.5 GB
+Delete these Run dirs? [y/N] y
+Run 9f496a56: collected, freed ~1.6 GB.
+Run 3c1d07e2: collected, freed ~1.5 GB.
+```
+
+Anything but `y`/`yes` — including piping nothing in at all — declines and deletes nothing.
+`crisol run` warns at the end when `~/.crisol/runs` as a whole passes 20 GB (roughly five Runs at
+this spec's own high estimate), overridable with `gc_warn_bytes` in `~/.crisol/config`. That check
+is a cheap running total, not a fresh measurement; `crisol gc` is what resyncs it exactly, every
+time it runs, whether or not it collects anything — so a warning that looks wrong clears on the
+next `crisol gc`.
+
+```toml
+# ~/.crisol/config
+gc_warn_bytes = 10000000000
+```
+
 ### The ceiling
 
 A Run stops resuming once either of two ceilings hits first: 5 iterations, or 60 minutes of wall
@@ -471,7 +508,8 @@ The fields are only ever added within 0.x, never renamed or removed:
   "network": "allowlist",
   "blocked": [],
   "warnings": [],
-  "fetchBack": true
+  "fetchBack": true,
+  "finishedAt": 1732104000000
 }
 ```
 
@@ -493,16 +531,18 @@ Crisol could not remove is named in `warnings`. `network` is `allowlist` by defa
 wall exists ([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-wall-exists.md),
 [ADR 0012](docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md)),
 and `learn` or `open` with `--network`; a `learn` Run adds `reached`. See [Network](#network) for
-`blocked` and `reached`.
+`blocked` and `reached`. `finishedAt` is when this result was written, in epoch milliseconds — what
+[`crisol gc`](#garbage-collection)'s 7-day rule reads, never a dir's own birthtime.
 
 ### Where things live
 
 ```
 ~/.crisol/                 # override with CRISOL_HOME
-├── config                 # optional: max_parallel / max_iterations / timeout_minutes / cpus / memory overrides
+├── config                 # optional: max_parallel / max_iterations / timeout_minutes / cpus / memory / gc_warn_bytes overrides
 ├── network                # optional: the user level of the Allowlist, one host per line
 ├── prompts/<name>.md      # optional: your own `--prompt` templates
 ├── slots/<n>.lock         # one per Slot; a Run holds one while it executes
+├── runs-size              # a running total of `repo/` + `network/` bytes; `crisol run` reads only this, never `runs/`
 └── runs/<id>/             # made when the Run is reserved, before it waits for a Slot
     ├── repo/              # the Run's Clone, made once the Run holds a Slot (status: running)
     ├── lock               # held while the Run is alive; how `status` and `recover` tell live from dead
@@ -533,7 +573,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 13 | Provider failure and capacity | ✅ |
 | 14 | Claude Code Adapter | ✅ |
 | 15 | Tenaza inside | |
-| 16 | `crisol gc` | |
+| 16 | `crisol gc` | ✅ |
 | 17 | `crisol init` | |
 | 18 | Release 0.1.0 | |
 
@@ -562,6 +602,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0015](docs/adr/0015-services-share-the-runs-network-and-health-gate-on-docker-run---health-cmd.md): `.crisol/services.yml` is read by a hand-rolled YAML subset parser, not a dependency; a Service joins the wall's network when one exists, else a bare network of its own (reusing `crisol-net-<id>`, so `crisol recover` already sweeps it for free); health-gating runs on `docker run --health-cmd`, polled through `docker inspect`; open mode plus a Service joins the Sandbox to a second network after creation, since Docker refuses to mix the default bridge with a user-defined network at creation time
 - [0016](docs/adr/0016-two-layer-image-tenaza-absent-cache-key-and-dependency-install.md): the Project layer is read from the host working tree and cached by its own content hash, with Crisol's own default gaining the spec's full toolchain (git, Node, Bun, Python, `gh`, `rg`); the Agent layer's cache key becomes a real hash of (Project layer image, agent version, Tenaza version), the Tenaza component a fixed placeholder until ticket 15 exists; dependency install runs as Crisol's own infra step before the agent launches, the package manager detected from the Clone's own lockfile, its cache in one shared Docker volume fixed up for whichever user owns the Sandbox via `docker exec -u root`
 - [0017](docs/adr/0017-provider-failure-is-adapter-owned-and-resolves-like-a-ceiling.md): a provider failure is a new `ProviderFailureError` only the Adapter can throw (the real Claude Code Adapter's exact wire format is unverified and left generic); it resolves `run()` like the ceiling, rather than rejecting; `--json` now prints the Run result on every exit that computed one, by attaching it to the thrown error rather than changing which exits reject (amends ADR 0010); a provider failure aborts a sibling Run still waiting for its Slot via a new `onProviderFailure` callback; `--cpus`/`--memory` cap the Sandbox container alone, default 2 CPUs / 4 GB, overridable in `~/.crisol/config`
+- [0018](docs/adr/0018-gc-ages-runs-by-a-stored-finishedat-and-verifies-the-host-branch-live.md): `RunResult` gains `finishedAt` (a dir's own birthtime cannot be back-dated, verified live) for `crisol gc`'s 7-day rule; "the recorded commit" is read live from the Clone's own branch tip, never persisted; `--include-failed` lifts only the status restriction, never the age or branch-verification checks; the confirmation prompt is one `y`/`yes` comparison with no `--yes` escape hatch (ADR 0013's lesson); `gc` deletes exactly `repo/` and the per-Run `network/` dir; the size-warning threshold is a plain, overridable byte count (`gc_warn_bytes`)
 
 ## Development
 
