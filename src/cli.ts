@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
+import type { Adapter } from "./adapter";
 import { ClaudeCodeAdapter } from "./adapters/claude-code";
+import { DEFAULT_SCRIPT, FakeAdapter } from "./adapters/fake";
 import { addToRepoAllowlist, addToUserAllowlist, hostsToLearn, learnBaseline, mergedAllowlist } from "./allowlist";
 import type { AllowOutcome } from "./allowlist";
 import { runAuth } from "./auth";
@@ -7,7 +9,9 @@ import { parsePositiveInteger, readGlobalConfig } from "./config";
 import { discoverGitRoot } from "./git";
 import { collectRun, formatGb, formatSizeWarning, planGc, reconcileTrackedSize, resolveGcWarnBytes, trackedRunsSizeBytes } from "./gc";
 import type { GcSkip } from "./gc";
-import { crisolHome, repoAllowlistPath, userAllowlistPath } from "./paths";
+import { initRepo, LEARN_TASK, REPO_CONFIG_FILE, SANDBOX_HEADING, writeLearnedHosts } from "./init";
+import type { InitReport } from "./init";
+import { crisolHome, REPO_ALLOWLIST_FILE, repoAllowlistPath, userAllowlistPath } from "./paths";
 import { assertSupportedPlatform } from "./platform";
 import { detachRun, takeDetachedHandoff } from "./detach";
 import { recover } from "./recover";
@@ -35,10 +39,20 @@ const LOGS_USAGE = "Usage: crisol logs <run>";
 
 const GC_USAGE = "Usage: crisol gc [--include-failed]";
 
+const INIT_USAGE = "Usage: crisol init [--adapter <fake|claude-code>]";
+
 const NETWORK_MODES: readonly NetworkMode[] = ["allowlist", "learn", "open"];
 
 const ADAPTER_NAMES = ["fake", "claude-code"] as const;
 type AdapterName = (typeof ADAPTER_NAMES)[number];
+
+/** A real agent always ends its turn with a message; a silent stand-in would return a Run result no real caller sees. */
+const STAND_IN_MESSAGE = "The scripted stand-in Adapter ran; no agent worked on this Task.";
+
+function createAdapter(name: AdapterName): Adapter {
+  if (name === "claude-code") return new ClaudeCodeAdapter();
+  return new FakeAdapter(DEFAULT_SCRIPT, undefined, undefined, { launch: STAND_IN_MESSAGE, continue: STAND_IN_MESSAGE });
+}
 
 interface ParsedRunArgs {
   tasks: string[];
@@ -451,6 +465,100 @@ async function runGcCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+function describeInit(report: InitReport): string[] {
+  const lines: string[] = [];
+  if (report.config === "kept") {
+    lines.push(`${REPO_CONFIG_FILE} already exists; left as is.`);
+  } else if (report.gates.length === 0) {
+    lines.push(`Created ${REPO_CONFIG_FILE} with no Gates: package.json has no typecheck, lint or test script.`);
+  } else {
+    lines.push(`Created ${REPO_CONFIG_FILE} with Gates: ${report.gates.join(", ")}.`);
+  }
+  lines.push(
+    report.network === "kept"
+      ? `${REPO_ALLOWLIST_FILE} already exists; left as is.`
+      : `Created ${REPO_ALLOWLIST_FILE}, empty: the repo level of the Allowlist.`,
+  );
+  const { file, outcome } = report.instructions;
+  if (outcome === "already") lines.push(`${file} already declares a ${SANDBOX_HEADING} block; left as is.`);
+  else if (outcome === "created") lines.push(`Created ${file} with a ${SANDBOX_HEADING} block.`);
+  else lines.push(`Appended a ${SANDBOX_HEADING} block to ${file}.`);
+  return lines;
+}
+
+async function runInitCommand(rest: string[]): Promise<number> {
+  let adapterName: AdapterName = "fake";
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] !== "--adapter") {
+      process.stderr.write(`Unexpected argument: ${rest[i]}\n${INIT_USAGE}\n`);
+      return 1;
+    }
+    try {
+      adapterName = readAdapterFlagValue(rest, i + 1);
+    } catch (error) {
+      process.stderr.write(`${formatError(error)}\n`);
+      return 1;
+    }
+    i++;
+  }
+
+  const hostRepoPath = discoverGitRoot(process.cwd());
+  if (!hostRepoPath) {
+    process.stderr.write(`Not inside a git repo: ${process.cwd()}. \`crisol init\` prepares the repo you run it in.\n`);
+    return 1;
+  }
+  try {
+    for (const line of describeInit(initRepo(hostRepoPath))) console.log(line);
+  } catch (error) {
+    process.stderr.write(`${formatError(error)}\n`);
+    return 1;
+  }
+
+  process.stdout.write("Start a first learn Run now, to collect the hosts this repo reaches? [y/N] ");
+  if (!(await readConfirmation())) {
+    console.log("No learn Run. `crisol run --network learn` starts one later. Commit .crisol/ to share it.");
+    return 0;
+  }
+
+  const interrupt = new AbortController();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, (name) => interrupt.abort(name));
+  let result: RunResult | undefined;
+  let failure: unknown;
+  try {
+    result = await run({
+      cwd: hostRepoPath,
+      task: LEARN_TASK,
+      network: "learn",
+      // One pass: a red Gate still shows its hosts, and resuming the agent would learn nothing new.
+      maxIterations: 1,
+      adapter: createAdapter(adapterName),
+      onWarning: (warning) => process.stderr.write(`Warning: ${warning}\n`),
+      signal: interrupt.signal,
+    });
+  } catch (error) {
+    failure = error;
+    result = (error as RunFailure | undefined)?.result;
+    process.stderr.write(`${formatError(error)}\n`);
+  }
+  if (result === undefined) return 1;
+
+  console.log(`Run ${result.run}: branch ${result.branch}, status ${result.status}.`);
+  let added: string[];
+  try {
+    added = writeLearnedHosts(hostRepoPath, result);
+  } catch (error) {
+    process.stderr.write(`Cannot write the learned hosts to ${REPO_ALLOWLIST_FILE}: ${formatError(error)}\n`);
+    return 1;
+  }
+  console.log(
+    added.length === 0
+      ? "The learn Run reached no host beyond the built-in Allowlist and this repo's level."
+      : added.map((host) => `Added ${host} to the repo Allowlist (${REPO_ALLOWLIST_FILE}).`).join("\n"),
+  );
+  console.log("Commit .crisol/ to share it.");
+  return failure === undefined ? 0 : 1;
+}
+
 async function main(argv: string[]): Promise<number> {
   assertSupportedPlatform();
 
@@ -473,9 +581,12 @@ async function main(argv: string[]): Promise<number> {
   if (command === "gc") {
     return runGcCommand(rest);
   }
+  if (command === "init") {
+    return runInitCommand(rest);
+  }
   if (command !== "run") {
     process.stderr.write(
-      `${USAGE}\n${ALLOW_USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n${STATUS_USAGE}\n${LOGS_USAGE}\n${GC_USAGE}\n`,
+      `${USAGE}\n${ALLOW_USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n${STATUS_USAGE}\n${LOGS_USAGE}\n${GC_USAGE}\n${INIT_USAGE}\n`,
     );
     return 1;
   }
@@ -501,7 +612,7 @@ async function main(argv: string[]): Promise<number> {
     maxIterations: args.maxIterations,
     ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
     network: args.network,
-    adapter: args.adapterName === "claude-code" ? new ClaudeCodeAdapter() : undefined,
+    adapter: createAdapter(args.adapterName),
   };
 
   if (args.detach) {
