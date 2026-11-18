@@ -15,7 +15,7 @@ function listRunIds(home: string): string[] {
 }
 
 /** A half-written file reads as `undefined`; its Run still holds its lock then, so it shows as live. */
-function readResult(id: string, home: string): RunResult | undefined {
+export function readResult(id: string, home: string): RunResult | undefined {
   try {
     return JSON.parse(readFileSync(runResultPath(id, home), "utf8")) as RunResult;
   } catch {

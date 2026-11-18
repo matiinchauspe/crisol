@@ -61,6 +61,7 @@ export interface GlobalConfig {
   maxParallel?: number;
   cpus?: number;
   memory?: string;
+  gcWarnBytes?: number;
 }
 
 function intKeyLine(key: string): RegExp {
@@ -131,6 +132,8 @@ export function parseGlobalConfig(text: string, sourcePath: string): GlobalConfi
   if (cpus !== undefined) config.cpus = cpus;
   const memory = extractMemoryKey(text, "memory", sourcePath);
   if (memory !== undefined) config.memory = memory;
+  const gcWarnBytes = extractIntKey(text, "gc_warn_bytes", sourcePath);
+  if (gcWarnBytes !== undefined) config.gcWarnBytes = gcWarnBytes;
   return config;
 }
 

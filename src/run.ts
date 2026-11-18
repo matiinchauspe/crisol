@@ -17,6 +17,7 @@ import {
   startSandbox,
 } from "./docker";
 import type { Sandbox } from "./docker";
+import { addTrackedSize, runDirSizeBytes } from "./gc";
 import { formatGateFeedback, resolveGates, runGates } from "./gates";
 import type { Gate } from "./gates";
 import { createInternalNetwork, ensureProxyImage, removeNetworkByRunId, startNetworkWall } from "./network";
@@ -107,6 +108,8 @@ export interface RunResult {
    * when the Run made its Clone; a Run that ended before its Slot never cut a branch.
    */
   fetchBack: boolean;
+  /** Epoch ms when this result was written. `crisol gc`'s 7-day rule reads this, never a dir's own birthtime. */
+  finishedAt: number;
 }
 
 /**
@@ -608,6 +611,7 @@ function endUnstartedRun(
     blocked: [],
     warnings: [],
     fetchBack: false,
+    finishedAt: Date.now(),
   };
   const logPath = runLogPath(reservation.id, home);
   try {
@@ -1013,6 +1017,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       ...(networkMode === "learn" ? { reached } : {}),
       warnings,
       fetchBack: fetchedBack,
+      finishedAt: Date.now(),
     };
 
     // Written on every exit, before the Run lock frees: recover and gc read it as the Run's last word.
@@ -1023,6 +1028,10 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       resultError = error;
       appendLog(logPath, `result.json could not be written: ${errorMessage(error)}`);
     }
+    // Best-effort: a disk-usage tally must never fail a Run that otherwise finished.
+    try {
+      addTrackedSize(home, runDirSizeBytes(id, home));
+    } catch {}
 
     // A provider failure resolves rather than rejects, as long as nothing else also went wrong.
     if (primaryError instanceof ProviderFailureError && fetchBackError === undefined && resultError === undefined) {

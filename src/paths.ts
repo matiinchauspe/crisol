@@ -22,6 +22,11 @@ export function runsRoot(home: string = crisolHome()): string {
   return path.join(home, "runs");
 }
 
+/** A running total, sibling to `runs/` so nothing mistakes it for a run id. */
+export function runsSizeTrackerPath(home: string = crisolHome()): string {
+  return path.join(home, "runs-size");
+}
+
 /** Bind-mounted into the Sandbox at this same absolute path. */
 export function runRepoPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "repo");

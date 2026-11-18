@@ -3,8 +3,10 @@ import { ClaudeCodeAdapter } from "./adapters/claude-code";
 import { addToRepoAllowlist, addToUserAllowlist, hostsToLearn, learnBaseline, mergedAllowlist } from "./allowlist";
 import type { AllowOutcome } from "./allowlist";
 import { runAuth } from "./auth";
-import { parsePositiveInteger } from "./config";
+import { parsePositiveInteger, readGlobalConfig } from "./config";
 import { discoverGitRoot } from "./git";
+import { collectRun, formatGb, formatSizeWarning, planGc, reconcileTrackedSize, resolveGcWarnBytes, trackedRunsSizeBytes } from "./gc";
+import type { GcSkip } from "./gc";
 import { crisolHome, repoAllowlistPath, userAllowlistPath } from "./paths";
 import { assertSupportedPlatform } from "./platform";
 import { detachRun, takeDetachedHandoff } from "./detach";
@@ -30,6 +32,8 @@ const RECOVER_USAGE = "Usage: crisol recover";
 const STATUS_USAGE = "Usage: crisol status";
 
 const LOGS_USAGE = "Usage: crisol logs <run>";
+
+const GC_USAGE = "Usage: crisol gc [--include-failed]";
 
 const NETWORK_MODES: readonly NetworkMode[] = ["allowlist", "learn", "open"];
 
@@ -349,6 +353,71 @@ function runLogsCommand(rest: string[]): number {
   return 0;
 }
 
+/** An unset stdin behaves like an immediate EOF, so a script that answers nothing reads as `""`. */
+async function readStdinLine(): Promise<string> {
+  let data = "";
+  for await (const chunk of process.stdin) {
+    data += chunk.toString("utf8");
+    if (data.includes("\n")) break;
+  }
+  const newline = data.indexOf("\n");
+  return (newline === -1 ? data : data.slice(0, newline)).trim();
+}
+
+async function readConfirmation(): Promise<boolean> {
+  const answer = (await readStdinLine()).toLowerCase();
+  return answer === "y" || answer === "yes";
+}
+
+function formatGcCandidate(candidate: { run: string; branch: string; sizeBytes: number }): string {
+  return `  ${candidate.run}  ${candidate.branch}  ~${formatGb(candidate.sizeBytes)}`;
+}
+
+/** The other skip kinds would nag about every too-young or wrong-status Run on every call. */
+function reportRefusal(skip: GcSkip): void {
+  if (skip.kind === "branch-moved" || skip.kind === "host-missing") {
+    process.stderr.write(`Run ${skip.run}: refused, ${skip.why}.\n`);
+  }
+}
+
+async function runGcCommand(rest: string[]): Promise<number> {
+  const includeFailed = rest.includes("--include-failed");
+  const unknown = rest.find((arg) => arg !== "--include-failed");
+  if (unknown !== undefined) {
+    process.stderr.write(`Unknown argument: ${unknown}\n${GC_USAGE}\n`);
+    return 1;
+  }
+
+  const home = crisolHome();
+  const plan = planGc(home, { includeFailed });
+  for (const skip of plan.skipped) reportRefusal(skip);
+
+  if (plan.collectable.length === 0) {
+    console.log("Nothing to collect.");
+    reconcileTrackedSize(home);
+    return 0;
+  }
+
+  const totalBytes = plan.collectable.reduce((sum, candidate) => sum + candidate.sizeBytes, 0);
+  console.log(
+    `${plan.collectable.length} Run(s) ready to collect, freeing ~${formatGb(totalBytes)}:\n` +
+      plan.collectable.map(formatGcCandidate).join("\n"),
+  );
+  process.stdout.write("Delete these Run dirs? [y/N] ");
+  if (!(await readConfirmation())) {
+    console.log("Nothing deleted.");
+    reconcileTrackedSize(home);
+    return 0;
+  }
+
+  for (const candidate of plan.collectable) {
+    collectRun(candidate.run, home);
+    console.log(`Run ${candidate.run}: collected, freed ~${formatGb(candidate.sizeBytes)}.`);
+  }
+  reconcileTrackedSize(home);
+  return 0;
+}
+
 async function main(argv: string[]): Promise<number> {
   assertSupportedPlatform();
 
@@ -368,8 +437,13 @@ async function main(argv: string[]): Promise<number> {
   if (command === "allow") {
     return runAllowCommand(rest);
   }
+  if (command === "gc") {
+    return runGcCommand(rest);
+  }
   if (command !== "run") {
-    process.stderr.write(`${USAGE}\n${ALLOW_USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n${STATUS_USAGE}\n${LOGS_USAGE}\n`);
+    process.stderr.write(
+      `${USAGE}\n${ALLOW_USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n${STATUS_USAGE}\n${LOGS_USAGE}\n${GC_USAGE}\n`,
+    );
     return 1;
   }
 
@@ -494,6 +568,12 @@ async function main(argv: string[]): Promise<number> {
     if (baselineError === undefined) console.log(formatLearnedHosts([...learned]));
     else process.stderr.write(`Cannot propose hosts for the repo level: ${formatError(baselineError)}\n`);
   }
+  // Best-effort: a disk-usage check must never fail a Run that otherwise finished cleanly.
+  try {
+    const threshold = resolveGcWarnBytes(readGlobalConfig(crisolHome()));
+    const sizeWarning = formatSizeWarning(trackedRunsSizeBytes(crisolHome()), threshold);
+    if (sizeWarning !== undefined) process.stderr.write(`Warning: ${sizeWarning}\n`);
+  } catch {}
   return exitCode;
 }
 
