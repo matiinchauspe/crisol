@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { repoPromptPath, userPromptPath } from "./paths";
+import { stopLine } from "./stop-line";
 
 const TASK_VARIABLE = "{{task}}";
 
@@ -150,13 +151,17 @@ export function defaultPreamble(gates: readonly string[]): string {
     gates.length > 0
       ? `When you finish, Crisol verifies your work by running ${gates.map((gate) => `\`${gate}\``).join(", ")}; ` +
         "a failing one comes back to you to fix."
-      : "No Gate is declared for this Run, so nothing verifies your work but your own report of it.";
+      : "No Gate is declared for this Run, so nothing verifies your work but your own Final message.";
   return [
     "You are working unattended inside a sandbox, in your own clone of the repo, on the branch already checked out.",
     verified,
     "Commit your work on that branch and do not push: Crisol collects the branch when you finish, " +
       "and only what is committed reaches it.",
-    "If the network blocks something you need, say so in your final report rather than working around it.",
+    "Your last message is your Final message: Crisol hands it, verbatim, to whoever started the Run.",
+    "If the network blocks something you need, say so in your Final message rather than working around it.",
+    "If you stop on purpose before the work is done — parked on a decision only a human can make, or told " +
+      `to checkpoint and end — make the last line of your Final message exactly \`${stopLine("parked")}\` ` +
+      `or \`${stopLine("checkpoint")}\`. Crisol then runs no Gate and does not come back to you.`,
   ].join("\n");
 }
 

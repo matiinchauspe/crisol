@@ -398,6 +398,24 @@ describe("the Preamble (ticket 10)", () => {
     }
   }, 120_000);
 
+  test("teaches the Final message and the Stop line for both reasons, and still names every Gate (ticket 20)", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const prompt = await promptFor({ task: "do it", gates: ["true", "bun test"], cwd: repo.path, home: home.path });
+
+      const preamble = prompt.slice(0, prompt.indexOf("<task>"));
+      expect(preamble).toContain("`true`, `bun test`");
+      expect(preamble).toContain("Final message");
+      expect(preamble).not.toContain("final report");
+      expect(preamble).toContain("`CRISOL-STOP: parked`");
+      expect(preamble).toContain("`CRISOL-STOP: checkpoint`");
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+
   test("an Adapter's own wording replaces the default", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();

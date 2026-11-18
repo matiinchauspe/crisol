@@ -2,11 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Adapter, AdapterContext } from "../src/adapter";
-import { FakeAdapter, GATE_FAILING_SCRIPT, GATE_FIXING_SCRIPT } from "../src/adapters/fake";
+import { DEFAULT_SCRIPT, FakeAdapter, GATE_FAILING_SCRIPT, GATE_FIXING_SCRIPT } from "../src/adapters/fake";
 import { run } from "../src/run";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
+import { onlyRunId, readLog, readResult } from "./support/runState";
 
 /**
  * Fails while GATE_TARGET.txt holds "oops", passes once it holds "ok". Always PRINTS the
@@ -23,7 +24,7 @@ function recordingAdapter(inner: Adapter): { adapter: Adapter; feedbacks: string
     reportCompletion: (ctx: AdapterContext) => inner.reportCompletion(ctx),
     async resumeWithFeedback(ctx: AdapterContext, feedback: string) {
       feedbacks.push(feedback);
-      await inner.resumeWithFeedback(ctx, feedback);
+      return inner.resumeWithFeedback(ctx, feedback);
     },
   };
   return { adapter, feedbacks };
@@ -268,5 +269,190 @@ describe("ticket 02: Gates and converge", () => {
       }
     },
     60_000,
+  );
+});
+
+describe("ticket 20: the Final message and the Stop line", () => {
+  /** Blank lines, Markdown and a trailing newline: anything Crisol trimmed or reshaped would show. */
+  const REPORT = "Done.\n\n- criterion 1: covered by `bun test`\n- HOW default: kept the old name\n";
+
+  test(
+    "a Final message without a Stop line lands verbatim in the Run result and result.json on verified",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const result = await run({
+          task: "say hello",
+          cwd: repo.path,
+          home: home.path,
+          adapter: new FakeAdapter(DEFAULT_SCRIPT, undefined, undefined, { launch: REPORT }),
+          gates: ["test -f CRISOL_RUN.md"],
+        });
+
+        expect(result.status).toBe("verified");
+        expect(result.finalMessage).toBe(REPORT);
+        expect(readResult(onlyRunId(home.path), home.path)?.finalMessage).toBe(REPORT);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "on not-converged the Final message is the last iteration's, not the first",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const result = await run({
+          task: "never fix the gate",
+          cwd: repo.path,
+          home: home.path,
+          adapter: new FakeAdapter(GATE_FAILING_SCRIPT, GATE_FAILING_SCRIPT, undefined, {
+            launch: "first attempt",
+            resume: REPORT,
+          }),
+          gates: [GATE_CMD],
+          maxIterations: 2,
+          ceilingMs: 10 * 60 * 1000,
+        });
+
+        expect(result.status).toBe("not-converged");
+        expect(result.reason).toBe("ceiling");
+        expect(result.finalMessage).toBe(REPORT);
+        expect(readResult(onlyRunId(home.path), home.path)?.finalMessage).toBe(REPORT);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  for (const reason of ["parked", "checkpoint"] as const) {
+    test(
+      `a Stop line naming ${reason}, over a failing Gate, ends the Run ${reason}: no Gate runs and the session is never resumed`,
+      async () => {
+        const home = createTempHome();
+        const repo = createFixtureRepo();
+        try {
+          const message = `Stopping here.\n\nQuestion: which name wins?\n\nCRISOL-STOP: ${reason}\n`;
+          // No resume script: a resume would throw and turn the Run not-converged.
+          const { adapter, feedbacks } = recordingAdapter(
+            new FakeAdapter(GATE_FAILING_SCRIPT, undefined, undefined, { launch: message }),
+          );
+
+          const result = await run({
+            task: "stop on purpose",
+            cwd: repo.path,
+            home: home.path,
+            adapter,
+            gates: [GATE_CMD],
+          });
+
+          expect(result.status).toBe(reason);
+          expect(result.reason).toBeUndefined();
+          expect(result.iterations).toBe(1);
+          expect(result.gates).toEqual([]);
+          expect(result.finalMessage).toBe(message);
+          expect(feedbacks).toHaveLength(0);
+          const id = onlyRunId(home.path);
+          expect(readResult(id, home.path)?.status).toBe(reason);
+          expect(readLog(id, home.path)).not.toContain("gates (iteration");
+        } finally {
+          home.cleanup();
+          repo.cleanup();
+        }
+      },
+      60_000,
+    );
+  }
+
+  test(
+    "a Stop line after a resume ends the Run there, without another Gate pass or resume",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const { adapter, feedbacks } = recordingAdapter(
+          new FakeAdapter(GATE_FAILING_SCRIPT, GATE_FAILING_SCRIPT, undefined, {
+            launch: "first attempt",
+            resume: "Cannot fix this without a decision.\nCRISOL-STOP: parked",
+          }),
+        );
+
+        const result = await run({
+          task: "stop after one red Gate",
+          cwd: repo.path,
+          home: home.path,
+          adapter,
+          gates: [GATE_CMD],
+          maxIterations: 5,
+          ceilingMs: 10 * 60 * 1000,
+        });
+
+        expect(result.status).toBe("parked");
+        expect(result.iterations).toBe(2);
+        expect(feedbacks).toHaveLength(1);
+        const gatePasses = readLog(onlyRunId(home.path), home.path).match(/gates \(iteration/g) ?? [];
+        expect(gatePasses).toHaveLength(1);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "with no Gate declared, a Stop line still ends the Run parked rather than unverified",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const result = await run({
+          task: "stop on purpose",
+          cwd: repo.path,
+          home: home.path,
+          adapter: new FakeAdapter(DEFAULT_SCRIPT, undefined, undefined, { launch: "Need a decision.\nCRISOL-STOP: parked" }),
+        });
+
+        expect(result.status).toBe("parked");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "a Stop line anywhere but the last line, or naming an unknown reason, is not a stop: the Gates still run",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        for (const message of ["CRISOL-STOP: parked\nthen I carried on and finished.", "CRISOL-STOP: bored"]) {
+          const result = await run({
+            task: "say hello",
+            cwd: repo.path,
+            home: home.path,
+            adapter: new FakeAdapter(DEFAULT_SCRIPT, undefined, undefined, { launch: message }),
+            gates: ["test -f CRISOL_RUN.md"],
+          });
+
+          expect(result.status).toBe("verified");
+          expect(result.gates).toEqual([{ cmd: "test -f CRISOL_RUN.md", ok: true }]);
+          expect(result.finalMessage).toBe(message);
+        }
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    120_000,
   );
 });

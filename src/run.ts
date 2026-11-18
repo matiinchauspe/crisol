@@ -47,13 +47,15 @@ import { KeychainSecretStore } from "./secret-store";
 import type { SecretStore } from "./secret-store";
 import { acquireSlot, adoptLock, tryLockRun } from "./slots";
 import type { HeldLock, Slot } from "./slots";
+import { readStopLine } from "./stop-line";
+import type { StopReason } from "./stop-line";
 import { assertPreambleNamesGates, buildPrompt, defaultPreamble, resolveSharedInputs, resolveTask } from "./task";
 import type { ResolvedInputs, TaskInput } from "./task";
 
 export type { Gate } from "./gates";
 export type { Blocked, NetworkMode } from "./network";
 
-export type RunStatus = "verified" | "unverified" | "not-converged";
+export type RunStatus = "verified" | "unverified" | "not-converged" | StopReason;
 
 const DEFAULT_BRANCH_PREFIX = "crisol";
 
@@ -110,6 +112,12 @@ export interface RunResult {
   fetchBack: boolean;
   /** Epoch ms when this result was written. `crisol gc`'s 7-day rule reads this, never a dir's own birthtime. */
   finishedAt: number;
+  /**
+   * The agent's last message of the Run's last iteration, verbatim as the Adapter received it.
+   * Absent when no iteration finished, or the Adapter could not read one. Crisol reads nothing in
+   * it but the Stop line.
+   */
+  finalMessage?: string;
 }
 
 /**
@@ -664,7 +672,8 @@ function interruptedBeforeReserving(): Error {
 /**
  * Crisol, never the agent, decides done: every declared Gate runs, a red one resumes the same
  * session with its failure, until all are green or the ceiling hits. With no Gate anywhere, the
- * agent's completion report stands in. Once the Run holds a Slot, Fetch-back runs on every exit,
+ * agent's completion report stands in. The agent decides only whether to stop on purpose: a Stop
+ * line ends the Run before the Gates. Once the Run holds a Slot, Fetch-back runs on every exit,
  * whatever `status` is.
  */
 export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): Promise<RunResult> {
@@ -763,9 +772,13 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   let bareServicesNetwork: string | undefined;
   let blocked: Blocked[] = [];
   let reached: Blocked[] = [];
+  let finalMessage: string | undefined;
+  const keepFinalMessage = (message: string | void): void => {
+    finalMessage = typeof message === "string" ? message : undefined;
+  };
 
   const converge = async (ctx: AdapterContext): Promise<void> => {
-    await adapter.launch(ctx);
+    keepFinalMessage(await adapter.launch(ctx));
     iterations = 1;
     const startedAt = Date.now();
 
@@ -774,6 +787,14 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       interruption.throwIfInterrupted();
       const completed = await adapter.reportCompletion(ctx);
       appendLog(logPath, `adapter reported completion=${completed} after ${iterations} iteration(s)`);
+
+      // Before any Gate: an agent that stopped on purpose is not pushed back to work.
+      const stop = finalMessage !== undefined ? readStopLine(finalMessage) : undefined;
+      if (stop !== undefined) {
+        status = stop;
+        appendLog(logPath, `Stop line (${stop}) after ${iterations} iteration(s): no Gate runs, no resume`);
+        return;
+      }
 
       if (gates.length === 0) {
         status = "unverified";
@@ -809,7 +830,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       }
 
       appendLog(logPath, `resuming with feedback for failing Gate "${firstFailure.cmd}"`);
-      await adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure));
+      keepFinalMessage(await adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure)));
       iterations += 1;
     }
   };
@@ -1018,6 +1039,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       warnings,
       fetchBack: fetchedBack,
       finishedAt: Date.now(),
+      ...(finalMessage !== undefined ? { finalMessage } : {}),
     };
 
     // Written on every exit, before the Run lock frees: recover and gc read it as the Run's last word.
