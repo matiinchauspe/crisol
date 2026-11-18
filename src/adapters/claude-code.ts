@@ -124,6 +124,8 @@ export function buildResumeArgs(options: BuildResumeArgsOptions): string[] {
 
 interface ClaudeCliResult {
   session_id: string;
+  /** The agent's last message of the turn. */
+  result?: string;
 }
 
 /** Output without a `session_id` fails the Run: without it there is no session to resume. */
@@ -138,7 +140,8 @@ export function parseCliOutput(stdout: string): ClaudeCliResult {
   if (typeof sessionId !== "string" || sessionId.length === 0) {
     throw new Error(`Claude Code's JSON output had no "session_id" string field: ${stdout.slice(0, 500)}`);
   }
-  return { session_id: sessionId };
+  const result = (parsed as { result?: unknown }).result;
+  return typeof result === "string" ? { session_id: sessionId, result } : { session_id: sessionId };
 }
 
 export interface ClaudeCodeAdapterOptions {
@@ -169,13 +172,13 @@ export class ClaudeCodeAdapter implements Adapter {
     };
   }
 
-  async launch(ctx: AdapterContext): Promise<void> {
+  async launch(ctx: AdapterContext): Promise<string | void> {
     const args = buildLaunchArgs({ binary: this.binary, instructions: ctx.instructions });
     const result = await ctx.sandbox.exec(args, ctx.prompt);
     if (result.exitCode !== 0) {
       throw new Error(`${this.binary} exited ${result.exitCode}: ${(result.stderr || result.stdout).trim()}`);
     }
-    this.sessionId = parseCliOutput(result.stdout).session_id;
+    return this.takeTurn(result.stdout);
   }
 
   // `-p` blocks until the turn completes, so the agent has finished by the time we ask.
@@ -183,7 +186,7 @@ export class ClaudeCodeAdapter implements Adapter {
     return true;
   }
 
-  async resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<void> {
+  async resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<string | void> {
     if (this.sessionId === undefined) {
       throw new Error("resumeWithFeedback was called before launch ever captured a session id.");
     }
@@ -192,6 +195,12 @@ export class ClaudeCodeAdapter implements Adapter {
     if (result.exitCode !== 0) {
       throw new Error(`${this.binary} exited ${result.exitCode}: ${(result.stderr || result.stdout).trim()}`);
     }
-    this.sessionId = parseCliOutput(result.stdout).session_id;
+    return this.takeTurn(result.stdout);
+  }
+
+  private takeTurn(stdout: string): string | undefined {
+    const output = parseCliOutput(stdout);
+    this.sessionId = output.session_id;
+    return output.result;
   }
 }

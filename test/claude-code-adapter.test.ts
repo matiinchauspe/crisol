@@ -150,10 +150,15 @@ describe("buildLaunchArgs / buildResumeArgs (ticket 14)", () => {
 });
 
 describe("parseCliOutput (ticket 14)", () => {
-  test("extracts session_id from the real --output-format json shape", () => {
-    expect(parseCliOutput(JSON.stringify({ session_id: "abc-123", result: "done" }))).toEqual({
+  test("extracts session_id and the agent's last message from the real --output-format json shape", () => {
+    expect(parseCliOutput(JSON.stringify({ session_id: "abc-123", result: "done\n\nCRISOL-STOP: parked" }))).toEqual({
       session_id: "abc-123",
+      result: "done\n\nCRISOL-STOP: parked",
     });
+  });
+
+  test("output without a string result still yields the session, with no last message", () => {
+    expect(parseCliOutput(JSON.stringify({ session_id: "abc-123" }))).toEqual({ session_id: "abc-123" });
   });
 
   test("throws on invalid JSON", () => {
@@ -233,6 +238,17 @@ describe("ClaudeCodeAdapter.launch / resumeWithFeedback (ticket 14, fake Sandbox
     expect(resumeArgs).toContain("--resume");
     expect(resumeArgs[resumeArgs.indexOf("--resume") + 1]).toBe("sess-aaa");
     expect(stdins[1]).toBe("Gate failed: bun test\n\nFAIL");
+  });
+
+  test("launch and resumeWithFeedback each resolve with that turn's `result`, verbatim (ticket 20)", async () => {
+    const { sandbox } = fakeSandbox([
+      JSON.stringify({ session_id: "sess-aaa", result: "first turn" }),
+      JSON.stringify({ session_id: "sess-aaa", result: "  second turn\n" }),
+    ]);
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+
+    expect(await adapter.launch(fakeContext(sandbox))).toBe("first turn");
+    expect(await adapter.resumeWithFeedback(fakeContext(sandbox), "feedback")).toBe("  second turn\n");
   });
 
   test("resumeWithFeedback before launch ever ran throws, rather than silently starting a fresh session", async () => {

@@ -99,11 +99,18 @@ export interface ProviderFailure {
   message?: string;
 }
 
+/** What the fake agent says at the end of each turn; a turn without one says nothing. */
+export interface FakeMessages {
+  launch?: string;
+  resume?: string;
+}
+
 export class FakeAdapter implements Adapter {
   constructor(
     private readonly launchScript: readonly string[] = DEFAULT_SCRIPT,
     private readonly resumeScript?: readonly string[],
     private readonly providerFailure?: ProviderFailure,
+    private readonly messages: FakeMessages = {},
   ) {}
 
   // Fake Adapter never calls a real provider or wires into Tenaza — nothing to declare.
@@ -111,11 +118,12 @@ export class FakeAdapter implements Adapter {
     return { envNames: [], mounts: [] };
   }
 
-  async launch(ctx: AdapterContext): Promise<void> {
+  async launch(ctx: AdapterContext): Promise<string | void> {
     if (this.providerFailure) {
       throw new ProviderFailureError(this.providerFailure.category, this.providerFailure.message);
     }
     await this.runScript(ctx, this.launchScript);
+    return this.messages.launch;
   }
 
   // Synchronous: launch/resumeWithFeedback already finished by the time this is called.
@@ -123,7 +131,7 @@ export class FakeAdapter implements Adapter {
     return true;
   }
 
-  async resumeWithFeedback(ctx: AdapterContext, _feedback: string): Promise<void> {
+  async resumeWithFeedback(ctx: AdapterContext, _feedback: string): Promise<string | void> {
     if (this.resumeScript === undefined) {
       throw new Error(
         "This FakeAdapter has no resumeScript — it was not expected to be resumed " +
@@ -131,6 +139,7 @@ export class FakeAdapter implements Adapter {
       );
     }
     await this.runScript(ctx, this.resumeScript);
+    return this.messages.resume;
   }
 
   private async runScript(ctx: AdapterContext, script: readonly string[]): Promise<void> {

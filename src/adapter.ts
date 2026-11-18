@@ -24,11 +24,14 @@ export interface Adapter {
   declarePreStart(projectImage: string): PreStartDeclaration;
   /** Replaces Crisol's default wording. It must name every Gate it is given, or the Run fails before launch. */
   preamble?(gates: readonly string[]): string;
-  /** Unattended: no human is in the loop to answer a prompt. */
-  launch(ctx: AdapterContext): Promise<void>;
+  /**
+   * Unattended: no human is in the loop to answer a prompt. Resolves with the agent's last message
+   * of the turn, verbatim, or with nothing when the Adapter cannot read one.
+   */
+  launch(ctx: AdapterContext): Promise<string | void>;
   reportCompletion(ctx: AdapterContext): Promise<boolean>;
-  /** Continues the SAME agent session — never a fresh one. */
-  resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<void>;
+  /** Continues the SAME agent session — never a fresh one. Resolves as `launch` does. */
+  resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<string | void>;
 }
 
 /**
