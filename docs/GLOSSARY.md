@@ -4,8 +4,14 @@ Crisol is a macOS CLI that runs one Task in a container, unattended, and leaves 
 branch in the host repo. Seeded from the spec's own Vocabulary (crisol-v1 spec, 2026-10-27).
 
 **Run**:
-One Task executed in one Sandbox, from launch to Run result. Identified by a run id.
+One Task executed in a Sandbox, from launch to Run result, and again through each Continuation.
+Identified by a run id.
 _Avoid_: Job, execution, invocation
+
+**Continuation**:
+A Run taken up again after its Run result, on its own Clone and agent session, with a new request
+as its input. It rewrites the Run result and never creates another branch.
+_Avoid_: Resume (what an Adapter does between iterations), Retry, Rerun (those start from scratch)
 
 **Task**:
 The text a Run works on: a phrase, or the content of a `--file`, after any Template is applied.

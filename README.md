@@ -105,7 +105,7 @@ To get a standalone `crisol` binary instead, run `bun run build`. It writes `dis
 ## Usage
 
 ```
-crisol run ("<task>"... | --file <md>) [--context <md>]... [--prompt <name>] [--json | --detach] [--base <ref>] [--name <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--network <allowlist|learn|open>] [--adapter <fake|claude-code>]
+crisol run ("<task>"... | --file <md>) [--context <md>]... [--prompt <name>] [--json | --detach] [--base <ref>] [--name <branch> | --continue <branch>] [--gate <cmd>]... [--max-iterations <n>] [--timeout <minutes>] [--network <allowlist|learn|open>] [--adapter <fake|claude-code>]
 crisol allow <host> [--repo]
 crisol status
 crisol logs <run>
@@ -121,6 +121,7 @@ crisol gc [--include-failed]
 | `--prompt <name>` | none | Wraps the Task in a template. See [The Task the agent gets](#the-task-the-agent-gets). |
 | `--base <ref>` | your current `HEAD` | Branch, tag or sha to cut the Run's branch from. It must be reachable from a local branch, a tag or `HEAD`, because that is all the Clone receives. To use `origin/main`, check it out or fast-forward a local branch onto it first. |
 | `--name <branch>` | `crisol/<id>` | The branch name the Run leaves in your repo. Refused before anything happens if it clashes with an existing branch, a tag, or a branch path (for example `feat` vs `feat/x`). Only with a single Task. |
+| `--continue <branch>` | none | Takes up again the finished Run whose Run result names this branch, with the Task as the new request. Not with `--name`, `--base`, `--detach` or several Tasks. See [Continue a Run](#continue-a-run). |
 | `--gate <cmd>` | none | A command whose exit code decides whether the work is right. Repeatable. Any `--gate` replaces your repo's own `.crisol/config.toml` Gates entirely — it never merges with them. |
 | `--max-iterations <n>` | `5` | Overrides how many Gate-fail-then-resume attempts this Run gets before `not-converged`. Must be a positive integer. |
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
@@ -247,6 +248,24 @@ including warnings, goes to its log.
 | `dead` | Died without writing a Run result, for example after `kill -9`. If it had made its Clone, `crisol recover` brings back its branch. A Run that died while queued never made one, so there is nothing to bring back. |
 
 `crisol logs <run>` prints that Run's log. An id that is not a Run fails with a plain message.
+
+### Continue a Run
+
+```console
+$ crisol run --continue crisol/9f496a56 --file review.md --json
+```
+
+A **Continuation** sends a new request to the agent of a finished Run, with its context, on the same
+branch. Crisol finds the Run whose Run result names the branch, re-takes its Run lock and a Slot,
+starts a new Sandbox over the same Clone, and resumes the agent's own session with the request. The
+Gates run as in any Run — `--gate` when given, else the ones the Run had — and a Stop line ends it
+the same way. Fetch-back then moves the existing branch forward: if the branch moved in your repo
+meanwhile, Fetch-back refuses it rather than overwrite your commit, and `fetchBack` is `false`.
+
+`result.json` is rewritten with this round's `status`, `finalMessage` and a new `finishedAt`; the
+`log` keeps every round. A branch no Run names, or two Runs name, is refused before anything
+starts, as is a Run `crisol gc` has collected. The agent's session survives its Sandbox because
+Crisol keeps it under the Run dir, in `sessions/`.
 
 ### Network
 
@@ -448,11 +467,11 @@ recover never deletes a branch. It prints one line per Run it acted on or left a
 crisol gc [--include-failed]
 ```
 
-Disk is freed only on request. `crisol gc` collects a Run's `repo/` (its Clone) and its Allowlist
-`network/` dir once ALL of these hold: Fetch-back completed, 7 days passed since the Run finished,
+Disk is freed only on request. `crisol gc` collects a Run's `repo/` (its Clone), its Allowlist
+`network/` dir and its agent's `sessions/` once ALL of these hold: Fetch-back completed, 7 days passed since the Run finished,
 and the branch is still in the host repo at the same commit the Clone cut it from — a branch moved,
-rebased or deleted since is refused, naming why. `log`, `result.json`, `lock`, `pid` and `prompt`
-are never touched, and `gc` never deletes a branch, whatever you confirm. `--include-failed` adds
+rebased or deleted since is refused, naming why. A collected Run can no longer be continued.
+`log`, `result.json`, `lock`, `pid` and `prompt` are never touched, and `gc` never deletes a branch, whatever you confirm. `--include-failed` adds
 `not-converged` Runs to what counts, on top of every other check above — it does not waive any of
 them. A Run still missing its Fetch-back is never collected either way; run `crisol recover` first.
 
@@ -551,14 +570,17 @@ Crisol runs no Gate and never resumes the session; `status` is `parked` or `chec
 ├── network                # optional: the user level of the Allowlist, one host per line
 ├── prompts/<name>.md      # optional: your own `--prompt` templates
 ├── slots/<n>.lock         # one per Slot; a Run holds one while it executes
-├── runs-size              # a running total of `repo/` + `network/` bytes; `crisol run` reads only this, never `runs/`
+├── runs-size              # a running total of `repo/` + `network/` + `sessions/` bytes; `crisol run` reads only this, never `runs/`
 └── runs/<id>/             # made when the Run is reserved, before it waits for a Slot
     ├── repo/              # the Run's Clone, made once the Run holds a Slot (status: running)
     ├── lock               # held while the Run is alive; how `status` and `recover` tell live from dead
     ├── pid                # the process that owns the Run; `status` shows it while that process holds the Run
-    ├── prompt             # the Preamble, Task and Context the agent received
-    ├── log                # timestamped log of every stage; a detached Run's output too
-    └── result.json        # the Run result, written on every exit
+    ├── sessions/          # the agent's session, mounted into every Sandbox of the Run; what a Continuation resumes
+    ├── session-id         # the session the last turn ran in
+    ├── gates.json         # the Gates the Run resolved, which a Continuation reuses
+    ├── prompt             # the Preamble, Task and Context the agent received at launch
+    ├── log                # timestamped log of every stage and every Continuation; a detached Run's output too
+    └── result.json        # the Run result, written on every exit and rewritten by each Continuation
 ```
 
 ## Roadmap
@@ -590,7 +612,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
 **Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Detached Run**, **Secret**, **SecretStore**,
-**Service**, **Preamble**, **Context**, **Template**, **Final message**, **Stop line**. Each term is defined in
+**Service**, **Preamble**, **Context**, **Template**, **Final message**, **Stop line**, **Continuation**. Each term is defined in
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
 [`docs/adr/`](docs/adr/):
 
@@ -613,6 +635,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0017](docs/adr/0017-provider-failure-is-adapter-owned-and-resolves-like-a-ceiling.md): a provider failure is a new `ProviderFailureError` only the Adapter can throw (the real Claude Code Adapter's exact wire format is unverified and left generic); it resolves `run()` like the ceiling, rather than rejecting; `--json` now prints the Run result on every exit that computed one, by attaching it to the thrown error rather than changing which exits reject (amends ADR 0010); a provider failure aborts a sibling Run still waiting for its Slot via a new `onProviderFailure` callback; `--cpus`/`--memory` cap the Sandbox container alone, default 2 CPUs / 4 GB, overridable in `~/.crisol/config`
 - [0018](docs/adr/0018-gc-ages-runs-by-a-stored-finishedat-and-verifies-the-host-branch-live.md): `RunResult` gains `finishedAt` (a dir's own birthtime cannot be back-dated, verified live) for `crisol gc`'s 7-day rule; "the recorded commit" is read live from the Clone's own branch tip, never persisted; `--include-failed` lifts only the status restriction, never the age or branch-verification checks; the confirmation prompt is one `y`/`yes` comparison with no `--yes` escape hatch (ADR 0013's lesson); `gc` deletes exactly `repo/` and the per-Run `network/` dir; the size-warning threshold is a plain, overridable byte count (`gc_warn_bytes`)
 - [0019](docs/adr/0019-the-final-message-is-what-a-turn-resolves-with-and-the-stop-line-is-its-last-line.md): `launch`/`resumeWithFeedback` resolve with the turn's last message (amends ADR 0005's `Promise<void>`), kept as `finalMessage` from the last iteration only; the Stop line is `CRISOL-STOP: parked` or `CRISOL-STOP: checkpoint`, exact, on the last non-blank line; it is read before the Gates, even with none declared; `parked` and `checkpoint` resolve `run()` and exit 0
+- [0020](docs/adr/0020-a-continuation-re-enters-its-runs-own-dir-and-keeps-only-the-session-transcripts.md): a Continuation keeps its Run's id, dir and lock and rewrites `result.json`; an Adapter names a `sessionStore` Crisol mounts from `runs/<id>/sessions/` (Claude Code: `~/.claude/projects` only, so the image's `settings.json` stays visible); the Gates default to the Run's own, kept in `gates.json`; Fetch-back stays fast-forward only
 
 ## Development
 
