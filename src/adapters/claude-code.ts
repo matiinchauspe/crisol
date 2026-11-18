@@ -1,5 +1,5 @@
-import type { Adapter, AdapterContext, PreStartDeclaration } from "../adapter";
-import { contentHash, ensureImageFromDockerfile } from "../docker";
+import { ProviderFailureError, type Adapter, type AdapterContext, type PreStartDeclaration } from "../adapter";
+import { contentHash, ensureImageFromDockerfile, type ExecResult } from "../docker";
 import { CLAUDE_TOKEN_SECRET_NAME } from "../secret-store";
 
 const VERSION_PATTERN = /^(\d+\.\d+\.\d+)/;
@@ -144,6 +144,29 @@ export function parseCliOutput(stdout: string): ClaudeCliResult {
   return typeof result === "string" ? { session_id: sessionId, result } : { session_id: sessionId };
 }
 
+interface ClaudeCliFailure {
+  is_error?: unknown;
+  terminal_reason?: unknown;
+  api_error_status?: unknown;
+  result?: unknown;
+}
+
+/**
+ * Classified on the structured fields alone: the captured failure says `"subtype": "success"`,
+ * and its `result` is prose. Only authentication has a real capture, so a rate limit or an
+ * exhausted quota still surfaces as a plain error.
+ */
+function turnFailure(binary: string, result: ExecResult): Error {
+  let output: ClaudeCliFailure | null = null;
+  try {
+    output = JSON.parse(result.stdout) as ClaudeCliFailure | null;
+  } catch {}
+  if (output?.is_error === true && output.terminal_reason === "api_error" && output.api_error_status === 401) {
+    return new ProviderFailureError("auth", typeof output.result === "string" ? output.result : "auth");
+  }
+  return new Error(`${binary} exited ${result.exitCode}: ${(result.stderr || result.stdout).trim()}`);
+}
+
 export interface ClaudeCodeAdapterOptions {
   /** Test seam: the suite never calls the real `claude`. */
   binary?: string;
@@ -181,7 +204,7 @@ export class ClaudeCodeAdapter implements Adapter {
     const args = buildLaunchArgs({ binary: this.binary, instructions: ctx.instructions });
     const result = await ctx.sandbox.exec(args, ctx.prompt);
     if (result.exitCode !== 0) {
-      throw new Error(`${this.binary} exited ${result.exitCode}: ${(result.stderr || result.stdout).trim()}`);
+      throw turnFailure(this.binary, result);
     }
     return this.takeTurn(result.stdout);
   }
@@ -210,7 +233,7 @@ export class ClaudeCodeAdapter implements Adapter {
     const args = buildResumeArgs({ binary: this.binary, sessionId });
     const result = await ctx.sandbox.exec(args, message);
     if (result.exitCode !== 0) {
-      throw new Error(`${this.binary} exited ${result.exitCode}: ${(result.stderr || result.stdout).trim()}`);
+      throw turnFailure(this.binary, result);
     }
     return this.takeTurn(result.stdout);
   }
