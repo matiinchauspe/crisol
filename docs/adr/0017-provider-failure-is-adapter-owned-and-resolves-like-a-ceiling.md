@@ -19,6 +19,16 @@ non-zero exit generically as `error: <message>`. Classifying its real failures i
 hand, the way ticket 14 (ADR 0008) caught the root-as-root and the attribution-boolean problems —
 guessing a wire format here would be worse than leaving the gap open and named.
 
+**Amendment 2026-11-18 (ticket 19):** the real Adapter now classifies a failed authentication. The
+owner captured `claude` 2.1.283's output for an invalid API key, committed verbatim under
+`test/fixtures/claude-auth-failure/` with the command that produced it. It exits 1 with
+`"is_error": true`, `"terminal_reason": "api_error"` and `"api_error_status": 401` — and also
+`"subtype": "success"`, so `subtype` is no signal, and the `result` text is prose. Any turn whose
+output carries those three fields throws `ProviderFailureError` with category `auth`, its message
+the `result` text. Everything else, another API error status included, still surfaces as
+`error: <message>`. A rate limit and an exhausted quota stay open: they are classified only once
+their own real captures exist, never inferred from this one.
+
 ## A provider failure resolves `run()`, like the ceiling — it is never thrown
 
 The spec's own wording ("returns `not-converged` with `reason: provider: …`") matches how the
