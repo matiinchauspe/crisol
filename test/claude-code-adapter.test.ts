@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { AdapterContext } from "../src/adapter";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ProviderFailureError, type AdapterContext } from "../src/adapter";
 import {
   ClaudeCodeAdapter,
   buildAgentLayerDockerfile,
@@ -279,6 +281,75 @@ describe("ClaudeCodeAdapter.launch / resumeWithFeedback (ticket 14, fake Sandbox
     const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
     await adapter.launch(fakeContext(sandbox));
     expect(await adapter.reportCompletion(fakeContext(sandbox))).toBe(true);
+  });
+});
+
+const AUTH_CAPTURE_DIR = join(import.meta.dir, "fixtures", "claude-auth-failure");
+
+function readAuthCapture(): ExecResult {
+  const exit = /^exit=(\d+)$/.exec(readFileSync(join(AUTH_CAPTURE_DIR, "auth.exit.txt"), "utf8").trim());
+  return {
+    exitCode: Number(exit![1]),
+    stdout: readFileSync(join(AUTH_CAPTURE_DIR, "auth.stdout.json"), "utf8"),
+    stderr: readFileSync(join(AUTH_CAPTURE_DIR, "auth.stderr.txt"), "utf8"),
+  };
+}
+
+function sandboxAnswering(result: ExecResult): Sandbox {
+  return {
+    containerId: "fake",
+    mounts: [],
+    async exec(): Promise<ExecResult> {
+      return result;
+    },
+    async stop(): Promise<StopResult> {
+      return { ok: true, stderr: "" };
+    },
+  };
+}
+
+async function rejectionOf(turn: Promise<unknown>): Promise<unknown> {
+  try {
+    await turn;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected the turn to reject");
+}
+
+describe("ClaudeCodeAdapter classifies a provider failure (ticket 19, real captured output)", () => {
+  test("the captured failed authentication makes launch throw ProviderFailureError with category auth", async () => {
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering(readAuthCapture()))));
+    expect(error).toBeInstanceOf(ProviderFailureError);
+    expect((error as ProviderFailureError).category).toBe("auth");
+    expect((error as ProviderFailureError).message).toContain("Invalid API key");
+  });
+
+  test("the captured failed authentication on a resumed turn throws ProviderFailureError too", async () => {
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(
+      adapter.continueSession(fakeContext(sandboxAnswering(readAuthCapture())), "sess-kept", "go on"),
+    );
+    expect(error).toBeInstanceOf(ProviderFailureError);
+    expect((error as ProviderFailureError).category).toBe("auth");
+  });
+
+  test("an API error with another status stays a plain error, never a provider failure", async () => {
+    const capture = readAuthCapture();
+    const stdout = JSON.stringify({ ...JSON.parse(capture.stdout), api_error_status: 500 });
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering({ ...capture, stdout }))));
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ProviderFailureError);
+    expect((error as Error).message).toContain("fake-claude exited 1");
+  });
+
+  test("the result text alone never classifies: Invalid API key without the structured fields stays a plain error", async () => {
+    const stdout = JSON.stringify({ session_id: "sess-aaa", is_error: true, result: "Invalid API key · Fix external API key" });
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering({ exitCode: 1, stdout, stderr: "" }))));
+    expect(error).not.toBeInstanceOf(ProviderFailureError);
   });
 });
 

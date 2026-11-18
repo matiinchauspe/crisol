@@ -1,0 +1,1 @@
+ANTHROPIC_API_KEY=sk-ant-invalid claude -p hi --output-format json
