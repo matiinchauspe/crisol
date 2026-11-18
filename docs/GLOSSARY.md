@@ -42,9 +42,20 @@ A command whose exit code decides whether the work is right (`bun test`).
 _Avoid_: Check, test, CI step
 
 **Run result**:
-The stable JSON a Run returns; its Status is `verified`, `unverified`, or `not-converged`, never
-anything else.
+The stable JSON a Run returns; its Status is `verified`, `unverified`, `not-converged`, `parked` or
+`checkpoint`, never anything else. The last two come only from a Stop line.
 _Avoid_: Output, report, response
+
+**Final message**:
+The agent's last message in a Run, as its Adapter received it, kept verbatim in the Run result.
+Crisol reads nothing in it but the Stop line.
+_Avoid_: Report, summary (Run result already rules out "report"), Handoff (a caller's baton is a
+section inside a Final message, not the message)
+
+**Stop line**:
+The marker line ending a Final message when the agent stopped on purpose, naming why. Crisol reads
+it before running the Gates and, when present, never resumes the session.
+_Avoid_: Exit code, signal, flag (it is text the agent writes, not a process mechanism)
 
 **Adapter**:
 The only code that knows a specific agent (v1: Claude Code).
@@ -93,8 +104,9 @@ what each one is FOR)
 
 **Preamble**:
 The text Crisol puts before every Task: the agent is in a sandbox, the Run's Gates by command,
-commit and do not push, report a network block rather than work around it. An Adapter may replace
-its wording, but it must still name every Gate.
+commit and do not push, name a network block in the Final message rather than work around it, and
+end with a Stop line when it stops on purpose. An Adapter may replace its wording, but it must still
+name every Gate.
 _Avoid_: System prompt, header (the Preamble travels with the Task, not as a system prompt)
 
 **Secret**:

@@ -140,7 +140,8 @@ gates = ["bun test", "bun run typecheck"]
 Crisol never reads a tracker: the Task is the text you give it. The agent receives, in order:
 
 1. **The Preamble**: it is in a sandbox, the Gates this Run will check (by command), commit and do
-   not push, and say so when the network blocks something rather than work around it. A
+   not push, say so in its Final message when the network blocks something rather than work around
+   it, and end with a Stop line when it stops on purpose (see [The Run result](#the-run-result)). A
    `--detach`ed Run names the Gates its own background process re-resolves from
    `.crisol/config.toml`, not necessarily the ones the launching terminal saw — they can drift if
    that file changes in between (see ADR 0014's "Not addressed").
@@ -242,7 +243,7 @@ including warnings, goes to its log.
 |---|---|
 | `queued` | Reserved, waiting for a free Slot. Shown with the pid of the process that owns it. |
 | `running` | Holds a Slot and has its Clone. Shown with its pid. |
-| `verified` / `unverified` / `not-converged` | Finished; the Run result's Status, followed by its `reason` when there is one. |
+| `verified` / `unverified` / `not-converged` / `parked` / `checkpoint` | Finished; the Run result's Status, followed by its `reason` when there is one. |
 | `dead` | Died without writing a Run result, for example after `kill -9`. If it had made its Clone, `crisol recover` brings back its branch. A Run that died while queued never made one, so there is nothing to bring back. |
 
 `crisol logs <run>` prints that Run's log. An id that is not a Run fails with a plain message.
@@ -509,7 +510,8 @@ The fields are only ever added within 0.x, never renamed or removed:
   "blocked": [],
   "warnings": [],
   "fetchBack": true,
-  "finishedAt": 1732104000000
+  "finishedAt": 1732104000000,
+  "finalMessage": "Done: `bun test` is green."
 }
 ```
 
@@ -533,6 +535,13 @@ wall exists ([ADR 0003](docs/adr/0003-run-result-reports-network-open-until-the-
 and `learn` or `open` with `--network`; a `learn` Run adds `reached`. See [Network](#network) for
 `blocked` and `reached`. `finishedAt` is when this result was written, in epoch milliseconds — what
 [`crisol gc`](#garbage-collection)'s 7-day rule reads, never a dir's own birthtime.
+
+`finalMessage` is the agent's last message of the Run's last iteration, verbatim as the Adapter
+received it (Claude Code's `result`), on every status; it is absent only when no iteration
+finished. Crisol reads one thing in it: a **Stop line**, the agent's way to stop on purpose. When
+the message's last non-blank line is exactly `CRISOL-STOP: parked` or `CRISOL-STOP: checkpoint`,
+Crisol runs no Gate and never resumes the session; `status` is `parked` or `checkpoint`, with no
+`reason`. Both are a finished Run, not an error: the CLI exits 0, so read `status`.
 
 ### Where things live
 
@@ -581,7 +590,7 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 
 Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone**, **Fetch-back**,
 **Gate**, **Adapter**, **Slot**, **Run lock**, **Fan-out**, **Detached Run**, **Secret**, **SecretStore**,
-**Service**, **Preamble**, **Context**, **Template**. Each term is defined in
+**Service**, **Preamble**, **Context**, **Template**, **Final message**, **Stop line**. Each term is defined in
 [`docs/GLOSSARY.md`](docs/GLOSSARY.md). The decisions behind Crisol's shape are recorded in
 [`docs/adr/`](docs/adr/):
 
@@ -603,6 +612,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0016](docs/adr/0016-two-layer-image-tenaza-absent-cache-key-and-dependency-install.md): the Project layer is read from the host working tree and cached by its own content hash, with Crisol's own default gaining the spec's full toolchain (git, Node, Bun, Python, `gh`, `rg`); the Agent layer's cache key becomes a real hash of (Project layer image, agent version, Tenaza version), the Tenaza component a fixed placeholder until ticket 15 exists; dependency install runs as Crisol's own infra step before the agent launches, the package manager detected from the Clone's own lockfile, its cache in one shared Docker volume fixed up for whichever user owns the Sandbox via `docker exec -u root`
 - [0017](docs/adr/0017-provider-failure-is-adapter-owned-and-resolves-like-a-ceiling.md): a provider failure is a new `ProviderFailureError` only the Adapter can throw (the real Claude Code Adapter's exact wire format is unverified and left generic); it resolves `run()` like the ceiling, rather than rejecting; `--json` now prints the Run result on every exit that computed one, by attaching it to the thrown error rather than changing which exits reject (amends ADR 0010); a provider failure aborts a sibling Run still waiting for its Slot via a new `onProviderFailure` callback; `--cpus`/`--memory` cap the Sandbox container alone, default 2 CPUs / 4 GB, overridable in `~/.crisol/config`
 - [0018](docs/adr/0018-gc-ages-runs-by-a-stored-finishedat-and-verifies-the-host-branch-live.md): `RunResult` gains `finishedAt` (a dir's own birthtime cannot be back-dated, verified live) for `crisol gc`'s 7-day rule; "the recorded commit" is read live from the Clone's own branch tip, never persisted; `--include-failed` lifts only the status restriction, never the age or branch-verification checks; the confirmation prompt is one `y`/`yes` comparison with no `--yes` escape hatch (ADR 0013's lesson); `gc` deletes exactly `repo/` and the per-Run `network/` dir; the size-warning threshold is a plain, overridable byte count (`gc_warn_bytes`)
+- [0019](docs/adr/0019-the-final-message-is-what-a-turn-resolves-with-and-the-stop-line-is-its-last-line.md): `launch`/`resumeWithFeedback` resolve with the turn's last message (amends ADR 0005's `Promise<void>`), kept as `finalMessage` from the last iteration only; the Stop line is `CRISOL-STOP: parked` or `CRISOL-STOP: checkpoint`, exact, on the last non-blank line; it is read before the Gates, even with none declared; `parked` and `checkpoint` resolve `run()` and exit 0
 
 ## Development
 
