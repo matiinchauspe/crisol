@@ -965,10 +965,14 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     }
   };
 
+  // Cleared before the await: a throw here leaves no message, not the prior turn's.
+  const runTurn = async (turn: Promise<string | void>): Promise<void> => {
+    finalMessage = undefined;
+    keepTurn(await turn);
+  };
+
   const converge = async (ctx: AdapterContext): Promise<void> => {
-    keepTurn(
-      await (continued !== undefined ? adapter.continueSession!(ctx, continued.sessionId, prompt) : adapter.launch(ctx)),
-    );
+    await runTurn(continued !== undefined ? adapter.continueSession!(ctx, continued.sessionId, prompt) : adapter.launch(ctx));
     iterations = 1;
     const startedAt = Date.now();
 
@@ -1020,7 +1024,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       }
 
       appendLog(logPath, `resuming with feedback for failing Gate "${firstFailure.cmd}"`);
-      keepTurn(await adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure)));
+      await runTurn(adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure)));
       iterations += 1;
     }
   };
