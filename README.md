@@ -122,7 +122,7 @@ crisol init [--adapter <fake|claude-code>]
 | `--prompt <name>` | none | Wraps the Task in a template. See [The Task the agent gets](#the-task-the-agent-gets). |
 | `--base <ref>` | your current `HEAD` | Branch, tag or sha to cut the Run's branch from. It must be reachable from a local branch, a tag or `HEAD`, because that is all the Clone receives. To use `origin/main`, check it out or fast-forward a local branch onto it first. |
 | `--name <branch>` | `crisol/<id>` | The branch name the Run leaves in your repo. Refused before anything happens if it clashes with an existing branch, a tag, or a branch path (for example `feat` vs `feat/x`). Only with a single Task. |
-| `--continue <branch>` | none | Takes up again the finished Run whose Run result names this branch, with the Task as the new request. Not with `--name`, `--base`, `--detach` or several Tasks. See [Continue a Run](#continue-a-run). |
+| `--continue <branch>` | none | Takes up again the finished Run whose own Clone still holds this branch, with the Task as the new request. Not with `--name`, `--base`, `--detach` or several Tasks. See [Continue a Run](#continue-a-run). |
 | `--gate <cmd>` | none | A command whose exit code decides whether the work is right. Repeatable. Any `--gate` replaces your repo's own `.crisol/config.toml` Gates entirely — it never merges with them. |
 | `--max-iterations <n>` | `5` | Overrides how many Gate-fail-then-resume attempts this Run gets before `not-converged`. Must be a positive integer. |
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
@@ -286,18 +286,19 @@ $ crisol run --continue crisol/9f496a56 --file review.md --json
 ```
 
 A **Continuation** sends a new request to the agent of a finished Run, with its context, on the same
-branch. Crisol finds the Run whose Run result names the branch, re-takes its Run lock and a Slot,
-starts a new Sandbox over the same Clone, and resumes the agent's own session with the request. The
-Gates run as in any Run — `--gate` when given, else the ones the Run had — and a Stop line ends it
-the same way. Fetch-back then moves the existing branch forward.
+branch. Crisol finds the Run whose own Clone still holds the branch, re-takes its Run lock and a
+Slot, starts a new Sandbox over that same Clone, and resumes the agent's own session with the
+request. The Gates run as in any Run — `--gate` when given, else the ones the Run had — and a Stop
+line ends it the same way. Fetch-back then moves the existing branch forward.
 
 `result.json` is rewritten with this round's `status`, `finalMessage` and a new `finishedAt`; the
-`log` keeps every round. A branch no Run names, or two Runs name, is refused before anything
-starts, as is a Run `crisol gc` has collected. So is a branch checked out in your repo or one of its
-worktrees, or one whose tip in your repo no longer matches the Run's Clone — either would leave the
-Clone diverged from your repo for good once a round ran on top of it, so both are checked, and
-reported by name, before any Sandbox starts rather than only at Fetch-back. The agent's session
-survives its Sandbox because Crisol keeps it under the Run dir, in `sessions/`.
+`log` keeps every round. A branch no Run's Clone holds — nobody ever named it, its Run ended before
+a Slot, or `crisol gc` already collected it — is refused before anything starts; so is one two Runs'
+Clones both hold, naming both. So is a branch checked out in your repo or one of its worktrees, or
+one whose tip in your repo no longer matches the Run's Clone — either would leave the Clone diverged
+from your repo for good once a round ran on top of it, so both are checked, and reported by name,
+before any Sandbox starts rather than only at Fetch-back. The agent's session survives its Sandbox
+because Crisol keeps it under the Run dir, in `sessions/`.
 
 ### Network
 
@@ -675,6 +676,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0021](docs/adr/0021-crisol-init-writes-only-what-is-missing-and-declares-the-real-adapter.md): `crisol init` writes only the files a repo lacks; Gates come from `typecheck`, `lint` and `test` scripts; the `## Sandbox` block declares `--adapter claude-code`, since the default Adapter is still the stand-in; accepting the learn offer writes the reached hosts, which `crisol run --network learn` never does; the CLI's stand-in now ends each turn with a Final message
 - [0022](docs/adr/0022-gc-probes-and-holds-the-run-lock-before-collecting.md): `planGc` probes each candidate's Run lock the way `recover` does, skipping a held one as `in-use`; a lock it takes is kept open on the returned `GcCandidate` rather than released, so the caller holds it across the confirmation prompt and releases it only once the Run is either declined or collected (amends ADR 0018, which never considered a Continuation)
 - [0023](docs/adr/0023-a-continuation-pre-flights-its-branch-before-any-sandbox-starts.md): `findContinuedRun` refuses a branch checked out in the host repo or one of its worktrees (`git worktree list --porcelain`), or one whose tip there no longer matches the Run's Clone, before any Slot or Sandbox; Fetch-back's own fast-forward-only refusal stays as the race window's last line of defense (amends ADR 0020, resolving two of its "Known limits")
+- [0024](docs/adr/0024-a-continuation-finds-its-run-by-a-live-clone-not-a-run-result.md): a Run claims its branch only when its own Clone still has a local branch by that name, never merely because `result.json` names it; a Run that ended before a Slot, or whose Clone `crisol gc` collected, no longer claims, so reusing a `--name` after that no longer refuses `--continue` as claimed by two Runs forever; when a Clone-less Run's result still names the branch, the refusal says so and names the true cause (`crisol gc` only when that Run's own Fetch-back had completed, never otherwise) rather than claiming nobody named it (amends ADR 0020)
 
 ## Development
 
