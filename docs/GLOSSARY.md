@@ -79,7 +79,9 @@ _Avoid_: Worker, thread, lock (a Slot is what a Run holds, not the lock mechanis
 **Run lock**:
 The OS file lock a live Run holds on its own dir (`runs/<id>/lock`) from reservation until its
 Run result is written. A Run whose lock can be taken is dead, and `crisol recover` may bring back
-its branch.
+its branch. A Continuation re-takes the same lock for its round, and `crisol gc` takes it too,
+from the moment it lists a Run as collectable until it is collected or the plan is declined, so
+neither ever acts on the other's Clone.
 _Avoid_: Slot (a Slot bounds how many Runs execute at once; a dead Run's Slot may already belong to
 another Run), pid file
 

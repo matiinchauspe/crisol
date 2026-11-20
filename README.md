@@ -499,8 +499,12 @@ crisol gc [--include-failed]
 
 Disk is freed only on request. `crisol gc` collects a Run's `repo/` (its Clone), its Allowlist
 `network/` dir and its agent's `sessions/` once ALL of these hold: Fetch-back completed, 7 days passed since the Run finished,
-and the branch is still in the host repo at the same commit the Clone cut it from — a branch moved,
-rebased or deleted since is refused, naming why. A collected Run can no longer be continued.
+the branch is still in the host repo at the same commit the Clone cut it from — a branch moved,
+rebased or deleted since is refused, naming why — and its Run lock is free. A Run whose lock is
+held, because a Continuation is queued or running, is refused the same way, reported in use. `gc`
+holds that lock itself from the moment it lists a Run as ready to collect until it is actually
+collected, so a Continuation cannot start on a Clone `gc` is about to delete; it is freed again if
+you decline. A collected Run can no longer be continued.
 `log`, `result.json`, `lock`, `pid` and `prompt` are never touched, and `gc` never deletes a branch, whatever you confirm. `--include-failed` adds
 `not-converged` Runs to what counts, on top of every other check above — it does not waive any of
 them. A Run still missing its Fetch-back is never collected either way; run `crisol recover` first.
@@ -667,6 +671,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0019](docs/adr/0019-the-final-message-is-what-a-turn-resolves-with-and-the-stop-line-is-its-last-line.md): `launch`/`resumeWithFeedback` resolve with the turn's last message (amends ADR 0005's `Promise<void>`), kept as `finalMessage` from the last iteration only; the Stop line is `CRISOL-STOP: parked` or `CRISOL-STOP: checkpoint`, exact, on the last non-blank line; it is read before the Gates, even with none declared; `parked` and `checkpoint` resolve `run()` and exit 0
 - [0020](docs/adr/0020-a-continuation-re-enters-its-runs-own-dir-and-keeps-only-the-session-transcripts.md): a Continuation keeps its Run's id, dir and lock and rewrites `result.json`; an Adapter names a `sessionStore` Crisol mounts from `runs/<id>/sessions/` (Claude Code: `~/.claude/projects` only, so the image's `settings.json` stays visible); the Gates default to the Run's own, kept in `gates.json`; Fetch-back stays fast-forward only
 - [0021](docs/adr/0021-crisol-init-writes-only-what-is-missing-and-declares-the-real-adapter.md): `crisol init` writes only the files a repo lacks; Gates come from `typecheck`, `lint` and `test` scripts; the `## Sandbox` block declares `--adapter claude-code`, since the default Adapter is still the stand-in; accepting the learn offer writes the reached hosts, which `crisol run --network learn` never does; the CLI's stand-in now ends each turn with a Final message
+- [0022](docs/adr/0022-gc-probes-and-holds-the-run-lock-before-collecting.md): `planGc` probes each candidate's Run lock the way `recover` does, skipping a held one as `in-use`; a lock it takes is kept open on the returned `GcCandidate` rather than released, so the caller holds it across the confirmation prompt and releases it only once the Run is either declined or collected (amends ADR 0018, which never considered a Continuation)
 
 ## Development
 
