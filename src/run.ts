@@ -29,6 +29,7 @@ import {
   addedLines,
   branchExists,
   branchSha,
+  checkedOutWorktree,
   checkoutBranch,
   checkoutNewBranch,
   cloneLocal,
@@ -498,6 +499,30 @@ function readKeptSessionId(id: string, home: string): string | undefined {
   }
 }
 
+/**
+ * Both failures below leave the Clone's branch diverged from the host for good once a round has
+ * run on top of it, so a Continuation checks for them before any Sandbox starts rather than only
+ * at Fetch-back.
+ */
+function assertBranchContinuable(hostRepoPath: string, clonePath: string, branch: string): void {
+  const worktree = checkedOutWorktree(hostRepoPath, branch);
+  if (worktree !== undefined) {
+    throw new Error(
+      `Branch "${branch}" is checked out at ${worktree}; Fetch-back cannot update a branch git has ` +
+        `checked out. Check out something else there, then continue "${branch}" again.`,
+    );
+  }
+  const hostSha = branchSha(hostRepoPath, branch);
+  const cloneSha = branchSha(clonePath, branch);
+  if (hostSha !== cloneSha) {
+    throw new Error(
+      `Branch "${branch}" is at ${hostSha ?? "no such branch"} in ${hostRepoPath}, but at ` +
+        `${cloneSha ?? "no such branch"} in its Run's Clone. A Continuation needs the two to match, so none ` +
+        `started; which side to bring forward is yours to decide.`,
+    );
+  }
+}
+
 function findContinuedRun(hostRepoPath: string, home: string, branch: string): ContinuedRun {
   const owners = runsOwningBranch(home, hostRepoPath, branch);
   if (owners.length === 0) {
@@ -513,9 +538,11 @@ function findContinuedRun(hostRepoPath: string, home: string, branch: string): C
     );
   }
   const id = owners[0]!;
-  if (!existsSync(runRepoPath(id, home))) {
+  const clonePath = runRepoPath(id, home);
+  if (!existsSync(clonePath)) {
     throw new Error(`Run ${id}'s Clone is gone (\`crisol gc\` collected it), so branch "${branch}" cannot be continued.`);
   }
+  assertBranchContinuable(hostRepoPath, clonePath, branch);
   const sessionId = readKeptSessionId(id, home);
   if (sessionId === undefined) {
     throw new Error(`Run ${id} kept no agent session, so branch "${branch}" cannot be continued.`);

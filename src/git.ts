@@ -127,6 +127,25 @@ export function branchSha(repoPath: string, name: string): string | undefined {
   return result.exitCode === 0 ? result.stdout.trim() : undefined;
 }
 
+/**
+ * The worktree path where `branch` is currently checked out — the host repo itself or one of its
+ * linked worktrees — or `undefined` when it is checked out nowhere. `git fetch` refuses to update
+ * a branch that is any checkout's current branch.
+ */
+export function checkedOutWorktree(hostRepoPath: string, branch: string): string | undefined {
+  const lines = run(["git", "-C", hostRepoPath, "worktree", "list", "--porcelain"]).stdout.split("\n");
+  const wantedBranch = `branch refs/heads/${branch}`;
+  let worktreePath: string | undefined;
+  for (const line of lines) {
+    if (line.startsWith("worktree ")) {
+      worktreePath = line.slice("worktree ".length).trim();
+    } else if (line === wantedBranch) {
+      return worktreePath;
+    }
+  }
+  return undefined;
+}
+
 /** `git fetch` can exit 0 without having brought back the right object. */
 export function assertFetchedBack(ref: string, hostSha: string, cloneSha: string): void {
   if (hostSha !== cloneSha) {
