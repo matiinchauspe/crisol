@@ -275,7 +275,7 @@ including warnings, goes to its log.
 | `queued` | Reserved, waiting for a free Slot. Shown with the pid of the process that owns it. |
 | `running` | Holds a Slot and has its Clone. Shown with its pid. |
 | `verified` / `unverified` / `not-converged` / `parked` / `checkpoint` | Finished; the Run result's Status, followed by its `reason` when there is one. |
-| `dead` | Died without writing a Run result, for example after `kill -9`. If it had made its Clone, `crisol recover` brings back its branch. A Run that died while queued never made one, so there is nothing to bring back. |
+| `dead` | Died without writing a Run result for its current round, for example after `kill -9` — a Continuation killed mid-round shows `dead` too, never the round before it. If it had made its Clone, `crisol recover` brings back its branch. A Run that died while queued never made one, so there is nothing to bring back. |
 
 `crisol logs <run>` prints that Run's log. An id that is not a Run fails with a plain message.
 
@@ -299,6 +299,11 @@ one whose tip in your repo no longer matches the Run's Clone — either would le
 from your repo for good once a round ran on top of it, so both are checked, and reported by name,
 before any Sandbox starts rather than only at Fetch-back. The agent's session survives its Sandbox
 because Crisol keeps it under the Run dir, in `sessions/`.
+
+While a round runs, `crisol status` shows it `queued` or `running`, never the previous round's
+outcome. One killed mid-round shows `dead`; after `crisol recover`, its result reads
+`not-converged`, `interrupted: …`, with no `finalMessage` — the round before it never wrote one, so
+that message is dropped rather than shown as this round's own.
 
 ### Network
 
@@ -593,11 +598,13 @@ and `learn` or `open` with `--network`; a `learn` Run adds `reached`. See [Netwo
 [`crisol gc`](#garbage-collection)'s 7-day rule reads, never a dir's own birthtime.
 
 `finalMessage` is the agent's last message of the Run's last iteration, verbatim as the Adapter
-received it (Claude Code's `result`), on every status; it is absent only when no iteration
-finished. Crisol reads one thing in it: a **Stop line**, the agent's way to stop on purpose. When
-the message's last non-blank line is exactly `CRISOL-STOP: parked` or `CRISOL-STOP: checkpoint`,
-Crisol runs no Gate and never resumes the session; `status` is `parked` or `checkpoint`, with no
-`reason`. Both are a finished Run, not an error: the CLI exits 0, so read `status`.
+received it (Claude Code's `result`), on every status; it is absent when no iteration finished, or
+when `crisol recover` settles a Continuation killed mid-round — that message belonged to the round
+before it, not this one. Crisol reads one thing in it: a **Stop line**, the agent's way to stop on
+purpose. When the message's last non-blank line is exactly `CRISOL-STOP: parked` or
+`CRISOL-STOP: checkpoint`, Crisol runs no Gate and never resumes the session; `status` is `parked`
+or `checkpoint`, with no `reason`. Both are a finished Run, not an error: the CLI exits 0, so read
+`status`.
 
 ### Where things live
 
@@ -677,6 +684,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0022](docs/adr/0022-gc-probes-and-holds-the-run-lock-before-collecting.md): `planGc` probes each candidate's Run lock the way `recover` does, skipping a held one as `in-use`; a lock it takes is kept open on the returned `GcCandidate` rather than released, so the caller holds it across the confirmation prompt and releases it only once the Run is either declined or collected (amends ADR 0018, which never considered a Continuation)
 - [0023](docs/adr/0023-a-continuation-pre-flights-its-branch-before-any-sandbox-starts.md): `findContinuedRun` refuses a branch checked out in the host repo or one of its worktrees (`git worktree list --porcelain`), or one whose tip there no longer matches the Run's Clone, before any Slot or Sandbox; Fetch-back's own fast-forward-only refusal stays as the race window's last line of defense (amends ADR 0020, resolving two of its "Known limits")
 - [0024](docs/adr/0024-a-continuation-finds-its-run-by-a-live-clone-not-a-run-result.md): a Run claims its branch only when its own Clone still has a local branch by that name, never merely because `result.json` names it; a Run that ended before a Slot, or whose Clone `crisol gc` collected, no longer claims, so reusing a `--name` after that no longer refuses `--continue` as claimed by two Runs forever; when a Clone-less Run's result still names the branch, the refusal says so and names the true cause (`crisol gc` only when that Run's own Fetch-back had completed, never otherwise) rather than claiming nobody named it (amends ADR 0020)
+- [0025](docs/adr/0025-status-and-recover-tell-a-stale-result-from-the-current-round.md): `readEntry` probes the Run lock before trusting ANY result, not only a missing one, and reads a result older than the lock's own last reservation as `dead` rather than `finished`; `crisol recover` renames `markFetchedBack` to `settleResult`, which rewrites a stale result whole — `not-converged`, an `interrupted` reason, a fresh `finishedAt`, no `finalMessage` — rather than only flipping `fetchBack` on it (amends ADR 0020, resolving its remaining "Known limit")
 
 ## Development
 
