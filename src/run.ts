@@ -60,7 +60,8 @@ import {
   runSessionStorePath,
   runsRoot,
 } from "./paths";
-import { readResult, runsOwningBranch } from "./runs";
+import { readResult, runsNamingBranch } from "./runs";
+import type { BranchClaim } from "./runs";
 import { KeychainSecretStore } from "./secret-store";
 import type { SecretStore } from "./secret-store";
 import { acquireSlot, adoptLock, tryLockRun } from "./slots";
@@ -523,13 +524,27 @@ function assertBranchContinuable(hostRepoPath: string, clonePath: string, branch
   }
 }
 
+/**
+ * `crisol gc` only ever collects a Run whose Fetch-back already completed (`planGc`'s own first
+ * check), so a claimant with no Clone and `fetchBack: true` can only have lost it to `gc`; one with
+ * `fetchBack: false` never made a Clone to begin with, since nothing else ever removes `repo/`.
+ */
+function describeCloneless(claim: BranchClaim, branch: string): string {
+  const cause = claim.fetchBack ? "`crisol gc` collected it" : "it ended before it ever held a Slot and never made one";
+  return `Run ${claim.run} names branch "${branch}" in its Run result but has no Clone to resume from (${cause})`;
+}
+
 function findContinuedRun(hostRepoPath: string, home: string, branch: string): ContinuedRun {
-  const owners = runsOwningBranch(home, hostRepoPath, branch);
+  const claims = runsNamingBranch(home, hostRepoPath, branch);
+  const owners = claims.filter((claim) => claim.hasClone).map((claim) => claim.run);
   if (owners.length === 0) {
-    throw new Error(
-      `No finished Run of ${hostRepoPath} names branch "${branch}" in its Run result, so there is nothing to ` +
-        "continue. `crisol status` lists every Run and its branch.",
-    );
+    if (claims.length === 0) {
+      throw new Error(
+        `No finished Run of ${hostRepoPath} names branch "${branch}" in its Run result, so there is nothing to ` +
+          "continue. `crisol status` lists every Run and its branch.",
+      );
+    }
+    throw new Error(`${claims.map((claim) => describeCloneless(claim, branch)).join("; ")}, so it cannot be continued.`);
   }
   if (owners.length > 1) {
     throw new Error(

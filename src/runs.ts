@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { branchExists } from "./git";
 import { runDir, runLockPath, runLogPath, runPidPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import { readRunLockRecord } from "./recover";
 import type { RunResult } from "./run";
@@ -23,11 +24,34 @@ export function readResult(id: string, home: string): RunResult | undefined {
   }
 }
 
-/** The finished Runs of `hostRepoPath` whose Run result names `branch`; another repo's same-named branch is not a claim. */
-export function runsOwningBranch(home: string, hostRepoPath: string, branch: string): string[] {
+export interface BranchClaim {
+  run: string;
+  /** Whether this Run's own Clone still has a local branch by this name — only this one can be resumed from. */
+  hasClone: boolean;
+  /** Whether Fetch-back ever completed — the one state `crisol gc` requires before it will ever remove a Clone. */
+  fetchBack: boolean;
+}
+
+/**
+ * Every finished Run of `hostRepoPath` whose Run result names `branch`, each flagged with whether
+ * its own Clone still holds it. Another repo's same-named branch is not a claim at all.
+ */
+export function runsNamingBranch(home: string, hostRepoPath: string, branch: string): BranchClaim[] {
   return listRunIds(home)
     .sort()
-    .filter((id) => readResult(id, home)?.branch === branch && readRunLockRecord(id, home)?.host === hostRepoPath);
+    .filter((id) => readResult(id, home)?.branch === branch && readRunLockRecord(id, home)?.host === hostRepoPath)
+    .map((id) => ({
+      run: id,
+      hasClone: branchExists(runRepoPath(id, home), branch),
+      fetchBack: readResult(id, home)!.fetchBack,
+    }));
+}
+
+/** The finished Runs of `hostRepoPath` whose own Clone still holds `branch` — the ones a Continuation can resume from. */
+export function runsOwningBranch(home: string, hostRepoPath: string, branch: string): string[] {
+  return runsNamingBranch(home, hostRepoPath, branch)
+    .filter((claim) => claim.hasClone)
+    .map((claim) => claim.run);
 }
 
 /** `--detach` removes a reservation it could not start, possibly while this reads it. */
