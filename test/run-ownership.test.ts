@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { checkoutNewBranch, cloneLocal, shortSha } from "../src/git";
 import { runDir, runLockPath, runPidPath, runRepoPath, runResultPath } from "../src/paths";
-import { listRuns } from "../src/runs";
+import { listRuns, runsOwningBranch } from "../src/runs";
 import { DarwinFlockSlotLock } from "../src/slots";
 import type { HeldLock, SlotLock } from "../src/slots";
 import { runCli } from "./support/cli";
@@ -25,6 +26,65 @@ function fakeRunDir(home: string, id: string, host: string): void {
   mkdirSync(runDir(id, home), { recursive: true });
   writeFileSync(runLockPath(id, home), JSON.stringify({ host, branch: `crisol/${id}` }));
 }
+
+/** A finished Run's lock and Run result naming `branch` — the state every finished Run leaves,
+ *  whether or not it ever made a Clone. */
+function fakeFinishedRun(home: string, id: string, host: string, branch: string): void {
+  mkdirSync(runDir(id, home), { recursive: true });
+  writeFileSync(runLockPath(id, home), JSON.stringify({ host, branch }));
+  writeFileSync(
+    runResultPath(id, home),
+    JSON.stringify({
+      run: id,
+      branch,
+      base: "main@0000000000000000000000000000000000000000",
+      status: "not-converged",
+      iterations: 0,
+      gates: [],
+      network: "allowlist",
+      blocked: [],
+      warnings: [],
+      fetchBack: false,
+      finishedAt: Date.now(),
+    }),
+  );
+}
+
+describe("runsOwningBranch counts only a Run whose Clone still holds the branch", () => {
+  test("a Run that ended before it ever held a Slot, with no Clone at all, does not claim", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      fakeFinishedRun(home.path, "noclone1", repo.path, "crisol/noclone1");
+
+      expect(runsOwningBranch(home.path, repo.path, "crisol/noclone1")).toEqual([]);
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("a Run whose Clone crisol gc already collected no longer claims", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const id = "gcdone1";
+      const branch = "crisol/gcdone1";
+      fakeFinishedRun(home.path, id, repo.path, branch);
+      const clonePath = runRepoPath(id, home.path);
+      cloneLocal(repo.path, clonePath);
+      checkoutNewBranch(clonePath, branch, shortSha(repo.path, "HEAD"));
+      expect(runsOwningBranch(home.path, repo.path, branch)).toEqual([id]);
+
+      rmSync(clonePath, { recursive: true, force: true }); // what `collectRun` leaves behind
+
+      expect(runsOwningBranch(home.path, repo.path, branch)).toEqual([]);
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+});
 
 describe("a detached Run always ends with a Run result", () => {
   test("killed the moment --detach returns, it still writes its Run result", async () => {

@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Adapter, AdapterContext } from "../src/adapter";
 import { DEFAULT_SCRIPT, FakeAdapter, GATE_FAILING_SCRIPT } from "../src/adapters/fake";
 import type { FakeSession } from "../src/adapters/fake";
-import { runDir } from "../src/paths";
+import { discoverGitRoot } from "../src/git";
+import { runDir, runLockPath, runRepoPath, runResultPath } from "../src/paths";
 import { run } from "../src/run";
 import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
@@ -68,6 +69,27 @@ function git(repoPath: string, args: string[]): string {
   const proc = Bun.spawnSync(["git", "-C", repoPath, ...args], { stdout: "pipe", stderr: "pipe" });
   if (proc.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${proc.stderr.toString("utf8")}`);
   return proc.stdout.toString("utf8").trim();
+}
+
+/** A Run that ended before it ever held a Slot: its lock and Run result name `branch`, but it made no Clone. */
+function fakeUnstartedRun(home: string, id: string, host: string, branch: string): void {
+  mkdirSync(runDir(id, home), { recursive: true });
+  writeFileSync(runLockPath(id, home), JSON.stringify({ host, branch }));
+  const result: RunResult = {
+    run: id,
+    branch,
+    base: "main@0000000000000000000000000000000000000000",
+    status: "not-converged",
+    reason: "error: Docker engine is not reachable",
+    iterations: 0,
+    gates: [],
+    network: "allowlist",
+    blocked: [],
+    warnings: [],
+    fetchBack: false,
+    finishedAt: Date.now(),
+  };
+  writeFileSync(runResultPath(id, home), JSON.stringify(result, null, 2));
 }
 
 describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
@@ -299,6 +321,93 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
       }
     });
   }
+});
+
+describe("only a Run with a Clone claims its branch", () => {
+  test(
+    "after its Clone is gc'd and its name reused, --continue finds only the live Run",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "reused", adapter: fakeAgent() });
+        rmSync(runRepoPath(first.run, home.path), { recursive: true, force: true }); // what `crisol gc` leaves behind
+        git(repo.path, ["branch", "-D", "reused"]);
+
+        const second = await run({ task: "two", cwd: repo.path, home: home.path, name: "reused", adapter: fakeAgent() });
+
+        const continued = await run({
+          task: "three",
+          cwd: repo.path,
+          home: home.path,
+          continue: "reused",
+          adapter: fakeAgent({ continue: "round two" }),
+        });
+
+        expect(continued.run).toBe(second.run);
+        expect(runIds(home.path).sort()).toEqual([first.run, second.run].sort());
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    180_000,
+  );
+
+  test(
+    "a Run whose Clone crisol gc collected is still refused by naming gc as the true cause",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "collected", adapter: fakeAgent() });
+        rmSync(runRepoPath(first.run, home.path), { recursive: true, force: true });
+
+        let failure: unknown;
+        try {
+          await run({ task: "more", cwd: repo.path, home: home.path, continue: "collected", adapter: fakeAgent() });
+        } catch (error) {
+          failure = error;
+        }
+
+        const message = String((failure as Error | undefined)?.message);
+        expect(message).toContain(`Run ${first.run} names branch "collected" in its Run result but has no Clone`);
+        expect(message).toContain("`crisol gc` collected it");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "a Run that never held a Slot is refused by naming that, never gc, when its branch is continued",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        // `discoverGitRoot` resolves symlinks (macOS's /var -> /private/var), same as a real Run would.
+        fakeUnstartedRun(home.path, "ghost1234", discoverGitRoot(repo.path)!, "ghost");
+
+        let failure: unknown;
+        try {
+          await run({ task: "more", cwd: repo.path, home: home.path, continue: "ghost", adapter: fakeAgent() });
+        } catch (error) {
+          failure = error;
+        }
+
+        const message = String((failure as Error | undefined)?.message);
+        expect(message).toContain(`Run ghost1234 names branch "ghost" in its Run result but has no Clone`);
+        expect(message).toContain("ended before it ever held a Slot");
+        expect(message).not.toContain("crisol gc");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
 });
 
 describe("a Continuation checks its branch is fetchable before any Sandbox starts", () => {
