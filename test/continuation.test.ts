@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Adapter, AdapterContext } from "../src/adapter";
 import { DEFAULT_SCRIPT, FakeAdapter, GATE_FAILING_SCRIPT } from "../src/adapters/fake";
@@ -10,7 +11,7 @@ import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
-import { commitSubjects, onlyRunId, readLog, readResult, refSha, runIds } from "./support/runState";
+import { cloneSha, commitSubjects, readLog, readResult, refSha, runIds } from "./support/runState";
 
 const STORE = "/crisol-fake-sessions";
 
@@ -41,6 +42,22 @@ function recordingContinuations(inner: Adapter): { adapter: Adapter; calls: { se
     },
   };
   return { adapter, calls };
+}
+
+/** Runs `beforeTurn` right before the Continuation's first turn, once pre-flight has already passed. */
+function hostMovesDuringContinuation(inner: Adapter, beforeTurn: () => void): Adapter {
+  return {
+    sessionStore: inner.sessionStore,
+    declarePreStart: (projectImage: string) => inner.declarePreStart(projectImage),
+    launch: (ctx: AdapterContext) => inner.launch(ctx),
+    reportCompletion: (ctx: AdapterContext) => inner.reportCompletion(ctx),
+    resumeWithFeedback: (ctx: AdapterContext, feedback: string) => inner.resumeWithFeedback(ctx, feedback),
+    sessionId: () => inner.sessionId?.(),
+    async continueSession(ctx: AdapterContext, sessionId: string, request: string) {
+      beforeTurn();
+      return inner.continueSession!(ctx, sessionId, request);
+    },
+  };
 }
 
 function isAncestor(repoPath: string, ancestor: string, descendant: string): boolean {
@@ -196,29 +213,32 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
   );
 
   test(
-    "a Continuation whose work would not fast-forward the host branch is refused at Fetch-back, never forced",
+    "a host branch that moves during the round, after pre-flight already passed, is still refused at Fetch-back, never forced",
     async () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
-        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "diverged", adapter: fakeAgent() });
-        // A commit lands on the host branch meanwhile, so the Clone's next commit diverges from it.
-        const tree = git(repo.path, ["rev-parse", "diverged^{tree}"]);
-        const hostCommit = git(repo.path, ["commit-tree", tree, "-p", "diverged", "-m", "chore: a host-side commit"]);
-        git(repo.path, ["update-ref", "refs/heads/diverged", hostCommit]);
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "race", adapter: fakeAgent() });
+
+        let hostCommit = "";
+        const adapter = hostMovesDuringContinuation(fakeAgent({ continue: "round two" }), () => {
+          const tree = git(repo.path, ["rev-parse", "race^{tree}"]);
+          hostCommit = git(repo.path, ["commit-tree", tree, "-p", "race", "-m", "chore: a host-side commit mid-round"]);
+          git(repo.path, ["update-ref", "refs/heads/race", hostCommit]);
+        });
 
         let failure: unknown;
         try {
-          await run({ task: "more", cwd: repo.path, home: home.path, continue: "diverged", adapter: fakeAgent() });
+          await run({ task: "more", cwd: repo.path, home: home.path, continue: "race", adapter });
         } catch (error) {
           failure = error;
         }
 
         expect(String((failure as Error | undefined)?.message)).toMatch(/non-fast-forward|rejected/);
-        expect(refSha(repo.path, "diverged")).toBe(hostCommit);
+        expect(refSha(repo.path, "race")).toBe(hostCommit);
         const result = (failure as { result?: RunResult }).result;
         expect(result).toMatchObject({ run: first.run, fetchBack: false });
-        expect(readResult(onlyRunId(home.path), home.path)?.fetchBack).toBe(false);
+        expect(readResult(first.run, home.path)?.fetchBack).toBe(false);
       } finally {
         home.cleanup();
         repo.cleanup();
@@ -279,4 +299,60 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
       }
     });
   }
+});
+
+describe("a Continuation checks its branch is fetchable before any Sandbox starts", () => {
+  test(
+    "a branch checked out in a worktree of the host repo is refused, naming the worktree",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      const worktreePath = mkdtempSync(path.join(tmpdir(), "crisol-review-worktree-"));
+      try {
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "reviewed", adapter: fakeAgent() });
+        git(repo.path, ["worktree", "add", worktreePath, "reviewed"]);
+
+        await expect(
+          run({ task: "more", cwd: repo.path, home: home.path, continue: "reviewed", adapter: fakeAgent() }),
+        ).rejects.toThrow(worktreePath);
+
+        expect(runIds(home.path)).toEqual([first.run]);
+        expect(readResult(first.run, home.path)).toEqual(first);
+      } finally {
+        git(repo.path, ["worktree", "remove", "--force", worktreePath]);
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "a branch whose tip differs between the host and its Run's Clone is refused, naming both tips",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "diverged", adapter: fakeAgent() });
+        const cloneTip = refSha(repo.path, "diverged")!;
+        // A commit lands on the host branch meanwhile, so its tip no longer matches the Run's Clone.
+        const tree = git(repo.path, ["rev-parse", "diverged^{tree}"]);
+        const hostCommit = git(repo.path, ["commit-tree", tree, "-p", "diverged", "-m", "chore: a host-side commit"]);
+        git(repo.path, ["update-ref", "refs/heads/diverged", hostCommit]);
+
+        await expect(
+          run({ task: "more", cwd: repo.path, home: home.path, continue: "diverged", adapter: fakeAgent() }),
+        ).rejects.toThrow(new RegExp(`${hostCommit}.*${cloneTip}|${cloneTip}.*${hostCommit}`));
+
+        expect(refSha(repo.path, "diverged")).toBe(hostCommit);
+        expect(cloneSha(first.run, home.path, "diverged")).toBe(cloneTip);
+        expect(runIds(home.path)).toEqual([first.run]);
+        expect(readResult(first.run, home.path)).toEqual(first);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
 });
