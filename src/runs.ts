@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { branchExists } from "./git";
 import { runDir, runLockPath, runLogPath, runPidPath, runRepoPath, runResultPath, runsRoot } from "./paths";
-import { readRunLockRecord } from "./recover";
+import { readRunLockRecord, resultIsStale } from "./recover";
 import type { RunResult } from "./run";
 import { probeRunLock } from "./slots";
 import type { SlotLock } from "./slots";
@@ -92,7 +92,9 @@ function holdsLockFile(pid: number, lockPath: string): boolean | undefined {
 
 function readEntry(id: string, home: string, lock: SlotLock | undefined): RunEntry | undefined {
   const result = readResult(id, home);
-  if (result !== undefined) return { run: id, state: "finished", result };
+  if (result !== undefined && !resultIsStale(id, home, result)) {
+    return { run: id, state: "finished", result };
+  }
   // Without a record the Run may still be reserving, and taking its lock now would make that fail.
   const record = readRunLockRecord(id, home);
   if (record === undefined) return undefined;
@@ -101,10 +103,11 @@ function readEntry(id: string, home: string, lock: SlotLock | undefined): RunEnt
   if (probe === "gone") return undefined;
   if (probe) {
     try {
-      // The Run may have written its result and let go since the first read; holding the lock, the
-      // result is final either way.
+      // This result may have landed between the first read and now — the second read is not redundant.
       const finalResult = readResult(id, home);
-      if (finalResult !== undefined) return { run: id, state: "finished", result: finalResult };
+      if (finalResult !== undefined && !resultIsStale(id, home, finalResult)) {
+        return { run: id, state: "finished", result: finalResult };
+      }
       return { run: id, state: "dead", branch: record.branch };
     } finally {
       probe.release();
@@ -116,9 +119,10 @@ function readEntry(id: string, home: string, lock: SlotLock | undefined): RunEnt
   if (pid !== undefined) {
     const owns = holdsLockFile(pid, lockPath);
     if (owns === false) {
-      // Its owner is gone, so any result it wrote is already there; the first read may predate it.
       const finalResult = readResult(id, home);
-      if (finalResult !== undefined) return { run: id, state: "finished", result: finalResult };
+      if (finalResult !== undefined && !resultIsStale(id, home, finalResult)) {
+        return { run: id, state: "finished", result: finalResult };
+      }
       return { run: id, state: "dead", branch: record.branch };
     }
     if (owns === true) shownPid = pid;

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { listRunSandboxIds, removeRunSandboxes } from "./docker";
 import { branchSha, fetchBack } from "./git";
 import { removeNetworkByRunId } from "./network";
@@ -40,10 +40,44 @@ export function readRunLockRecord(id: string, home: string): RunLockRecord | und
   }
 }
 
-function markFetchedBack(id: string, home: string): void {
+/**
+ * The Run lock is rewritten at every round's own reservation, so one newer than the result it
+ * names proves a round began after that result was written and never wrote one.
+ */
+export function resultIsStale(id: string, home: string, result: RunResult): boolean {
+  if (typeof result.finishedAt !== "number") return false;
+  try {
+    // mtimeMs has a sub-ms fraction finishedAt lacks; floor it or a same-tick write reads as stale.
+    return Math.floor(statSync(runLockPath(id, home)).mtimeMs) > result.finishedAt;
+  } catch {
+    return false;
+  }
+}
+
+/** The field list deliberately omits the stale `finalMessage`. */
+function settleResult(id: string, home: string): void {
   const resultPath = runResultPath(id, home);
   if (!existsSync(resultPath)) return;
   const result = JSON.parse(readFileSync(resultPath, "utf8")) as RunResult;
+  if (resultIsStale(id, home, result)) {
+    const settled: RunResult = {
+      run: result.run,
+      branch: result.branch,
+      base: result.base,
+      status: "not-converged",
+      reason: "interrupted: the round ended before it wrote a result",
+      iterations: result.iterations,
+      gates: result.gates,
+      network: result.network,
+      blocked: result.blocked,
+      ...(result.reached !== undefined ? { reached: result.reached } : {}),
+      warnings: result.warnings,
+      fetchBack: true,
+      finishedAt: Date.now(),
+    };
+    writeFileSync(resultPath, JSON.stringify(settled, null, 2));
+    return;
+  }
   if (result.fetchBack) return;
   writeFileSync(resultPath, JSON.stringify({ ...result, fetchBack: true }, null, 2));
 }
@@ -80,7 +114,7 @@ async function recoverDeadRun(
   if (!existsSync(record.host)) return { run: id, kind: "failed", error: `its host repo ${record.host} is gone` };
 
   if (branchSha(record.host, record.branch) === cloneSha) {
-    markFetchedBack(id, home);
+    settleResult(id, home);
     return { run: id, kind: "up-to-date" };
   }
   try {
@@ -91,7 +125,7 @@ async function recoverDeadRun(
     return { run: id, kind: "failed", error: message };
   }
   appendLog(id, home, `fetch-back complete: ${record.branch} now in ${record.host} at ${cloneSha}`);
-  markFetchedBack(id, home);
+  settleResult(id, home);
   return { run: id, kind: "recovered", branch: record.branch, host: record.host, sha: cloneSha };
 }
 
