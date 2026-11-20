@@ -2,11 +2,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { Adapter } from "../src/adapter";
+import { FakeAdapter } from "../src/adapters/fake";
 import { addTrackedSize, collectRun, formatSizeWarning, planGc, reconcileTrackedSize, runDirSizeBytes, trackedRunsSizeBytes } from "../src/gc";
-import { checkoutNewBranch, cloneLocal, shortSha } from "../src/git";
-import { runDir, runLockPath, runLogPath, runNetworkDir, runRepoPath, runResultPath } from "../src/paths";
+import { checkoutNewBranch, cloneLocal, discoverGitRoot, shortSha } from "../src/git";
+import { runDir, runLockPath, runLogPath, runNetworkDir, runRepoPath, runResultPath, runSessionIdPath } from "../src/paths";
 import { run } from "../src/run";
 import type { RunResult } from "../src/run";
+import { tryLockRun } from "../src/slots";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
@@ -200,6 +202,59 @@ describe("planGc, no Docker needed", () => {
       const plan = planGc(home.path, { includeFailed: false });
       expect(plan.collectable).toEqual([]);
       expect(plan.skipped[0]).toMatchObject({ run: "r1", kind: "no-record" });
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("a Run whose lock is held (a live Run, or a queued or running Continuation) is skipped, reported in-use", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      writeFakeRun(home.path, repo.path, {
+        id: "r1",
+        branch: "crisol/r1",
+        status: "verified",
+        fetchBack: true,
+        finishedAt: Date.now() - 8 * DAY_MS,
+      });
+      const held = tryLockRun(runLockPath("r1", home.path));
+      expect(held).toBeDefined();
+      try {
+        const plan = planGc(home.path, { includeFailed: false });
+        expect(plan.collectable).toEqual([]);
+        expect(plan.skipped[0]).toMatchObject({ run: "r1", kind: "in-use" });
+      } finally {
+        held!.release();
+      }
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("a collectable Run keeps its lock held past planning, so nothing else can take it until released", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      writeFakeRun(home.path, repo.path, {
+        id: "r1",
+        branch: "crisol/r1",
+        status: "verified",
+        fetchBack: true,
+        finishedAt: Date.now() - 8 * DAY_MS,
+      });
+
+      const plan = planGc(home.path, { includeFailed: false });
+      expect(plan.collectable.map((c) => c.run)).toEqual(["r1"]);
+      // Still pending collection: a Continuation (or a second gc) cannot take the lock meanwhile.
+      expect(tryLockRun(runLockPath("r1", home.path))).toBeUndefined();
+
+      plan.collectable[0]!.release();
+      const afterRelease = tryLockRun(runLockPath("r1", home.path));
+      expect(afterRelease).toBeDefined();
+      afterRelease!.release();
     } finally {
       home.cleanup();
       repo.cleanup();
@@ -496,6 +551,38 @@ describe("crisol gc end to end, against a real Docker engine", () => {
       expect(gc.stdout).toContain("Nothing to collect.");
       expect(existsSync(runRepoPath(id, home.path))).toBe(true);
       expect(readLog(id, home.path)).toBeDefined();
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+
+  test("a Continuation is refused while gc holds the Run's lock, never running over a deleted Clone", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      // The real `run()` resolves `cwd` to the repo's canonical path (symlinks and all); the fake
+      // Run's lock record must name that same path, or `--continue` finds no owner for the branch.
+      const hostRepoPath = discoverGitRoot(repo.path)!;
+      writeFakeRun(home.path, hostRepoPath, {
+        id: "r1",
+        branch: "crisol/r1",
+        status: "verified",
+        fetchBack: true,
+        finishedAt: Date.now() - 8 * DAY_MS,
+      });
+      writeFileSync(runSessionIdPath("r1", home.path), "fake-session");
+
+      const plan = planGc(home.path, { includeFailed: false });
+      expect(plan.collectable.map((c) => c.run)).toEqual(["r1"]);
+      try {
+        await expect(
+          run({ task: "more", cwd: repo.path, home: home.path, continue: "crisol/r1", adapter: new FakeAdapter() }),
+        ).rejects.toThrow(/lock is already held/);
+        expect(existsSync(runRepoPath("r1", home.path))).toBe(true);
+      } finally {
+        plan.collectable[0]!.release();
+      }
     } finally {
       home.cleanup();
       repo.cleanup();
