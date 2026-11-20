@@ -422,7 +422,7 @@ function formatGcCandidate(candidate: { run: string; branch: string; sizeBytes: 
 
 /** The other skip kinds would nag about every too-young or wrong-status Run on every call. */
 function reportRefusal(skip: GcSkip): void {
-  if (skip.kind === "branch-moved" || skip.kind === "host-missing") {
+  if (skip.kind === "branch-moved" || skip.kind === "host-missing" || skip.kind === "in-use") {
     process.stderr.write(`Run ${skip.run}: refused, ${skip.why}.\n`);
   }
 }
@@ -453,12 +453,17 @@ async function runGcCommand(rest: string[]): Promise<number> {
   process.stdout.write("Delete these Run dirs? [y/N] ");
   if (!(await readConfirmation())) {
     console.log("Nothing deleted.");
+    for (const candidate of plan.collectable) candidate.release();
     reconcileTrackedSize(home);
     return 0;
   }
 
   for (const candidate of plan.collectable) {
-    collectRun(candidate.run, home);
+    try {
+      collectRun(candidate.run, home);
+    } finally {
+      candidate.release();
+    }
     console.log(`Run ${candidate.run}: collected, freed ~${formatGb(candidate.sizeBytes)}.`);
   }
   reconcileTrackedSize(home);

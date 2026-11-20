@@ -2,9 +2,10 @@ import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, writeFileSync
 import path from "node:path";
 import type { GlobalConfig } from "./config";
 import { branchSha } from "./git";
-import { runNetworkDir, runRepoPath, runSessionStorePath, runsRoot, runsSizeTrackerPath } from "./paths";
+import { runLockPath, runNetworkDir, runRepoPath, runSessionStorePath, runsRoot, runsSizeTrackerPath } from "./paths";
 import { readRunLockRecord } from "./recover";
 import { readResult } from "./runs";
+import { probeRunLock } from "./slots";
 
 export const GC_MIN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -21,9 +22,18 @@ export interface GcCandidate {
   host: string;
   /** What `collectRun` removes. */
   sizeBytes: number;
+  /** Releases the Run lock `planGc` took to prove the Run safe to collect. Idempotent. */
+  release(): void;
 }
 
-export type GcSkipKind = "not-fetched-back" | "not-converged" | "too-young" | "no-record" | "host-missing" | "branch-moved";
+export type GcSkipKind =
+  | "not-fetched-back"
+  | "not-converged"
+  | "too-young"
+  | "no-record"
+  | "host-missing"
+  | "branch-moved"
+  | "in-use";
 
 export interface GcSkip {
   run: string;
@@ -166,14 +176,23 @@ export function planGc(home: string, options: { includeFailed: boolean }): GcPla
     const clonePath = runRepoPath(id, home);
     if (!existsSync(clonePath)) continue; // already collected, or re-planned against the same result
 
+    // Held until collected or declined, so a Continuation cannot start on a Clone about to be deleted.
+    const lock = probeRunLock(runLockPath(id, home));
+    if (lock === "gone") continue; // raced with another process clearing the Run; nothing to plan
+    if (!lock) {
+      skipped.push({ run: id, kind: "in-use", why: "its Run lock is held; a Continuation is queued or running" });
+      continue;
+    }
+
     const outcome = hostBranchOutcome(record.host, clonePath, record.branch);
     if (!outcome.ok) {
+      lock.release();
       skipped.push({ run: id, kind: outcome.kind, why: outcome.why });
       continue;
     }
 
     const sizeBytes = runDirSizeBytes(id, home);
-    collectable.push({ run: id, branch: record.branch, host: record.host, sizeBytes });
+    collectable.push({ run: id, branch: record.branch, host: record.host, sizeBytes, release: () => lock.release() });
   }
 
   return { collectable, skipped };
