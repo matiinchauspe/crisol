@@ -289,13 +289,15 @@ A **Continuation** sends a new request to the agent of a finished Run, with its 
 branch. Crisol finds the Run whose Run result names the branch, re-takes its Run lock and a Slot,
 starts a new Sandbox over the same Clone, and resumes the agent's own session with the request. The
 Gates run as in any Run — `--gate` when given, else the ones the Run had — and a Stop line ends it
-the same way. Fetch-back then moves the existing branch forward: if the branch moved in your repo
-meanwhile, Fetch-back refuses it rather than overwrite your commit, and `fetchBack` is `false`.
+the same way. Fetch-back then moves the existing branch forward.
 
 `result.json` is rewritten with this round's `status`, `finalMessage` and a new `finishedAt`; the
 `log` keeps every round. A branch no Run names, or two Runs name, is refused before anything
-starts, as is a Run `crisol gc` has collected. The agent's session survives its Sandbox because
-Crisol keeps it under the Run dir, in `sessions/`.
+starts, as is a Run `crisol gc` has collected. So is a branch checked out in your repo or one of its
+worktrees, or one whose tip in your repo no longer matches the Run's Clone — either would leave the
+Clone diverged from your repo for good once a round ran on top of it, so both are checked, and
+reported by name, before any Sandbox starts rather than only at Fetch-back. The agent's session
+survives its Sandbox because Crisol keeps it under the Run dir, in `sessions/`.
 
 ### Network
 
@@ -672,6 +674,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0020](docs/adr/0020-a-continuation-re-enters-its-runs-own-dir-and-keeps-only-the-session-transcripts.md): a Continuation keeps its Run's id, dir and lock and rewrites `result.json`; an Adapter names a `sessionStore` Crisol mounts from `runs/<id>/sessions/` (Claude Code: `~/.claude/projects` only, so the image's `settings.json` stays visible); the Gates default to the Run's own, kept in `gates.json`; Fetch-back stays fast-forward only
 - [0021](docs/adr/0021-crisol-init-writes-only-what-is-missing-and-declares-the-real-adapter.md): `crisol init` writes only the files a repo lacks; Gates come from `typecheck`, `lint` and `test` scripts; the `## Sandbox` block declares `--adapter claude-code`, since the default Adapter is still the stand-in; accepting the learn offer writes the reached hosts, which `crisol run --network learn` never does; the CLI's stand-in now ends each turn with a Final message
 - [0022](docs/adr/0022-gc-probes-and-holds-the-run-lock-before-collecting.md): `planGc` probes each candidate's Run lock the way `recover` does, skipping a held one as `in-use`; a lock it takes is kept open on the returned `GcCandidate` rather than released, so the caller holds it across the confirmation prompt and releases it only once the Run is either declined or collected (amends ADR 0018, which never considered a Continuation)
+- [0023](docs/adr/0023-a-continuation-pre-flights-its-branch-before-any-sandbox-starts.md): `findContinuedRun` refuses a branch checked out in the host repo or one of its worktrees (`git worktree list --porcelain`), or one whose tip there no longer matches the Run's Clone, before any Slot or Sandbox; Fetch-back's own fast-forward-only refusal stays as the race window's last line of defense (amends ADR 0020, resolving two of its "Known limits")
 
 ## Development
 
