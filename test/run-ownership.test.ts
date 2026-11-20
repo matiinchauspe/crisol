@@ -210,6 +210,29 @@ describe("status trusts a pid only from the process that holds the Run", () => {
       repo.cleanup();
     }
   });
+
+  test("a finished Run with a fresh result is read without ever taking its lock", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    const id = "fresh001";
+    const branch = `crisol/${id}`;
+    try {
+      fakeFinishedRun(home.path, id, repo.path, branch);
+      const result = readResult(id, home.path)!;
+      const refusing: SlotLock = {
+        tryLock(): HeldLock | undefined {
+          throw new Error("a non-stale finished Run must never have its lock taken");
+        },
+      };
+
+      const [entry] = listRuns(home.path, refusing);
+
+      expect(entry).toEqual({ run: id, state: "finished", result });
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
 });
 
 describe("Ctrl+C in a foreground pre-flight", () => {

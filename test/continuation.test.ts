@@ -5,14 +5,16 @@ import path from "node:path";
 import type { Adapter, AdapterContext } from "../src/adapter";
 import { DEFAULT_SCRIPT, FakeAdapter, GATE_FAILING_SCRIPT } from "../src/adapters/fake";
 import type { FakeSession } from "../src/adapters/fake";
-import { discoverGitRoot } from "../src/git";
-import { runDir, runLockPath, runRepoPath, runResultPath } from "../src/paths";
+import { checkoutNewBranch, cloneLocal, discoverGitRoot, shortSha } from "../src/git";
+import { runDir, runLockPath, runPidPath, runRepoPath, runResultPath } from "../src/paths";
 import { run } from "../src/run";
 import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { cloneSha, commitSubjects, readLog, readResult, refSha, runIds } from "./support/runState";
+
+const HOLD_RUN_LOCK = path.join(import.meta.dir, "support", "holdRunLock.ts");
 
 const STORE = "/crisol-fake-sessions";
 
@@ -463,5 +465,130 @@ describe("a Continuation checks its branch is fetchable before any Sandbox start
       }
     },
     60_000,
+  );
+});
+
+describe("status and recover read a Continuation's OWN round, never an earlier one's result", () => {
+  test(
+    "a held lock with an earlier round's result shows running, not that round's outcome",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      const id = "cont0001";
+      const branch = `crisol/${id}`;
+      let holder: Bun.Subprocess<"ignore", "pipe", "ignore"> | undefined;
+      try {
+        const host = discoverGitRoot(repo.path)!;
+        mkdirSync(runDir(id, home.path), { recursive: true });
+        writeFileSync(runLockPath(id, home.path), JSON.stringify({ host, branch }));
+        const firstRound: RunResult = {
+          run: id,
+          branch,
+          base: `main@${shortSha(repo.path, "HEAD")}`,
+          status: "verified",
+          iterations: 1,
+          gates: [],
+          network: "allowlist",
+          blocked: [],
+          warnings: [],
+          fetchBack: true,
+          finishedAt: Date.now(),
+          finalMessage: "round one's own last word",
+        };
+        writeFileSync(runResultPath(id, home.path), JSON.stringify(firstRound, null, 2));
+        mkdirSync(runRepoPath(id, home.path)); // the Clone a Continuation's earlier round leaves behind
+
+        // A Continuation's own reservation re-locks with the same content, only a newer mtime —
+        // what tells its round apart from the one that already wrote the result above.
+        await Bun.sleep(10);
+        writeFileSync(runLockPath(id, home.path), JSON.stringify({ host, branch }));
+        holder = Bun.spawn(["bun", "run", HOLD_RUN_LOCK, runLockPath(id, home.path)], { stdout: "pipe" });
+        const reader = holder.stdout.getReader();
+        const { value } = await reader.read();
+        expect(new TextDecoder().decode(value)).toContain("held");
+        writeFileSync(runPidPath(id, home.path), String(holder.pid));
+
+        const status = await runCli(["status"], { cwd: repo.path, home: home.path });
+
+        const line = status.stdout.split("\n").find((entry) => entry.startsWith(id));
+        expect(line).toContain("running");
+        expect(line).not.toContain("verified");
+      } finally {
+        holder?.kill("SIGKILL");
+        await holder?.exited;
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    30_000,
+  );
+
+  test(
+    "a Continuation killed mid-round shows dead, and recover marks it interrupted with no stale finalMessage",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      const id = "cont0002";
+      const branch = `crisol/${id}`;
+      try {
+        const hostHead = shortSha(repo.path, "HEAD");
+        const host = discoverGitRoot(repo.path)!;
+        mkdirSync(runDir(id, home.path), { recursive: true });
+        writeFileSync(runLockPath(id, home.path), JSON.stringify({ host, branch }));
+
+        const clonePath = runRepoPath(id, home.path);
+        cloneLocal(repo.path, clonePath);
+        checkoutNewBranch(clonePath, branch, hostHead);
+        git(repo.path, ["branch", branch, hostHead]); // round one's own Fetch-back, already in the host
+
+        const firstRound: RunResult = {
+          run: id,
+          branch,
+          base: `main@${hostHead}`,
+          status: "verified",
+          iterations: 1,
+          gates: [],
+          network: "allowlist",
+          blocked: [],
+          warnings: [],
+          fetchBack: true,
+          finishedAt: Date.now(),
+          finalMessage: "round one's own last word",
+        };
+        writeFileSync(runResultPath(id, home.path), JSON.stringify(firstRound, null, 2));
+
+        const beforeKill = await runCli(["status"], { cwd: repo.path, home: home.path });
+        expect(beforeKill.stdout).toContain("verified");
+
+        await Bun.sleep(10);
+        writeFileSync(runLockPath(id, home.path), JSON.stringify({ host, branch }));
+        git(clonePath, ["commit", "--quiet", "--allow-empty", "-m", "feat: progress the dead round made"]);
+
+        const whileDead = await runCli(["status"], { cwd: repo.path, home: home.path });
+        const deadLine = whileDead.stdout.split("\n").find((entry) => entry.startsWith(id));
+        expect(deadLine).toContain("dead");
+        expect(deadLine).not.toContain("verified");
+
+        const recovered = await runCli(["recover"], { cwd: repo.path, home: home.path });
+        expect(recovered.exitCode).toBe(0);
+        expect(recovered.stdout).toContain(`Run ${id}: recovered ${branch}`);
+
+        const settled = readResult(id, home.path)!;
+        expect(settled.status).toBe("not-converged");
+        expect(settled.reason).toContain("interrupted");
+        expect(settled.finalMessage).toBeUndefined();
+        expect(settled.fetchBack).toBe(true);
+        expect(refSha(repo.path, branch)).toBe(cloneSha(id, home.path, branch));
+
+        const afterRecover = await runCli(["status"], { cwd: repo.path, home: home.path });
+        const finishedLine = afterRecover.stdout.split("\n").find((entry) => entry.startsWith(id));
+        expect(finishedLine).toContain("not-converged");
+        expect(finishedLine).toContain("interrupted");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    30_000,
   );
 });
