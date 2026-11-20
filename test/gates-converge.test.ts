@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Adapter, AdapterContext } from "../src/adapter";
 import { DEFAULT_SCRIPT, FakeAdapter, GATE_FAILING_SCRIPT, GATE_FIXING_SCRIPT } from "../src/adapters/fake";
 import { run } from "../src/run";
+import type { RunFailure, RunResult } from "../src/run";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
@@ -324,6 +325,37 @@ describe("ticket 20: the Final message and the Stop line", () => {
         expect(result.reason).toBe("ceiling");
         expect(result.finalMessage).toBe(REPORT);
         expect(readResult(onlyRunId(home.path), home.path)?.finalMessage).toBe(REPORT);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "a resume turn that throws leaves the Final message empty, not the earlier successful turn's",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        let outcome: RunResult | undefined;
+        try {
+          outcome = await run({
+            task: "throw on resume",
+            cwd: repo.path,
+            home: home.path,
+            adapter: new FakeAdapter(GATE_FAILING_SCRIPT, undefined, undefined, { launch: "first attempt" }),
+            gates: [GATE_CMD],
+          });
+        } catch (error) {
+          outcome = (error as RunFailure).result;
+        }
+
+        expect(outcome?.status).toBe("not-converged");
+        expect(outcome?.reason).toContain("no resumeScript");
+        expect(outcome?.finalMessage).toBeUndefined();
+        expect(readResult(onlyRunId(home.path), home.path)?.finalMessage).toBeUndefined();
       } finally {
         home.cleanup();
         repo.cleanup();
