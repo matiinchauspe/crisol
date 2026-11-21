@@ -176,6 +176,7 @@ export interface ClaudeCodeAdapterOptions {
 
 /** One instance per Run: `launch`, `continueSession` and `resumeWithFeedback` share its session id. */
 export class ClaudeCodeAdapter implements Adapter {
+  readonly name = "claude-code";
   private readonly binary: string;
   private readonly hostVersion: () => string;
   private session: string | undefined;

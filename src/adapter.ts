@@ -20,6 +20,12 @@ export interface AdapterContext {
 }
 
 export interface Adapter {
+  /**
+   * Identity Crisol records on the Run result and compares on a Continuation. Every Adapter a
+   * caller names by that identity (`fake`, `claude-code`) sets it; a one-off test stand-in with no
+   * identity of its own, and no `continueSession`, has no need to.
+   */
+  readonly name?: string;
   /** `projectImage` is the resolved Project layer's tag; the Agent layer, if any, builds `FROM` it. */
   declarePreStart(projectImage: string): PreStartDeclaration;
   /** Replaces Crisol's default wording. It must name every Gate it is given, or the Run fails before launch. */

@@ -33,6 +33,7 @@ function fakeAgent(options: { launch?: string; continue?: string; continueScript
 function recordingContinuations(inner: Adapter): { adapter: Adapter; calls: { sessionId: string; request: string }[] } {
   const calls: { sessionId: string; request: string }[] = [];
   const adapter: Adapter = {
+    name: inner.name,
     sessionStore: inner.sessionStore,
     declarePreStart: (projectImage: string) => inner.declarePreStart(projectImage),
     launch: (ctx: AdapterContext) => inner.launch(ctx),
@@ -47,9 +48,26 @@ function recordingContinuations(inner: Adapter): { adapter: Adapter; calls: { se
   return { adapter, calls };
 }
 
+/** Wraps an Adapter under a different identity, so a test can exercise Adapter-name matching without a second real Adapter. */
+function namedAdapter(name: string, inner: Adapter): Adapter {
+  return {
+    name,
+    sessionStore: inner.sessionStore,
+    declarePreStart: (projectImage: string) => inner.declarePreStart(projectImage),
+    launch: (ctx: AdapterContext) => inner.launch(ctx),
+    reportCompletion: (ctx: AdapterContext) => inner.reportCompletion(ctx),
+    resumeWithFeedback: (ctx: AdapterContext, feedback: string) => inner.resumeWithFeedback(ctx, feedback),
+    sessionId: () => inner.sessionId?.(),
+    continueSession: inner.continueSession
+      ? (ctx: AdapterContext, sessionId: string, request: string) => inner.continueSession!(ctx, sessionId, request)
+      : undefined,
+  };
+}
+
 /** Runs `beforeTurn` right before the Continuation's first turn, once pre-flight has already passed. */
 function hostMovesDuringContinuation(inner: Adapter, beforeTurn: () => void): Adapter {
   return {
+    name: inner.name,
     sessionStore: inner.sessionStore,
     declarePreStart: (projectImage: string) => inner.declarePreStart(projectImage),
     launch: (ctx: AdapterContext) => inner.launch(ctx),
@@ -111,6 +129,7 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
           adapter: firstAdapter,
         });
         expect(first.status).toBe("verified");
+        expect(first.adapter).toBe("fake");
         const firstSession = firstAdapter.sessionId();
         expect(firstSession).toBeDefined();
         const firstTip = refSha(repo.path, first.branch)!;
@@ -130,6 +149,7 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
           branch: first.branch,
           base: first.base,
           status: "verified",
+          adapter: "fake",
           finalMessage: "round two",
           fetchBack: true,
         });
@@ -289,17 +309,28 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
           home: home.path,
         });
 
-        expect(continued.stderr).toBe("");
+        expect(continued.stderr).toBe(`Continuing Run ${first.run} with Adapter fake (recorded by the Run).\n`);
         expect(continued.exitCode).toBe(0);
         const payload = JSON.parse(continued.stdout) as RunResult;
-        expect(payload).toMatchObject({ run: first.run, branch: "cli/continued", fetchBack: true });
+        expect(payload).toMatchObject({ run: first.run, branch: "cli/continued", adapter: "fake", fetchBack: true });
         expect(commitSubjects(repo.path, "cli/continued")).toHaveLength(3);
+
+        // Inheriting and an explicit `--adapter fake` must build the Adapter from the same table, so
+        // their finalMessages match.
+        const explicit = await runCli(
+          ["run", "--continue", "cli/continued", "say it once more", "--adapter", "fake", "--json"],
+          { cwd: repo.path, home: home.path },
+        );
+        expect(explicit.exitCode).toBe(0);
+        const explicitPayload = JSON.parse(explicit.stdout) as RunResult;
+        expect(payload.finalMessage).toBeDefined();
+        expect(explicitPayload.finalMessage).toBe(payload.finalMessage);
       } finally {
         home.cleanup();
         repo.cleanup();
       }
     },
-    120_000,
+    180_000,
   );
 
   for (const [flag, extra] of [
@@ -590,5 +621,99 @@ describe("status and recover read a Continuation's OWN round, never an earlier o
       }
     },
     30_000,
+  );
+});
+
+describe("a Continuation refuses an Adapter mismatch", () => {
+  test(
+    "an Adapter other than the recorded one is refused before any Sandbox starts, naming both",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "mismatched", adapter: fakeAgent() });
+        expect(first.adapter).toBe("fake");
+
+        await expect(
+          run({
+            task: "more",
+            cwd: repo.path,
+            home: home.path,
+            continue: "mismatched",
+            adapter: namedAdapter("claude-code", fakeAgent({ continue: "must never run" })),
+          }),
+        ).rejects.toThrow(/Adapter "fake", not "claude-code"/);
+
+        expect(runIds(home.path)).toEqual([first.run]);
+        expect(readResult(first.run, home.path)).toEqual(first);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "no --adapter inherits the recorded one, naming it, rather than running the fake Adapter over another's branch",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({
+          task: "one",
+          cwd: repo.path,
+          home: home.path,
+          name: "inherited",
+          adapter: namedAdapter("other-agent", fakeAgent({ launch: "round one" })),
+        });
+        expect(first.adapter).toBe("other-agent");
+
+        let inherited: { adapterName: string; runId: string } | undefined;
+        const continued = await run({
+          task: "more",
+          cwd: repo.path,
+          home: home.path,
+          continue: "inherited",
+          adapterByName: (name) => namedAdapter(name, fakeAgent({ continue: "round two" })),
+          onAdapterInherited: (adapterName, runId) => {
+            inherited = { adapterName, runId };
+          },
+        });
+
+        expect(inherited).toEqual({ adapterName: "other-agent", runId: first.run });
+        expect(continued.adapter).toBe("other-agent");
+        expect(continued.finalMessage).toBe("round two");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "no --adapter on a Run from before Crisol recorded one is refused, asking for --adapter",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "unrecorded", adapter: fakeAgent() });
+        const beforeRecording = readResult(first.run, home.path)!;
+        delete beforeRecording.adapter;
+        writeFileSync(runResultPath(first.run, home.path), JSON.stringify(beforeRecording, null, 2));
+
+        await expect(
+          run({ task: "more", cwd: repo.path, home: home.path, continue: "unrecorded" }),
+        ).rejects.toThrow(/kept no record of which Adapter made it/);
+
+        expect(runIds(home.path)).toEqual([first.run]);
+        expect(readResult(first.run, home.path)).toEqual(beforeRecording);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
   );
 });

@@ -49,9 +49,15 @@ type AdapterName = (typeof ADAPTER_NAMES)[number];
 /** A real agent always ends its turn with a message; a silent stand-in would return a Run result no real caller sees. */
 const STAND_IN_MESSAGE = "The scripted stand-in Adapter ran; no agent worked on this Task.";
 
-function createAdapter(name: AdapterName): Adapter {
+/**
+ * The one table Crisol builds Adapters by name from. `run()` also calls this, as `adapterByName`,
+ * with whatever name a Continuation's Run recorded — never a validated `AdapterName` — hence the
+ * runtime check rather than trusting the type.
+ */
+function createAdapter(name: string): Adapter {
   if (name === "claude-code") return new ClaudeCodeAdapter();
-  return new FakeAdapter(DEFAULT_SCRIPT, undefined, undefined, { launch: STAND_IN_MESSAGE, continue: STAND_IN_MESSAGE });
+  if (name === "fake") return new FakeAdapter(DEFAULT_SCRIPT, undefined, undefined, { launch: STAND_IN_MESSAGE, continue: STAND_IN_MESSAGE });
+  throw new Error(`Run recorded an unknown Adapter "${name}"; pass --adapter explicitly to continue it.`);
 }
 
 interface ParsedRunArgs {
@@ -68,7 +74,8 @@ interface ParsedRunArgs {
   maxIterations?: number;
   timeoutMinutes?: number;
   network: NetworkMode;
-  adapterName: AdapterName;
+  /** Absent when `--adapter` was never typed — the only way `main` can tell that from an explicit `--adapter fake`. */
+  adapterName?: AdapterName;
 }
 
 /** A value that looks like another flag is a usage error, or `--base --json` would quietly run with no base. */
@@ -120,7 +127,7 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
   let maxIterations: number | undefined;
   let timeoutMinutes: number | undefined;
   let network: NetworkMode = "allowlist";
-  let adapterName: AdapterName = "fake";
+  let adapterName: AdapterName | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -617,7 +624,14 @@ async function main(argv: string[]): Promise<number> {
     maxIterations: args.maxIterations,
     ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
     network: args.network,
-    adapter: createAdapter(args.adapterName),
+    // Deferred for --continue: run() resolves the Run's recorded Adapter once it knows which Run is named.
+    adapter:
+      args.adapterName !== undefined
+        ? createAdapter(args.adapterName)
+        : args.continue !== undefined
+          ? undefined
+          : createAdapter("fake"),
+    adapterByName: createAdapter,
   };
 
   if (args.detach) {
@@ -655,6 +669,8 @@ async function main(argv: string[]): Promise<number> {
       shownWarnings.add(warning);
       process.stderr.write(`Warning: ${warning}\n`);
     },
+    onAdapterInherited: (adapterName, runId) =>
+      process.stderr.write(`Continuing Run ${runId} with Adapter ${adapterName} (recorded by the Run).\n`),
     // Shared across a fan-out's Runs, so this also gives up a sibling still waiting for a Slot.
     onProviderFailure: (reason) => interrupt.abort(reason),
     signal: interrupt.signal,

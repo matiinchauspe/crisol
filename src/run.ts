@@ -118,6 +118,8 @@ export interface RunResult {
   base: string;
   status: RunStatus;
   reason?: string;
+  /** Which Adapter made this round. Absent only for a Run that ended before resolving one. */
+  adapter?: string;
   iterations: number;
   gates: Gate[];
   network: NetworkMode;
@@ -185,6 +187,14 @@ export interface RunOptions extends TaskInput {
   onWarning?: (warning: string) => void;
   /** Called once a provider failure is caught, so a sibling Task still waiting for a Slot can give up rather than start into the same outage. */
   onProviderFailure?: (reason: string) => void;
+  /** Called once a Continuation with no explicit `--adapter` inherits the one its Run recorded. */
+  onAdapterInherited?: (adapterName: string, runId: string) => void;
+  /**
+   * Builds a named Adapter when a Continuation inherits one, since `run()` keeps no mapping of
+   * its own — the CLI passes its own `createAdapter` table. With none supplied, inheriting
+   * refuses rather than guessing which Adapter to run.
+   */
+  adapterByName?: (name: string) => Adapter;
   /**
    * Aborts a Run still waiting for a Slot. A Run past its Slot stops on its own signal handlers,
    * and treats a signal already aborted, with the signal's name as `reason`, as one received.
@@ -482,6 +492,8 @@ interface ContinuedRun {
   sessionId: string;
   /** Absent for a Run that predates `gates.json`. */
   gates?: readonly string[];
+  /** The Adapter name the owning Run's result recorded; absent for a Run that predates recording it. */
+  adapterName?: string;
 }
 
 function readKeptGates(id: string, home: string): readonly string[] | undefined {
@@ -562,7 +574,8 @@ function findContinuedRun(hostRepoPath: string, home: string, branch: string): C
   if (sessionId === undefined) {
     throw new Error(`Run ${id} kept no agent session, so branch "${branch}" cannot be continued.`);
   }
-  const base = readResult(id, home)!.base;
+  const ownerResult = readResult(id, home)!;
+  const base = ownerResult.base;
   const at = base.lastIndexOf("@");
   return {
     id,
@@ -571,7 +584,41 @@ function findContinuedRun(hostRepoPath: string, home: string, branch: string): C
     baseSha: base.slice(at + 1),
     sessionId,
     gates: readKeptGates(id, home),
+    adapterName: ownerResult.adapter,
   };
+}
+
+/** Called before any Sandbox starts, so an Adapter mismatch is caught before Docker work begins. */
+function resolveAdapter(
+  requested: Adapter | undefined,
+  continued: ContinuedRun | undefined,
+  byName: ((name: string) => Adapter) | undefined,
+  onInherited: ((adapterName: string, runId: string) => void) | undefined,
+): Adapter {
+  if (continued === undefined) return requested ?? new FakeAdapter();
+  if (requested !== undefined) {
+    if (continued.adapterName !== undefined && requested.name !== continued.adapterName) {
+      throw new Error(
+        `Branch "${continued.branch}" was made with Adapter "${continued.adapterName}", not ` +
+          `"${requested.name}"; pass --adapter ${continued.adapterName} to continue it, or start a fresh Run.`,
+      );
+    }
+    return requested;
+  }
+  if (continued.adapterName === undefined) {
+    throw new Error(
+      `Run ${continued.id} kept no record of which Adapter made it (it predates this Crisol version); ` +
+        `pass --adapter to continue branch "${continued.branch}".`,
+    );
+  }
+  if (byName === undefined) {
+    throw new Error(
+      `Branch "${continued.branch}" inherits Adapter "${continued.adapterName}", but no adapterByName was ` +
+        "given to build one; pass --adapter explicitly, or supply adapterByName.",
+    );
+  }
+  onInherited?.(continued.adapterName, continued.id);
+  return byName(continued.adapterName);
 }
 
 /**
@@ -633,7 +680,7 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
 
   assertDockerReachable();
 
-  const adapter: Adapter = options.adapter ?? new FakeAdapter();
+  const adapter = resolveAdapter(options.adapter, continued, options.adapterByName, options.onAdapterInherited);
   if (continued !== undefined && adapter.continueSession === undefined) {
     throw new Error(`This Adapter cannot continue a session, so branch "${continued.branch}" cannot be continued.`);
   }
@@ -1237,6 +1284,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       base,
       status,
       ...(reason !== undefined ? { reason } : {}),
+      ...(adapter.name !== undefined ? { adapter: adapter.name } : {}),
       iterations,
       gates: gateResults,
       network: networkMode,

@@ -117,6 +117,7 @@ export interface FakeSession {
 }
 
 export class FakeAdapter implements Adapter {
+  readonly name = "fake";
   readonly sessionStore: string | undefined;
   private session: string | undefined;
 
