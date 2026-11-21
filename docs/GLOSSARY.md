@@ -69,7 +69,8 @@ it before running the Gates and, when present, never resumes the session.
 _Avoid_: Exit code, signal, flag (it is text the agent writes, not a process mechanism)
 
 **Adapter**:
-The only code that knows a specific agent (v1: Claude Code).
+The only code that knows a specific agent (v1: Claude Code). Named in the Run result; a
+Continuation refuses a different one.
 _Avoid_: Integration, driver, connector
 
 **Slot**:

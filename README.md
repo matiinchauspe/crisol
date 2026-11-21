@@ -127,7 +127,7 @@ crisol init [--adapter <fake|claude-code>]
 | `--max-iterations <n>` | `5` | Overrides how many Gate-fail-then-resume attempts this Run gets before `not-converged`. Must be a positive integer. |
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
 | `--network <allowlist\|learn\|open>` | `allowlist` | `learn` lets the Run reach any host and records which; `open` drops the wall. See [Network](#network). |
-| `--adapter <fake\|claude-code>` | `fake` | Which Adapter runs the Task. `fake` is the suite's own scripted stand-in; `claude-code` runs the real Claude Code Adapter (`crisol auth` first — see [Credentials](#credentials)). |
+| `--adapter <fake\|claude-code>` | `fake`; on `--continue`, the Run's own recorded Adapter | Which Adapter runs the Task. `fake` is the suite's own scripted stand-in; `claude-code` runs the real Claude Code Adapter (`crisol auth` first — see [Credentials](#credentials)). See [Continue a Run](#continue-a-run) for how a Continuation matches it. |
 | `--json` | off | Print the Run result as JSON instead of one line — one JSON line per Run when there are several Tasks. |
 | `--detach` | off | Return at once with the run id and let the Run finish in the background. One Task only, and not with `--json`. See [Detach, status and logs](#detach-status-and-logs). |
 
@@ -299,6 +299,11 @@ one whose tip in your repo no longer matches the Run's Clone — either would le
 from your repo for good once a round ran on top of it, so both are checked, and reported by name,
 before any Sandbox starts rather than only at Fetch-back. The agent's session survives its Sandbox
 because Crisol keeps it under the Run dir, in `sessions/`.
+
+Every Run result also names the Adapter that made it. `--continue` with no `--adapter` inherits
+that one, printing `Continuing Run <id> with Adapter <name> (recorded by the Run).`; naming a
+different `--adapter` is refused, naming both, before any Sandbox starts — and so is a Run from
+before Crisol recorded one, which asks for `--adapter` rather than assuming the fake Adapter.
 
 While a round runs, `crisol status` shows it `queued` or `running`, never the previous round's
 outcome. One killed mid-round shows `dead`; after `crisol recover`, its result reads
@@ -565,6 +570,7 @@ The fields are only ever added within 0.x, never renamed or removed:
   "branch": "crisol/9f496a56",
   "base": "main@a2689ba",
   "status": "verified",
+  "adapter": "claude-code",
   "iterations": 2,
   "gates": [{ "cmd": "bun test", "ok": true }],
   "network": "allowlist",
@@ -576,6 +582,8 @@ The fields are only ever added within 0.x, never renamed or removed:
 }
 ```
 
+`adapter` names which Adapter made this round — see [Continue a Run](#continue-a-run) for how a
+Continuation matches it.
 `status` is `verified` once every declared Gate is green, `not-converged` (with
 `reason: "ceiling"`) if it never gets there within the ceiling (5 iterations or 60 minutes by
 default — see [The ceiling](#the-ceiling)), and `unverified` when no Gate is declared anywhere —
@@ -685,6 +693,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0023](docs/adr/0023-a-continuation-pre-flights-its-branch-before-any-sandbox-starts.md): `findContinuedRun` refuses a branch checked out in the host repo or one of its worktrees (`git worktree list --porcelain`), or one whose tip there no longer matches the Run's Clone, before any Slot or Sandbox; Fetch-back's own fast-forward-only refusal stays as the race window's last line of defense (amends ADR 0020, resolving two of its "Known limits")
 - [0024](docs/adr/0024-a-continuation-finds-its-run-by-a-live-clone-not-a-run-result.md): a Run claims its branch only when its own Clone still has a local branch by that name, never merely because `result.json` names it; a Run that ended before a Slot, or whose Clone `crisol gc` collected, no longer claims, so reusing a `--name` after that no longer refuses `--continue` as claimed by two Runs forever; when a Clone-less Run's result still names the branch, the refusal says so and names the true cause (`crisol gc` only when that Run's own Fetch-back had completed, never otherwise) rather than claiming nobody named it (amends ADR 0020)
 - [0025](docs/adr/0025-status-and-recover-tell-a-stale-result-from-the-current-round.md): `readEntry` probes the Run lock before trusting ANY result, not only a missing one, and reads a result older than the lock's own last reservation as `dead` rather than `finished`; `crisol recover` renames `markFetchedBack` to `settleResult`, which rewrites a stale result whole — `not-converged`, an `interrupted` reason, a fresh `finishedAt`, no `finalMessage` — rather than only flipping `fetchBack` on it (amends ADR 0020, resolving its remaining "Known limit")
+- [0026](docs/adr/0026-a-run-records-its-adapter-and-a-continuation-matches-it.md): every real Adapter carries a `name` (`fake`, `claude-code`), kept as `adapter` in `result.json`; `--continue` with no `--adapter` inherits the recorded one and names it, one from before this ticket refuses and asks for `--adapter` instead of assuming the fake one, and an explicit `--adapter` that disagrees with the recorded one is refused naming both — all before any Sandbox starts (amends ADR 0020, whose rewritten `result.json` fields never named an Adapter)
 
 ## Development
 
