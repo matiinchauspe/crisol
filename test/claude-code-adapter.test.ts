@@ -284,15 +284,34 @@ describe("ClaudeCodeAdapter.launch / resumeWithFeedback (ticket 14, fake Sandbox
   });
 });
 
-const AUTH_CAPTURE_DIR = join(import.meta.dir, "fixtures", "claude-auth-failure");
-
-function readAuthCapture(): ExecResult {
-  const exit = /^exit=(\d+)$/.exec(readFileSync(join(AUTH_CAPTURE_DIR, "auth.exit.txt"), "utf8").trim());
+function readCapture(dir: string, prefix: string): ExecResult {
+  const exit = /^exit=(\d+)$/.exec(readFileSync(join(dir, `${prefix}.exit.txt`), "utf8").trim());
   return {
     exitCode: Number(exit![1]),
-    stdout: readFileSync(join(AUTH_CAPTURE_DIR, "auth.stdout.json"), "utf8"),
-    stderr: readFileSync(join(AUTH_CAPTURE_DIR, "auth.stderr.txt"), "utf8"),
+    stdout: readFileSync(join(dir, `${prefix}.stdout.json`), "utf8"),
+    stderr: readFileSync(join(dir, `${prefix}.stderr.txt`), "utf8"),
   };
+}
+
+const AUTH_CAPTURE_DIR = join(import.meta.dir, "fixtures", "claude-auth-failure");
+const AUTH_OAUTH_CAPTURE_DIR = join(import.meta.dir, "fixtures", "claude-auth-failure-oauth");
+const QUOTA_FIXTURE_DIR = join(import.meta.dir, "fixtures", "claude-quota-failure");
+const RATE_LIMIT_FIXTURE_DIR = join(import.meta.dir, "fixtures", "claude-rate-limit-failure");
+
+function readAuthCapture(): ExecResult {
+  return readCapture(AUTH_CAPTURE_DIR, "auth");
+}
+
+function readOAuthCapture(): ExecResult {
+  return readCapture(AUTH_OAUTH_CAPTURE_DIR, "oauth-invalid");
+}
+
+function readQuotaFixture(): ExecResult {
+  return readCapture(QUOTA_FIXTURE_DIR, "quota");
+}
+
+function readRateLimitFixture(): ExecResult {
+  return readCapture(RATE_LIMIT_FIXTURE_DIR, "rate-limit");
 }
 
 function sandboxAnswering(result: ExecResult): Sandbox {
@@ -335,6 +354,14 @@ describe("ClaudeCodeAdapter classifies a provider failure (ticket 19, real captu
     expect((error as ProviderFailureError).category).toBe("auth");
   });
 
+  test("the captured invalid CLAUDE_CODE_OAUTH_TOKEN makes launch throw ProviderFailureError with category auth too (ticket 22's amendment)", async () => {
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering(readOAuthCapture()))));
+    expect(error).toBeInstanceOf(ProviderFailureError);
+    expect((error as ProviderFailureError).category).toBe("auth");
+    expect((error as ProviderFailureError).message).toContain("OAuth access token is invalid");
+  });
+
   test("an API error with another status stays a plain error, never a provider failure", async () => {
     const capture = readAuthCapture();
     const stdout = JSON.stringify({ ...JSON.parse(capture.stdout), api_error_status: 500 });
@@ -350,6 +377,52 @@ describe("ClaudeCodeAdapter classifies a provider failure (ticket 19, real captu
     const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
     const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering({ exitCode: 1, stdout, stderr: "" }))));
     expect(error).not.toBeInstanceOf(ProviderFailureError);
+  });
+});
+
+describe("ClaudeCodeAdapter classifies rate limit and exhausted quota (ticket 22, cited real reports, never a capture)", () => {
+  test("the exhausted-quota fixture makes launch throw ProviderFailureError with category quota", async () => {
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering(readQuotaFixture()))));
+    expect(error).toBeInstanceOf(ProviderFailureError);
+    expect((error as ProviderFailureError).category).toBe("quota");
+    expect((error as ProviderFailureError).message).toContain("You're out of extra usage");
+  });
+
+  test("the rate-limit fixture makes launch throw ProviderFailureError with category 'rate limit'", async () => {
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering(readRateLimitFixture()))));
+    expect(error).toBeInstanceOf(ProviderFailureError);
+    expect((error as ProviderFailureError).category).toBe("rate limit");
+    expect((error as ProviderFailureError).message).toContain("temporarily limiting requests");
+  });
+
+  test("a 429 whose result carries no known quota phrase is a rate limit even with no result text at all", async () => {
+    const stdout = JSON.stringify({ is_error: true, terminal_reason: "api_error", api_error_status: 429 });
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering({ exitCode: 1, stdout, stderr: "" }))));
+    expect(error).toBeInstanceOf(ProviderFailureError);
+    expect((error as ProviderFailureError).category).toBe("rate limit");
+  });
+
+  test("a quota phrase at a status other than 401/429 is neither quota nor rate limit: it stays a plain error", async () => {
+    const stdout = JSON.stringify({ is_error: true, terminal_reason: "api_error", api_error_status: 500, result: "You're out of extra usage" });
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering({ exitCode: 1, stdout, stderr: "" }))));
+    expect(error).not.toBeInstanceOf(ProviderFailureError);
+  });
+
+  test("an exhausted API-key credit balance classifies as quota too, with no captured envelope to read it from", async () => {
+    const stdout = JSON.stringify({
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: 400,
+      result: "Your credit balance is too low to access the Claude API.",
+    });
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+    const error = await rejectionOf(adapter.launch(fakeContext(sandboxAnswering({ exitCode: 1, stdout, stderr: "" }))));
+    expect(error).toBeInstanceOf(ProviderFailureError);
+    expect((error as ProviderFailureError).category).toBe("quota");
   });
 });
 

@@ -151,18 +151,39 @@ interface ClaudeCliFailure {
   result?: unknown;
 }
 
-/**
- * Classified on the structured fields alone: the captured failure says `"subtype": "success"`,
- * and its `result` is prose. Only authentication has a real capture, so a rate limit or an
- * exhausted quota still surfaces as a plain error.
- */
+/** Drawn from real reports, never guessed. */
+const QUOTA_RESULT_PREFIXES = [
+  "You've hit your ",
+  "You've reached your ",
+  "You're out of usage credits",
+  "You're out of extra usage",
+  "Your org is out of usage",
+];
+
+/** No captured envelope for this one: built from the string 2.1.283 itself checks for. */
+const CREDIT_TOO_LOW_PATTERN = /credit balance is too low/i;
+
+/** The real envelope's `subtype` field says "success" even on error — don't trust it. */
 function turnFailure(binary: string, result: ExecResult): Error {
   let output: ClaudeCliFailure | null = null;
   try {
     output = JSON.parse(result.stdout) as ClaudeCliFailure | null;
   } catch {}
-  if (output?.is_error === true && output.terminal_reason === "api_error" && output.api_error_status === 401) {
-    return new ProviderFailureError("auth", typeof output.result === "string" ? output.result : "auth");
+  const text = typeof output?.result === "string" ? output.result : undefined;
+  if (output?.is_error === true && output.terminal_reason === "api_error") {
+    const status = output.api_error_status;
+    if (status === 401) {
+      return new ProviderFailureError("auth", text ?? "auth");
+    }
+    const isQuota =
+      (status === 429 && text !== undefined && QUOTA_RESULT_PREFIXES.some((prefix) => text.startsWith(prefix))) ||
+      (text !== undefined && CREDIT_TOO_LOW_PATTERN.test(text));
+    if (isQuota) {
+      return new ProviderFailureError("quota", text ?? "quota");
+    }
+    if (status === 429) {
+      return new ProviderFailureError("rate limit", text ?? "rate limit");
+    }
   }
   return new Error(`${binary} exited ${result.exitCode}: ${(result.stderr || result.stdout).trim()}`);
 }
