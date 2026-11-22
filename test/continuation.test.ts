@@ -64,6 +64,20 @@ function namedAdapter(name: string, inner: Adapter): Adapter {
   };
 }
 
+function namelessAdapter(inner: Adapter, options: { continues: boolean }): Adapter {
+  return {
+    sessionStore: inner.sessionStore,
+    declarePreStart: (projectImage: string) => inner.declarePreStart(projectImage),
+    launch: (ctx: AdapterContext) => inner.launch(ctx),
+    reportCompletion: (ctx: AdapterContext) => inner.reportCompletion(ctx),
+    resumeWithFeedback: (ctx: AdapterContext, feedback: string) => inner.resumeWithFeedback(ctx, feedback),
+    sessionId: () => inner.sessionId?.(),
+    continueSession: options.continues
+      ? (ctx: AdapterContext, sessionId: string, request: string) => inner.continueSession!(ctx, sessionId, request)
+      : undefined,
+  };
+}
+
 /** Runs `beforeTurn` right before the Continuation's first turn, once pre-flight has already passed. */
 function hostMovesDuringContinuation(inner: Adapter, beforeTurn: () => void): Adapter {
   return {
@@ -709,6 +723,61 @@ describe("a Continuation refuses an Adapter mismatch", () => {
 
         expect(runIds(home.path)).toEqual([first.run]);
         expect(readResult(first.run, home.path)).toEqual(beforeRecording);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+});
+
+describe("a nameless Adapter never yields a false refusal", () => {
+  test("one that implements continueSession is refused before any Run starts, since its Runs could never be inherited", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      await expect(
+        run({ task: "one", cwd: repo.path, home: home.path, adapter: namelessAdapter(fakeAgent(), { continues: true }) }),
+      ).rejects.toThrow(/implements continueSession but has no name/);
+      expect(runIds(home.path)).toEqual([]);
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test(
+    "continuing a named Run, a nameless Adapter is refused by what it lacks, never as \"undefined\"",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "named", adapter: fakeAgent() });
+        expect(first.adapter).toBe("fake");
+
+        const continuing = run({
+          task: "more",
+          cwd: repo.path,
+          home: home.path,
+          continue: "named",
+          adapter: namelessAdapter(fakeAgent({ continue: "must never run" }), { continues: true }),
+        });
+        await expect(continuing).rejects.toThrow(/implements continueSession but has no name/);
+        await expect(continuing).rejects.not.toThrow(/undefined/);
+
+        const stopping = run({
+          task: "more",
+          cwd: repo.path,
+          home: home.path,
+          continue: "named",
+          adapter: namelessAdapter(fakeAgent(), { continues: false }),
+        });
+        await expect(stopping).rejects.toThrow(/cannot continue a session/);
+        await expect(stopping).rejects.not.toThrow(/undefined/);
+
+        expect(runIds(home.path)).toEqual([first.run]);
+        expect(readResult(first.run, home.path)).toEqual(first);
       } finally {
         home.cleanup();
         repo.cleanup();

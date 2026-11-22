@@ -118,7 +118,7 @@ export interface RunResult {
   base: string;
   status: RunStatus;
   reason?: string;
-  /** Which Adapter made this round. Absent only for a Run that ended before resolving one. */
+  /** Which Adapter made this round. Absent for a Run that ended before resolving one, or whose Adapter has no name. */
   adapter?: string;
   iterations: number;
   gates: Gate[];
@@ -492,7 +492,6 @@ interface ContinuedRun {
   sessionId: string;
   /** Absent for a Run that predates `gates.json`. */
   gates?: readonly string[];
-  /** The Adapter name the owning Run's result recorded; absent for a Run that predates recording it. */
   adapterName?: string;
 }
 
@@ -588,15 +587,33 @@ function findContinuedRun(hostRepoPath: string, home: string, branch: string): C
   };
 }
 
-/** Called before any Sandbox starts, so an Adapter mismatch is caught before Docker work begins. */
+function assertContinuableAdapterNamed(adapter: Adapter): Adapter {
+  if (adapter.continueSession !== undefined && adapter.name === undefined) {
+    throw new Error(
+      "This Adapter implements continueSession but has no name, so a Run it makes would record no Adapter " +
+        "for a Continuation to inherit or match; give it a name.",
+    );
+  }
+  return adapter;
+}
+
+function assertAdapterContinues(adapter: Adapter, continued: ContinuedRun): void {
+  if (adapter.continueSession === undefined) {
+    throw new Error(`This Adapter cannot continue a session, so branch "${continued.branch}" cannot be continued.`);
+  }
+  assertContinuableAdapterNamed(adapter);
+}
+
+/** Called before any Sandbox starts, so every Adapter refusal here costs no Docker work. */
 function resolveAdapter(
   requested: Adapter | undefined,
   continued: ContinuedRun | undefined,
   byName: ((name: string) => Adapter) | undefined,
   onInherited: ((adapterName: string, runId: string) => void) | undefined,
 ): Adapter {
-  if (continued === undefined) return requested ?? new FakeAdapter();
+  if (continued === undefined) return assertContinuableAdapterNamed(requested ?? new FakeAdapter());
   if (requested !== undefined) {
+    assertAdapterContinues(requested, continued);
     if (continued.adapterName !== undefined && requested.name !== continued.adapterName) {
       throw new Error(
         `Branch "${continued.branch}" was made with Adapter "${continued.adapterName}", not ` +
@@ -616,8 +633,10 @@ function resolveAdapter(
         "given to build one; pass --adapter explicitly, or supply adapterByName.",
     );
   }
+  const inherited = byName(continued.adapterName);
+  assertAdapterContinues(inherited, continued);
   onInherited?.(continued.adapterName, continued.id);
-  return byName(continued.adapterName);
+  return inherited;
 }
 
 /**
@@ -680,9 +699,6 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
   assertDockerReachable();
 
   const adapter = resolveAdapter(options.adapter, continued, options.adapterByName, options.onAdapterInherited);
-  if (continued !== undefined && adapter.continueSession === undefined) {
-    throw new Error(`This Adapter cannot continue a session, so branch "${continued.branch}" cannot be continued.`);
-  }
   let prompt = savedPrompt ?? "";
   if (resolved !== undefined) {
     const preamble = adapter.preamble?.(gates) ?? defaultPreamble(gates);

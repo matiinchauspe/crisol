@@ -21,9 +21,8 @@ export interface AdapterContext {
 
 export interface Adapter {
   /**
-   * Identity Crisol records on the Run result and compares on a Continuation. Every Adapter a
-   * caller names by that identity (`fake`, `claude-code`) sets it; a one-off test stand-in with no
-   * identity of its own, and no `continueSession`, has no need to.
+   * Identity recorded on the Run result and matched on a Continuation; a Run refuses an Adapter
+   * that implements `continueSession` without one.
    */
   readonly name?: string;
   /** `projectImage` is the resolved Project layer's tag; the Agent layer, if any, builds `FROM` it. */

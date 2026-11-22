@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
+import { runResultPath } from "../src/paths";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
@@ -250,7 +252,7 @@ describe("crisol run --max-iterations / --timeout validation", () => {
 });
 
 /**
- * `--adapter`'s own validation (ticket 14) — checked ONLY through the usage-error paths,
+ * `--adapter`'s own validation — checked ONLY through the usage-error paths,
  * which fail during argument parsing, BEFORE `run()` is ever called. `--adapter claude-code`
  * itself is never exercised here: that would reach the real `ClaudeCodeAdapter` and, through
  * it, the real `claude --version` and a real Docker image build — exactly what the automated
@@ -328,6 +330,38 @@ describe("crisol run --continue refuses an Adapter mismatch at the CLI (ticket 3
       expect(mismatched.exitCode).toBe(1);
       expect(mismatched.stderr).toMatch(/Adapter "fake", not "claude-code"/);
       expect(runIds(home.path)).toEqual([firstResult.run]);
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+});
+
+describe("crisol run --continue announces an inherited Adapter only once it is built (ticket 31)", () => {
+  test("an unknown recorded Adapter prints the refusal alone, never the inheritance line", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const first = await runCli(["run", "say hello", "--name", "cli-unknown", "--json"], {
+        cwd: repo.path,
+        home: home.path,
+      });
+      expect(first.exitCode).toBe(0);
+      const runId = JSON.parse(first.stdout).run as string;
+      const resultPath = runResultPath(runId, home.path);
+      const recorded = JSON.parse(readFileSync(resultPath, "utf8"));
+      recorded.adapter = "retired-agent";
+      writeFileSync(resultPath, JSON.stringify(recorded, null, 2));
+
+      const continued = await runCli(["run", "say more", "--continue", "cli-unknown"], {
+        cwd: repo.path,
+        home: home.path,
+      });
+
+      expect(continued.exitCode).toBe(1);
+      expect(continued.stderr).toBe(
+        'Run recorded an unknown Adapter "retired-agent"; pass --adapter explicitly to continue it.\n',
+      );
     } finally {
       home.cleanup();
       repo.cleanup();
