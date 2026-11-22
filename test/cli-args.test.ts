@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
+import { runIds } from "./support/runState";
 
 /** A missing value, or one that looks like another flag, must be a usage error — never silently treated as "no value given". */
 describe("crisol run argument validation (W6)", () => {
@@ -299,6 +300,34 @@ describe("crisol run --adapter validation (ticket 14)", () => {
       });
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout)).toMatchObject({ status: "unverified" });
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+});
+
+describe("crisol run --continue refuses an Adapter mismatch at the CLI (ticket 30)", () => {
+  test("exit 1, stderr names both Adapters, and the mismatched attempt starts no Run of its own", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const first = await runCli(["run", "say hello", "--name", "cli-mismatch", "--json"], {
+        cwd: repo.path,
+        home: home.path,
+      });
+      expect(first.exitCode).toBe(0);
+      const firstResult = JSON.parse(first.stdout);
+      expect(firstResult.adapter).toBe("fake");
+
+      const mismatched = await runCli(
+        ["run", "say more", "--continue", "cli-mismatch", "--adapter", "claude-code", "--json"],
+        { cwd: repo.path, home: home.path },
+      );
+
+      expect(mismatched.exitCode).toBe(1);
+      expect(mismatched.stderr).toMatch(/Adapter "fake", not "claude-code"/);
+      expect(runIds(home.path)).toEqual([firstResult.run]);
     } finally {
       home.cleanup();
       repo.cleanup();

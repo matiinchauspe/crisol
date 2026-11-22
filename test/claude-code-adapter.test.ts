@@ -424,6 +424,34 @@ describe("ClaudeCodeAdapter classifies rate limit and exhausted quota (ticket 22
     expect(error).toBeInstanceOf(ProviderFailureError);
     expect((error as ProviderFailureError).category).toBe("quota");
   });
+
+  test("ticket 30: a 401 whose result carries a quota phrase, or 'credit balance is too low', stays auth", async () => {
+    const adapter = new ClaudeCodeAdapter({ binary: "fake-claude", hostVersion: () => "9.9.9" });
+
+    const withQuotaPhrase = JSON.stringify({
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: 401,
+      result: "You're out of extra usage · resets 6:40pm",
+    });
+    const quotaPhraseError = await rejectionOf(
+      adapter.launch(fakeContext(sandboxAnswering({ exitCode: 1, stdout: withQuotaPhrase, stderr: "" }))),
+    );
+    expect(quotaPhraseError).toBeInstanceOf(ProviderFailureError);
+    expect((quotaPhraseError as ProviderFailureError).category).toBe("auth");
+
+    const withCreditTooLow = JSON.stringify({
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: 401,
+      result: "Your credit balance is too low to access the Claude API.",
+    });
+    const creditTooLowError = await rejectionOf(
+      adapter.launch(fakeContext(sandboxAnswering({ exitCode: 1, stdout: withCreditTooLow, stderr: "" }))),
+    );
+    expect(creditTooLowError).toBeInstanceOf(ProviderFailureError);
+    expect((creditTooLowError as ProviderFailureError).category).toBe("auth");
+  });
 });
 
 describe("ClaudeCodeAdapter.continueSession (ticket 21, fake Sandbox — never the real agent)", () => {

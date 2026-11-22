@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Adapter, AdapterContext } from "../src/adapter";
@@ -715,5 +715,59 @@ describe("a Continuation refuses an Adapter mismatch", () => {
       }
     },
     60_000,
+  );
+});
+
+describe("ticket 30: recover keeps the recorded Adapter", () => {
+  test(
+    "a stale result settled by recover keeps the adapter it recorded, so a Continuation with no --adapter still inherits it",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({
+          task: "one",
+          cwd: repo.path,
+          home: home.path,
+          name: "stale-adapter",
+          adapter: namedAdapter("other-agent", fakeAgent({ launch: "round one" })),
+        });
+        expect(first.adapter).toBe("other-agent");
+
+        // A round that re-locked after this result was written, then died before writing its own,
+        // is what makes `settleResult` treat the result on disk as stale and rebuild it.
+        const lockPath = runLockPath(first.run, home.path);
+        const record = JSON.parse(readFileSync(lockPath, "utf8"));
+        await Bun.sleep(10);
+        writeFileSync(lockPath, JSON.stringify(record));
+
+        const recovered = await runCli(["recover"], { cwd: repo.path, home: home.path });
+        expect(recovered.exitCode).toBe(0);
+
+        const settled = readResult(first.run, home.path)!;
+        expect(settled.status).toBe("not-converged");
+        expect(settled.adapter).toBe("other-agent");
+
+        let inherited: { adapterName: string; runId: string } | undefined;
+        const continued = await run({
+          task: "more",
+          cwd: repo.path,
+          home: home.path,
+          continue: "stale-adapter",
+          adapterByName: (name) => namedAdapter(name, fakeAgent({ continue: "round two" })),
+          onAdapterInherited: (adapterName, runId) => {
+            inherited = { adapterName, runId };
+          },
+        });
+
+        expect(inherited).toEqual({ adapterName: "other-agent", runId: first.run });
+        expect(continued.adapter).toBe("other-agent");
+        expect(continued.finalMessage).toBe("round two");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    90_000,
   );
 });
