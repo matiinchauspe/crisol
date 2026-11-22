@@ -607,8 +607,7 @@ function resolveAdapter(
   }
   if (continued.adapterName === undefined) {
     throw new Error(
-      `Run ${continued.id} kept no record of which Adapter made it (it predates this Crisol version); ` +
-        `pass --adapter to continue branch "${continued.branch}".`,
+      `Run ${continued.id} kept no record of which Adapter made it; pass --adapter to continue branch "${continued.branch}".`,
     );
   }
   if (byName === undefined) {
@@ -802,6 +801,7 @@ function discardReservation(reservation: Reservation, home: string): void {
  * its id may already have been handed out, and only `crisol gc` deletes Run state. It never cut a
  * branch, so there is nothing to fetch back. Never throws, so the error that ended the Run is the
  * one its caller sees; returns the result it computed so the caller can attach it to that error.
+ * `adapterName` is set only when pre-flight had already resolved one before this Run ended.
  */
 function endUnstartedRun(
   reservation: Reservation,
@@ -810,6 +810,7 @@ function endUnstartedRun(
   network: NetworkMode,
   signal: AbortSignal | undefined,
   error: unknown,
+  adapterName?: string,
 ): RunResult {
   const reason = signal?.aborted
     ? `interrupted: ${typeof signal.reason === "string" ? signal.reason : "abort"}`
@@ -820,6 +821,7 @@ function endUnstartedRun(
     base,
     status: "not-converged",
     reason,
+    ...(adapterName !== undefined ? { adapter: adapterName } : {}),
     iterations: 0,
     gates: [],
     network,
@@ -869,7 +871,8 @@ export async function reserveDetachedRun(options: RunOptions): Promise<DetachedR
     pidPath: runPidPath(reservation.id, prepared.home),
     lock: reservation.lock,
     discard: () => discardReservation(reservation, prepared.home),
-    end: (error) => endUnstartedRun(reservation, prepared.home, base, options.network ?? "allowlist", undefined, error),
+    end: (error) =>
+      endUnstartedRun(reservation, prepared.home, base, options.network ?? "allowlist", undefined, error, prepared.adapter.name),
   };
 }
 
@@ -890,21 +893,26 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   let reservation: Reservation;
   let prepared: PreparedRun;
   let base: string;
+  // Separate from `prepared`: reading `prepared` before assignment in the catches below would trip
+  // TS's "used before assigned" check; `string | undefined` is exempt.
+  let adapterName: string | undefined;
   if (options.detached) {
     reservation = adoptReservation(options.detached, home);
     base = `${options.base}@${options.baseSha}`;
     try {
       writeFileSync(runPidPath(reservation.id, home), String(process.pid));
       prepared = await prepareRun(options, readFileSync(runPromptPath(reservation.id, home), "utf8"));
+      adapterName = prepared.adapter.name;
       if (prepared.hostRepoPath !== reservation.host) {
         throw new Error(`Run ${reservation.id} was reserved for ${reservation.host}, not ${prepared.hostRepoPath}.`);
       }
     } catch (error) {
-      const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
+      const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error, adapterName);
       throw attachResult(error, result);
     }
   } else {
     prepared = await prepareRun(options, undefined, sharedInputs);
+    adapterName = prepared.adapter.name;
     await letSignalsLand();
     // The user never saw an id yet, so a signal in pre-flight leaves nothing, as a failed check does.
     if (options.signal?.aborted) throw interruptedBeforeReserving();
@@ -919,7 +927,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         endUnstartedContinuation(reservation, home, options.signal, error);
         throw error;
       }
-      const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error);
+      const result = endUnstartedRun(reservation, home, base, networkMode, options.signal, error, adapterName);
       throw attachResult(error, result);
     }
   }

@@ -66,6 +66,7 @@ function settleResult(id: string, home: string): void {
       base: result.base,
       status: "not-converged",
       reason: "interrupted: the round ended before it wrote a result",
+      ...(result.adapter !== undefined ? { adapter: result.adapter } : {}),
       iterations: result.iterations,
       gates: result.gates,
       network: result.network,
