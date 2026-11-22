@@ -51,3 +51,15 @@ crashed mid-round and was then recovered read exactly like one that predates thi
 if it kept no record, naming an age it could not know. Fixed to carry `adapter` through that
 rebuild too; the refusal above now says only that no Adapter was recorded, never that the Run
 predates this Crisol version.
+
+## Ticket 31 amends this (2026-11-21): `name` is required where `continueSession` is
+
+Optional `name` let an Adapter that implements `continueSession` record no `adapter`, so its Runs
+later fell into the "kept no record" refusal although that Adapter made them; continuing a named
+Run with it read `not "undefined"`. A Run now refuses, before any Sandbox starts, an Adapter that
+implements `continueSession` with no `name`; one without `continueSession` still needs none. On a
+Continuation an explicit Adapter is checked for `continueSession` and a `name` before it is matched
+against the recorded one, so a nameless one is refused for what it lacks, never by an `"undefined"`
+name. `onAdapterInherited` — the CLI's `Continuing Run <id> with Adapter <name> (recorded by the
+Run).` — now fires only once `adapterByName` has built the inherited Adapter, so an unknown recorded
+name prints its refusal alone.

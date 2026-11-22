@@ -34,3 +34,13 @@ doing it silently, not building the deliberate path. The README names today's pa
 the garbage-collection section: removing the Run's dir by hand under `~/.crisol/runs/<id>` — the
 same path a `no-record` Run was already told to take (ADR 0018). A later ticket is free to add a
 flag.
+
+## Ticket 31 amends this (2026-11-21): remove what gc would, not the whole dir
+
+The by-hand path above, and the refusal that pointed at it, told the user to remove the whole Run
+dir — which also drops `log` and `result.json`, the record `gc` itself deliberately keeps (ADR
+0018) — and named a fixed `~/.crisol/runs/<id>` even when `CRISOL_HOME` points elsewhere. The
+refusal now names the Run dir resolved from the home in use, and tells the user to remove only
+what `gc` would have: its `repo/`, `sessions/` and `network/`. A parked or checkpoint Run whose
+`repo/` is already gone is skipped silently, as an already-collected Run is, rather than refused
+again with advice about dirs that no longer exist. Still no flag: removal stays a by-hand act.

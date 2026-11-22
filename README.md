@@ -303,7 +303,8 @@ because Crisol keeps it under the Run dir, in `sessions/`.
 Every Run result also names the Adapter that made it. `--continue` with no `--adapter` inherits
 that one, printing `Continuing Run <id> with Adapter <name> (recorded by the Run).`; naming a
 different `--adapter` is refused, naming both, before any Sandbox starts — and so is a Run from
-before Crisol recorded one, which asks for `--adapter` rather than assuming the fake Adapter.
+before Crisol recorded one, which asks for `--adapter` rather than assuming the fake Adapter. An
+Adapter that implements `continueSession` must carry a `name`, or a Run refuses it.
 
 While a round runs, `crisol status` shows it `queued` or `running`, never the previous round's
 outcome. One killed mid-round shows `dead`; after `crisol recover`, its result reads
@@ -520,8 +521,9 @@ collected, so a Continuation cannot start on a Clone `gc` is about to delete; it
 you decline. A collected Run can no longer be continued.
 A `parked` or `checkpoint` Run is never collected by the 7-day sweep, however old: its session is
 the point, waiting for a Continuation, so `gc` refuses it by name every time, same as a moved
-branch or a held lock. Remove one yourself (by hand, under `~/.crisol/runs/<id>`) once you know
-you won't continue it.
+branch or a held lock. Once you know you won't continue one, remove what `gc` would have — its
+`repo/`, `sessions/` and `network/`, under the Run dir the refusal names — by hand; removing the
+whole Run dir drops its `log` and `result.json` too.
 `log`, `result.json`, `lock`, `pid` and `prompt` are never touched, and `gc` never deletes a branch, whatever you confirm. `--include-failed` adds
 `not-converged` Runs to what counts, on top of every other check above — it does not waive any of
 them. A Run still missing its Fetch-back is never collected either way; run `crisol recover` first.
@@ -697,8 +699,8 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0023](docs/adr/0023-a-continuation-pre-flights-its-branch-before-any-sandbox-starts.md): `findContinuedRun` refuses a branch checked out in the host repo or one of its worktrees (`git worktree list --porcelain`), or one whose tip there no longer matches the Run's Clone, before any Slot or Sandbox; Fetch-back's own fast-forward-only refusal stays as the race window's last line of defense (amends ADR 0020, resolving two of its "Known limits")
 - [0024](docs/adr/0024-a-continuation-finds-its-run-by-a-live-clone-not-a-run-result.md): a Run claims its branch only when its own Clone still has a local branch by that name, never merely because `result.json` names it; a Run that ended before a Slot, or whose Clone `crisol gc` collected, no longer claims, so reusing a `--name` after that no longer refuses `--continue` as claimed by two Runs forever; when a Clone-less Run's result still names the branch, the refusal says so and names the true cause (`crisol gc` only when that Run's own Fetch-back had completed, never otherwise) rather than claiming nobody named it (amends ADR 0020)
 - [0025](docs/adr/0025-status-and-recover-tell-a-stale-result-from-the-current-round.md): `readEntry` probes the Run lock before trusting ANY result, not only a missing one, and reads a result older than the lock's own last reservation as `dead` rather than `finished`; `crisol recover` renames `markFetchedBack` to `settleResult`, which rewrites a stale result whole — `not-converged`, an `interrupted` reason, a fresh `finishedAt`, no `finalMessage` — rather than only flipping `fetchBack` on it (amends ADR 0020, resolving its remaining "Known limit")
-- [0026](docs/adr/0026-a-run-records-its-adapter-and-a-continuation-matches-it.md): every real Adapter carries a `name` (`fake`, `claude-code`), kept as `adapter` in `result.json`; `--continue` with no `--adapter` inherits the recorded one and names it, one from before this ticket refuses and asks for `--adapter` instead of assuming the fake one, and an explicit `--adapter` that disagrees with the recorded one is refused naming both — all before any Sandbox starts (amends ADR 0020, whose rewritten `result.json` fields never named an Adapter)
-- [0027](docs/adr/0027-gc-never-ages-out-a-parked-or-checkpoint-run.md): a `parked` or `checkpoint` Run is checked ahead of age in `planGc`, so no amount of waiting makes it collectable; skipped as a new `awaits-continuation` `GcSkipKind`, reported by name like `in-use` rather than folded into the silent kinds; removal stays a deliberate, by-hand act under `~/.crisol/runs/<id>` today — no acceptance criterion asked for a new flag, so none was added (amends ADR 0018, which protected only `not-converged`)
+- [0026](docs/adr/0026-a-run-records-its-adapter-and-a-continuation-matches-it.md): every real Adapter carries a `name` (`fake`, `claude-code`), kept as `adapter` in `result.json`; `--continue` with no `--adapter` inherits the recorded one and names it, one from before this ticket refuses and asks for `--adapter` instead of assuming the fake one, and an explicit `--adapter` that disagrees with the recorded one is refused naming both — all before any Sandbox starts; amended by ticket 31 to require `name` on any Adapter implementing `continueSession` and to announce an inherited Adapter only once it is built (amends ADR 0020, whose rewritten `result.json` fields never named an Adapter)
+- [0027](docs/adr/0027-gc-never-ages-out-a-parked-or-checkpoint-run.md): a `parked` or `checkpoint` Run is checked ahead of age in `planGc`, so no amount of waiting makes it collectable; skipped as a new `awaits-continuation` `GcSkipKind`, reported by name like `in-use` rather than folded into the silent kinds; removal stays a deliberate, by-hand act today — no acceptance criterion asked for a new flag, so none was added; amended by ticket 31 to name the resolved Run dir and only its `repo/`, `sessions/` and `network/`, keeping the record (amends ADR 0018, which protected only `not-converged`)
 
 ## Development
 
