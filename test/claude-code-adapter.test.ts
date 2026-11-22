@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProviderFailureError, type AdapterContext } from "../src/adapter";
 import {
@@ -12,6 +13,7 @@ import {
   parseClaudeVersionOutput,
 } from "../src/adapters/claude-code";
 import { CLAUDE_TOKEN_SECRET_NAME } from "../src/secret-store";
+import { TENAZA_RELEASE } from "../src/tenaza";
 import type { ExecResult, Sandbox, StopResult } from "../src/docker";
 
 describe("parseClaudeVersionOutput (ticket 14)", () => {
@@ -84,7 +86,7 @@ describe("buildAgentLayerDockerfile (ticket 14)", () => {
   });
 });
 
-describe("buildAgentLayerSpec (ticket 12, 14)", () => {
+describe("buildAgentLayerSpec", () => {
   test("tags the image by a hash of (Project layer image, agent version, Tenaza version), so a version bump gets a new tag", () => {
     const spec = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "1.2.3" });
     expect(spec.tag).toMatch(/^crisol-agent-claude-code:[0-9a-f]{12}$/);
@@ -109,12 +111,12 @@ describe("buildAgentLayerSpec (ticket 12, 14)", () => {
     expect(a.tag).not.toBe(b.tag);
   });
 
-  test("ticket 15 (Tenaza inside) is not built: an explicit Tenaza version still changes the tag, so a later real one will too", () => {
+  test("carrying Tenaza changes the tag, Project layer image and agent version held equal", () => {
     const withoutTenaza = buildAgentLayerSpec({ baseImage: "crisol-base:test", claudeCodeVersion: "1.2.3" });
     const withTenaza = buildAgentLayerSpec({
       baseImage: "crisol-base:test",
       claudeCodeVersion: "1.2.3",
-      tenazaVersion: "0.3.0",
+      tenaza: TENAZA_RELEASE,
     });
     expect(withoutTenaza.tag).not.toBe(withTenaza.tag);
   });
@@ -194,13 +196,17 @@ function fakeSandbox(responses: string[]): { sandbox: Sandbox; calls: string[][]
   return { sandbox, calls, stdins };
 }
 
-function fakeContext(sandbox: Sandbox, prompt = "fix the bug"): AdapterContext {
-  return { sandbox, repoPath: "/clone", prompt };
+function missingTenazaHome(): string {
+  return join(mkdtempSync(join(tmpdir(), "crisol-no-tenaza-")), ".tenaza");
 }
 
-describe("ClaudeCodeAdapter.declarePreStart (ticket 12, 14)", () => {
-  test("declares exactly the Claude token by name, no mounts yet, and an ensureImage thunk", () => {
-    const adapter = new ClaudeCodeAdapter({ hostVersion: () => "9.9.9" });
+function fakeContext(sandbox: Sandbox, prompt = "fix the bug"): AdapterContext {
+  return { sandbox, repoPath: "/clone", hostRepoPath: "/host", prompt };
+}
+
+describe("ClaudeCodeAdapter.declarePreStart", () => {
+  test("declares exactly the Claude token by name, no mounts without Tenaza, and an ensureImage thunk", () => {
+    const adapter = new ClaudeCodeAdapter({ hostVersion: () => "9.9.9", tenazaHome: missingTenazaHome() });
     const declaration = adapter.declarePreStart("crisol-base:test");
     expect(declaration.envNames).toEqual([CLAUDE_TOKEN_SECRET_NAME]);
     expect(declaration.mounts).toEqual([]);
@@ -209,7 +215,9 @@ describe("ClaudeCodeAdapter.declarePreStart (ticket 12, 14)", () => {
 
   test("never calls the host `claude --version` when hostVersion is overridden", () => {
     // Shelling out for real would make this depend on the test machine's `claude`.
-    expect(() => new ClaudeCodeAdapter({ hostVersion: () => "1.0.0" }).declarePreStart("crisol-base:test")).not.toThrow();
+    expect(() =>
+      new ClaudeCodeAdapter({ hostVersion: () => "1.0.0", tenazaHome: missingTenazaHome() }).declarePreStart("crisol-base:test"),
+    ).not.toThrow();
   });
 });
 

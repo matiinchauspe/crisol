@@ -187,6 +187,8 @@ export interface RunOptions extends TaskInput {
   onWarning?: (warning: string) => void;
   /** Called once a provider failure is caught, so a sibling Task still waiting for a Slot can give up rather than start into the same outage. */
   onProviderFailure?: (reason: string) => void;
+  /** A Run with no reserved-action guard can take one unasked, so it says so once, before any Slot wait. */
+  onUnguarded?: (line: string) => void;
   /** Called once a Continuation with no explicit `--adapter` inherits the one its Run recorded. */
   onAdapterInherited?: (adapterName: string, runId: string) => void;
   /**
@@ -970,6 +972,10 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     continued,
   } = prepared;
 
+  if (preStart.unguarded !== undefined) {
+    options.onUnguarded?.(`This Run has no reserved-action guard: ${preStart.unguarded}.`);
+  }
+
   let slot: Slot;
   try {
     slot = await acquireSlot({
@@ -1202,7 +1208,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       interruption.throwIfInterrupted();
 
       await Promise.race([
-        converge({ sandbox, repoPath: clonePath, prompt, instructions }),
+        converge({ sandbox, repoPath: clonePath, hostRepoPath, prompt, instructions }),
         interruption.rejected,
       ]);
 

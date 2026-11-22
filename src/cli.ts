@@ -674,6 +674,7 @@ async function main(argv: string[]): Promise<number> {
       shownWarnings.add(warning);
       process.stderr.write(`Warning: ${warning}\n`);
     },
+    onUnguarded: (line) => process.stderr.write(`${line}\n`),
     onAdapterInherited: (adapterName, runId) =>
       process.stderr.write(`Continuing Run ${runId} with Adapter ${adapterName} (recorded by the Run).\n`),
     // Shared across a fan-out's Runs, so this also gives up a sibling still waiting for a Slot.

@@ -1,6 +1,8 @@
 import { ProviderFailureError, type Adapter, type AdapterContext, type PreStartDeclaration } from "../adapter";
+import { existsSync } from "node:fs";
 import { contentHash, ensureImageFromDockerfile, type ExecResult } from "../docker";
 import { CLAUDE_TOKEN_SECRET_NAME } from "../secret-store";
+import { TENAZA_RELEASE, hostTenazaHome, tenazaLayerSteps, tenazaMounts, type TenazaRelease } from "../tenaza";
 
 const VERSION_PATTERN = /^(\d+\.\d+\.\d+)/;
 const PLAIN_VERSION = /^\d+\.\d+\.\d+$/;
@@ -36,6 +38,27 @@ const AGENT_SETTINGS = {
 const AGENT_USER = "agent";
 const AGENT_UID = 1000;
 const AGENT_HOME = "/home/agent";
+const AGENT_TENAZA_HOME = `${AGENT_HOME}/.tenaza`;
+
+const TENAZA_HOOK = { type: "command", command: "tenaza hook claude" };
+
+/**
+ * The events and matchers of Tenaza's own Claude Code plugin (`hooks/hooks.json`). Its PreToolUse
+ * guard for a missing binary is left out: the binary is baked into this same layer, and the guard's
+ * single quotes cannot ride inside the single-quoted `printf` that writes settings.json.
+ */
+const TENAZA_HOOKS = {
+  SessionStart: [{ hooks: [TENAZA_HOOK] }],
+  SubagentStart: [{ hooks: [TENAZA_HOOK] }],
+  // A reserved action waits here for the human's answer, so it gets Tenaza's own long timeout.
+  PreToolUse: [{ matcher: "Bash|mcp__.*", hooks: [{ ...TENAZA_HOOK, timeout: 240 }] }],
+  PostToolUse: [{ hooks: [TENAZA_HOOK] }],
+  SubagentStop: [{ hooks: [TENAZA_HOOK] }],
+  Stop: [{ hooks: [TENAZA_HOOK] }],
+  SessionEnd: [{ hooks: [TENAZA_HOOK] }],
+  UserPromptSubmit: [{ hooks: [TENAZA_HOOK] }],
+  Notification: [{ matcher: "permission_prompt|idle_prompt", hooks: [TENAZA_HOOK] }],
+};
 
 export interface AgentLayerSpec {
   tag: string;
@@ -47,19 +70,25 @@ export interface AgentLayerSpec {
  * drift. Non-root, because Claude Code refuses `--dangerously-skip-permissions` as root. No
  * `COPY`: the image is built from stdin, with no build context.
  */
-export function buildAgentLayerDockerfile(options: { baseImage: string; claudeCodeVersion: string }): string {
-  const { baseImage, claudeCodeVersion } = options;
+export function buildAgentLayerDockerfile(options: {
+  baseImage: string;
+  claudeCodeVersion: string;
+  tenaza?: TenazaRelease;
+}): string {
+  const { baseImage, claudeCodeVersion, tenaza } = options;
   if (!PLAIN_VERSION.test(claudeCodeVersion)) {
     throw new Error(
       `"${claudeCodeVersion}" is not a plain "X.Y.Z" version; refusing to embed it in a Dockerfile RUN step.`,
     );
   }
   // No single quotes in this JSON, so the whole blob is safe inside a single-quoted shell argument.
-  const settingsJson = JSON.stringify(AGENT_SETTINGS);
+  const settingsJson = JSON.stringify(tenaza !== undefined ? { ...AGENT_SETTINGS, hooks: TENAZA_HOOKS } : AGENT_SETTINGS);
   return [
     `FROM ${baseImage}`,
     // What Claude Code's docs require on Alpine/musl; ripgrep because the bundled one targets glibc.
     "RUN apk add --no-cache curl libgcc libstdc++ ripgrep",
+    // As root, before `USER`: the binary lands in /usr/local/bin.
+    ...(tenaza !== undefined ? tenazaLayerSteps(tenaza, AGENT_TENAZA_HOME) : []),
     // `-D`: without it BusyBox prompts for a password, and the build has no stdin to answer it.
     `RUN adduser -D -h ${AGENT_HOME} -s /bin/bash -u ${AGENT_UID} ${AGENT_USER}`,
     `USER ${AGENT_USER}`,
@@ -72,22 +101,20 @@ export function buildAgentLayerDockerfile(options: { baseImage: string; claudeCo
   ].join("\n");
 }
 
-/**
- * No Linux Tenaza binary ships in this image yet; a fixed placeholder keeps this input stable,
- * and a real version changes the tag once.
- */
+/** Hashed in Tenaza's place when it is absent, so a layer without it keeps the tag it always had. */
 export const TENAZA_VERSION_PLACEHOLDER = "none";
 
 /** A change to any of the three hashed inputs rebuilds the Agent layer on the next Run. */
 export function buildAgentLayerSpec(options: {
   baseImage: string;
   claudeCodeVersion: string;
-  tenazaVersion?: string;
+  tenaza?: TenazaRelease;
 }): AgentLayerSpec {
-  const { baseImage, claudeCodeVersion, tenazaVersion = TENAZA_VERSION_PLACEHOLDER } = options;
+  const { baseImage, claudeCodeVersion, tenaza } = options;
+  const tenazaVersion = tenaza?.version ?? TENAZA_VERSION_PLACEHOLDER;
   return {
     tag: `crisol-agent-claude-code:${contentHash([baseImage, claudeCodeVersion, tenazaVersion])}`,
-    dockerfile: buildAgentLayerDockerfile({ baseImage, claudeCodeVersion }),
+    dockerfile: buildAgentLayerDockerfile({ baseImage, claudeCodeVersion, tenaza }),
   };
 }
 
@@ -96,6 +123,8 @@ const CLAUDE_CLI_FLAGS = ["--dangerously-skip-permissions", "--output-format", "
 export interface BuildLaunchArgsOptions {
   binary: string;
   instructions?: string;
+  /** Chosen before launch, so Tenaza can label the session before the agent's first hook fires. */
+  sessionId?: string;
 }
 
 /**
@@ -103,8 +132,11 @@ export interface BuildLaunchArgsOptions {
  * `instructions` ride on launch only: a resumed session already carries them in its history.
  */
 export function buildLaunchArgs(options: BuildLaunchArgsOptions): string[] {
-  const { binary, instructions } = options;
+  const { binary, instructions, sessionId } = options;
   const args = [binary, "-p", ...CLAUDE_CLI_FLAGS];
+  if (sessionId !== undefined) {
+    args.push("--session-id", sessionId);
+  }
   if (instructions !== undefined && instructions.length > 0) {
     args.push("--append-system-prompt", instructions);
   }
@@ -193,13 +225,20 @@ export interface ClaudeCodeAdapterOptions {
   binary?: string;
   /** Test seam: the suite never needs `claude` installed. */
   hostVersion?: () => string;
+  /** Test seam: the suite never reads the real `~/.tenaza`. */
+  tenazaHome?: string;
 }
+
+/** `tenaza label` splits its pairs on whitespace, so a path with any would be cut short. */
+const LABELLABLE_PATH = /^\S+$/;
 
 /** One instance per Run: `launch`, `continueSession` and `resumeWithFeedback` share its session id. */
 export class ClaudeCodeAdapter implements Adapter {
   readonly name = "claude-code";
   private readonly binary: string;
   private readonly hostVersion: () => string;
+  private readonly tenazaHome: string;
+  private tenaza = false;
   private session: string | undefined;
   /**
    * Only the transcripts, which `--resume` looks up by working directory, never the whole
@@ -210,25 +249,51 @@ export class ClaudeCodeAdapter implements Adapter {
   constructor(options: ClaudeCodeAdapterOptions = {}) {
     this.binary = options.binary ?? "claude";
     this.hostVersion = options.hostVersion ?? hostClaudeVersion;
+    this.tenazaHome = options.tenazaHome ?? hostTenazaHome();
   }
 
   declarePreStart(projectImage: string): PreStartDeclaration {
     const claudeCodeVersion = this.hostVersion();
-    const { tag, dockerfile } = buildAgentLayerSpec({ baseImage: projectImage, claudeCodeVersion });
+    this.tenaza = existsSync(this.tenazaHome);
+    const tenaza = this.tenaza ? TENAZA_RELEASE : undefined;
+    const { tag, dockerfile } = buildAgentLayerSpec({ baseImage: projectImage, claudeCodeVersion, tenaza });
     return {
       envNames: [CLAUDE_TOKEN_SECRET_NAME],
-      mounts: [],
+      mounts: this.tenaza ? tenazaMounts(this.tenazaHome, AGENT_TENAZA_HOME) : [],
       ensureImage: () => ensureImageFromDockerfile(tag, dockerfile),
+      ...(this.tenaza ? {} : { unguarded: `no Tenaza home at ${this.tenazaHome}` }),
     };
   }
 
   async launch(ctx: AdapterContext): Promise<string | void> {
-    const args = buildLaunchArgs({ binary: this.binary, instructions: ctx.instructions });
+    let sessionId: string | undefined;
+    if (this.tenaza) {
+      sessionId = crypto.randomUUID();
+      await this.labelProject(ctx, sessionId);
+    }
+    const args = buildLaunchArgs({ binary: this.binary, instructions: ctx.instructions, sessionId });
     const result = await ctx.sandbox.exec(args, ctx.prompt);
     if (result.exitCode !== 0) {
       throw turnFailure(this.binary, result);
     }
     return this.takeTurn(result.stdout);
+  }
+
+  /**
+   * Hands Tenaza's hook the same `tenaza label` call a session makes for itself, so the board
+   * groups the Run under the host repo rather than the Clone. Best-effort: a missing label costs
+   * the board grouping, never the reserved-action guard.
+   */
+  private async labelProject(ctx: AdapterContext, sessionId: string): Promise<void> {
+    if (!LABELLABLE_PATH.test(ctx.hostRepoPath)) return;
+    const payload = {
+      session_id: sessionId,
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: `tenaza label project=${ctx.hostRepoPath}` },
+      cwd: ctx.repoPath,
+    };
+    await ctx.sandbox.exec(["tenaza", "hook", "claude"], JSON.stringify(payload));
   }
 
   // `-p` blocks until the turn completes, so the agent has finished by the time we ask.

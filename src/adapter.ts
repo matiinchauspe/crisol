@@ -7,12 +7,16 @@ export interface PreStartDeclaration {
   mounts: readonly MountSpec[];
   /** A closure because the build is async and `declarePreStart` is not. Absent, the Run uses the Project layer directly. */
   ensureImage?: () => Promise<string>;
+  /** Why nothing in the Sandbox guards reserved actions. A scripted stand-in attempts none, so it leaves this unset. */
+  unguarded?: string;
 }
 
 export interface AdapterContext {
   sandbox: Sandbox;
   /** Identical path inside and outside the Sandbox. */
   repoPath: string;
+  /** The host repo's git root, which the Clone was cut from. */
+  hostRepoPath: string;
   /** The full prompt — Preamble, Task and Context — to send the agent over stdin, never argv. */
   prompt: string;
   /** `~/.crisol/instructions.md`, when present; the global `~/.claude/CLAUDE.md` never reaches a Run. */
