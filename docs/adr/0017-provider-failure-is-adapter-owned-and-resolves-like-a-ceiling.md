@@ -29,6 +29,34 @@ the `result` text. Everything else, another API error status included, still sur
 `error: <message>`. A rate limit and an exhausted quota stay open: they are classified only once
 their own real captures exist, never inferred from this one.
 
+**Amendment 2026-11-21 (ticket 22):** the real Adapter now classifies all three categories.
+
+A review of 16..19 found the auth capture used `ANTHROPIC_API_KEY`, while the Sandbox
+authenticates with `CLAUDE_CODE_OAUTH_TOKEN` (`secret-store.ts`'s `CLAUDE_TOKEN_SECRET_NAME`). The
+owner captured that path too — an invalid OAuth token, same `claude` 2.1.283, same three fields,
+`"api_error_status": 401` — committed under `test/fixtures/claude-auth-failure-oauth/`. It
+classifies as `auth` by the unchanged ticket-19 rule.
+
+A rate limit and an exhausted quota still cannot be provoked on demand, and the standing
+instruction stayed "never call the real `claude` to produce one" — so these two are built from
+cited real reports instead, never from this repo's own capture: `claude-quota-failure/` from
+[#103807](https://github.com/anthropics/claude-code/issues/103807) (the exact invocation this
+repo uses, confirming `exit 1`, `is_error`, `terminal_reason: api_error`, `api_error_status: 429`)
+and [#57096](https://github.com/anthropics/claude-code/issues/57096) (the `result` wording);
+`claude-rate-limit-failure/` from [#87692](https://github.com/anthropics/claude-code/issues/87692)
+(`api_error_status: 429`, `terminal_reason: api_error`) and the locally installed
+`@anthropic-ai/claude-code@2.1.283` binary's own strings for the `result` wording a 429 keeps
+surfacing after `CLAUDE_CODE_MAX_RETRIES` (default 10, clamped at 15) runs out. Each fixture's
+`README.md` names exactly what came from where, so neither reads as a capture it is not.
+
+The order `turnFailure` (`src/adapters/claude-code.ts`) checks in: `api_error_status === 401` is
+always `auth`; failing that, a `result` starting with a known quota phrase at `api_error_status
+=== 429`, or matching the API-key credit-balance string `claude` itself checks for (no captured
+envelope — built from the 2.1.283 string, `/credit balance is too low/i`) at any status, is
+`quota`; everything else at `api_error_status === 429` is `rate limit`, a result-less 429
+included. Every other status, another API error status included, still surfaces as
+`error: <message>`.
+
 ## A provider failure resolves `run()`, like the ceiling — it is never thrown
 
 The spec's own wording ("returns `not-converged` with `reason: provider: …`") matches how the
