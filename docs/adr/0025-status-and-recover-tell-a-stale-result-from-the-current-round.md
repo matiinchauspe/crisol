@@ -31,3 +31,10 @@ better evidence for what, if anything, the dead round did before it died.
 No delivered-signal information survives a process's own death the way `run()`'s live interruption
 handler captures one, so the `reason` recover writes names only that the round ended before
 writing a result, never a cause the code never observed.
+
+## Ticket 30 amends this: `adapter` is also carried over
+
+The field list above left `adapter` out — an oversight, not a decision: the settled result should
+carry it exactly as it carries `reached`, so a Continuation recovering from a crash still inherits
+the right Adapter instead of being refused as if none had ever been recorded. Fixed in
+`settleResult`; everything else above is unchanged.

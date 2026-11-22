@@ -43,3 +43,11 @@ or an on-disk result hand-edited to a wrong name, is indistinguishable from a re
 cost was already accepted implicitly for `gates.json`, `session-id` and every other kept-by-the-Run
 file `findContinuedRun` trusts verbatim. Amends ADR 0020, whose rewritten `result.json` fields never
 named an Adapter.
+
+## Ticket 30 amends this: a crash is not the same as no record
+
+`settleResult` (ADR 0025) rebuilt a stale result without reading `adapter` from it, so a Run that
+crashed mid-round and was then recovered read exactly like one that predates this ADR — refused as
+if it kept no record, naming an age it could not know. Fixed to carry `adapter` through that
+rebuild too; the refusal above now says only that no Adapter was recorded, never that the Run
+predates this Crisol version.
