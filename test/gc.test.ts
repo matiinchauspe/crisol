@@ -154,8 +154,29 @@ describe("planGc, no Docker needed", () => {
         const plan = planGc(home.path, { includeFailed: false });
         expect(plan.collectable).toEqual([]);
         expect(plan.skipped[0]).toMatchObject({ run: "r1", kind: "awaits-continuation" });
-        expect(plan.skipped[0]!.why).toContain(status);
-        expect(plan.skipped[0]!.why).toContain("~/.crisol/runs/r1");
+        const why = plan.skipped[0]!.why;
+        expect(why).toContain(status);
+        expect(why).toContain(`repo/, sessions/ and network/ under ${runDir("r1", home.path)}`);
+        expect(why).toContain("log and result.json");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    });
+
+    test(`a ${status} Run whose repo/, sessions/ and network/ were removed by hand is no longer reported`, () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        writeFakeRun(home.path, repo.path, {
+          id: "r1",
+          branch: "crisol/r1",
+          status,
+          fetchBack: true,
+          finishedAt: Date.now() - 8 * DAY_MS,
+        });
+        collectRun("r1", home.path);
+        expect(planGc(home.path, { includeFailed: false })).toEqual({ collectable: [], skipped: [] });
       } finally {
         home.cleanup();
         repo.cleanup();
@@ -288,7 +309,7 @@ describe("planGc, no Docker needed", () => {
 
 describe("crisol gc reports why it kept a Run, no Docker needed", () => {
   for (const status of ["parked", "checkpoint"] as const) {
-    test(`names a ${status} Run and why, never silent like too-young`, async () => {
+    test(`names a ${status} Run and why, never silent like too-young, under the CRISOL_HOME in use`, async () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
@@ -304,7 +325,8 @@ describe("crisol gc reports why it kept a Run, no Docker needed", () => {
         expect(gc.stdout).toContain("Nothing to collect.");
         expect(gc.stderr).toContain("Run r1: refused");
         expect(gc.stderr).toContain(status);
-        expect(gc.stderr).toContain("~/.crisol/runs/r1");
+        expect(gc.stderr).toContain(runDir("r1", home.path));
+        expect(gc.stderr).not.toContain("~/.crisol");
       } finally {
         home.cleanup();
         repo.cleanup();

@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, writeFileSync
 import path from "node:path";
 import type { GlobalConfig } from "./config";
 import { branchSha } from "./git";
-import { runLockPath, runNetworkDir, runRepoPath, runSessionStorePath, runsRoot, runsSizeTrackerPath } from "./paths";
+import { runDir, runLockPath, runNetworkDir, runRepoPath, runSessionStorePath, runsRoot, runsSizeTrackerPath } from "./paths";
 import { readRunLockRecord } from "./recover";
 import { readResult } from "./runs";
 import { probeRunLock } from "./slots";
@@ -158,11 +158,15 @@ export function planGc(home: string, options: { includeFailed: boolean }): GcPla
       continue;
     }
     if (result.status === "parked" || result.status === "checkpoint") {
+      // Removed by hand as the refusal below advises; reporting it again would name dirs already gone.
+      if (!existsSync(runRepoPath(id, home))) continue;
       // Checked ahead of age: its session is the point, so no amount of waiting makes it collectable.
       skipped.push({
         run: id,
         kind: "awaits-continuation",
-        why: `${result.status}; it waits for a Continuation, not the age sweep — remove it by hand under ~/.crisol/runs/${id} to collect`,
+        why:
+          `${result.status}; it waits for a Continuation, not the age sweep — to collect it, remove its ` +
+          `repo/, sessions/ and network/ under ${runDir(id, home)} by hand, keeping its log and result.json`,
       });
       continue;
     }
