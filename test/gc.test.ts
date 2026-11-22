@@ -139,6 +139,30 @@ describe("planGc, no Docker needed", () => {
     }
   });
 
+  for (const status of ["parked", "checkpoint"] as const) {
+    test(`a ${status} Run past 7 days waits for a Continuation, never collected by age`, () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        writeFakeRun(home.path, repo.path, {
+          id: "r1",
+          branch: "crisol/r1",
+          status,
+          fetchBack: true,
+          finishedAt: Date.now() - 8 * DAY_MS,
+        });
+        const plan = planGc(home.path, { includeFailed: false });
+        expect(plan.collectable).toEqual([]);
+        expect(plan.skipped[0]).toMatchObject({ run: "r1", kind: "awaits-continuation" });
+        expect(plan.skipped[0]!.why).toContain(status);
+        expect(plan.skipped[0]!.why).toContain("~/.crisol/runs/r1");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    });
+  }
+
   test("refuses a Run whose host branch moved off the recorded commit, naming the reason", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
@@ -260,6 +284,33 @@ describe("planGc, no Docker needed", () => {
       repo.cleanup();
     }
   });
+});
+
+describe("crisol gc reports why it kept a Run, no Docker needed", () => {
+  for (const status of ["parked", "checkpoint"] as const) {
+    test(`names a ${status} Run and why, never silent like too-young`, async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        writeFakeRun(home.path, repo.path, {
+          id: "r1",
+          branch: "crisol/r1",
+          status,
+          fetchBack: true,
+          finishedAt: Date.now() - 8 * DAY_MS,
+        });
+        const gc = await runCli(["gc"], { cwd: repo.path, home: home.path });
+        expect(gc.exitCode).toBe(0);
+        expect(gc.stdout).toContain("Nothing to collect.");
+        expect(gc.stderr).toContain("Run r1: refused");
+        expect(gc.stderr).toContain(status);
+        expect(gc.stderr).toContain("~/.crisol/runs/r1");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    }, 15_000);
+  }
 });
 
 describe("collectRun, no Docker needed", () => {

@@ -29,6 +29,7 @@ export interface GcCandidate {
 export type GcSkipKind =
   | "not-fetched-back"
   | "not-converged"
+  | "awaits-continuation"
   | "too-young"
   | "no-record"
   | "host-missing"
@@ -154,6 +155,15 @@ export function planGc(home: string, options: { includeFailed: boolean }): GcPla
     }
     if (result.status === "not-converged" && !options.includeFailed) {
       skipped.push({ run: id, kind: "not-converged", why: "not-converged; pass --include-failed to collect it anyway" });
+      continue;
+    }
+    if (result.status === "parked" || result.status === "checkpoint") {
+      // Checked ahead of age: its session is the point, so no amount of waiting makes it collectable.
+      skipped.push({
+        run: id,
+        kind: "awaits-continuation",
+        why: `${result.status}; it waits for a Continuation, not the age sweep — remove it by hand under ~/.crisol/runs/${id} to collect`,
+      });
       continue;
     }
     if (typeof result.finishedAt !== "number" || !Number.isFinite(result.finishedAt)) {

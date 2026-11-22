@@ -427,9 +427,14 @@ function formatGcCandidate(candidate: { run: string; branch: string; sizeBytes: 
   return `  ${candidate.run}  ${candidate.branch}  ~${formatGb(candidate.sizeBytes)}`;
 }
 
-/** The other skip kinds would nag about every too-young or wrong-status Run on every call. */
+/** The other skip kinds would nag about every too-young Run on every call. */
 function reportRefusal(skip: GcSkip): void {
-  if (skip.kind === "branch-moved" || skip.kind === "host-missing" || skip.kind === "in-use") {
+  if (
+    skip.kind === "branch-moved" ||
+    skip.kind === "host-missing" ||
+    skip.kind === "in-use" ||
+    skip.kind === "awaits-continuation"
+  ) {
     process.stderr.write(`Run ${skip.run}: refused, ${skip.why}.\n`);
   }
 }
