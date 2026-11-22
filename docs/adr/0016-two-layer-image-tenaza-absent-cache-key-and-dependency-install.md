@@ -88,6 +88,15 @@ content is changing for the real first time then. `buildAgentLayerSpec`'s own te
 explicit, different Tenaza version does change the tag, so the day ticket 15 supplies a real one
 in place of the placeholder, nothing here needs to change.
 
+### Ticket 15 amends this (2026-11-22): the real version replaces the placeholder
+
+Ticket 15 landed the Linux Tenaza binary this section waited for. `buildAgentLayerSpec` now takes
+the pinned release (`tenaza?: TenazaRelease`) in place of `tenazaVersion?: string` and hashes its
+version when the host has Tenaza; without it, the placeholder `none` is still hashed, so a
+Tenaza-less layer keeps its tag. The host's Tenaza home is now probed, by the Adapter, because the
+image's content does vary with it: the binary and its hooks are baked only when it exists. See
+ADR 0028.
+
 ## Dependency install: detected from the Clone, run as Crisol's own infra step, before the agent
 
 `detectPackageManager` (`src/dependencies.ts`) reads the CLONE, not the host working tree — the
