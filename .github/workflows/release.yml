@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check the tag matches package.json
+        run: |
+          set -euo pipefail
+          declared="$(bun -e 'console.log(require("./package.json").version)')"
+          if [ "${GITHUB_REF_NAME#v}" != "$declared" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${declared}." >&2
+            exit 1
+          fi
+
+      # No `bun test` here: the suite drives a real Docker engine, which hosted macOS runners lack.
+      # It runs on the release commit before the tag is pushed.
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Compile
+        run: bun run build:release
+
+      # The runner is Apple silicon, so only the arm64 binary can run here.
+      - name: Smoke-test the arm64 binary
+        run: test "$(dist/crisol-darwin-arm64 --version)" = "${GITHUB_REF_NAME#v}"
+
+      - name: Compute checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 crisol-darwin-arm64 crisol-darwin-x64 > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/crisol-darwin-arm64
+            dist/crisol-darwin-x64
+            dist/checksums.txt
+          generate_release_notes: true
