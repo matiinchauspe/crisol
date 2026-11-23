@@ -18,6 +18,10 @@ export interface Blocked {
 export const BUILT_IN_ALLOWLIST: readonly string[] = [
   "api.anthropic.com",
   "registry.npmjs.org",
+  // Yarn 1's default registry, which its lockfiles pin every package URL to.
+  "registry.yarnpkg.com",
+  // Where Corepack downloads Yarn 2+ itself.
+  "repo.yarnpkg.com",
   "github.com",
   "codeload.github.com",
   "objects.githubusercontent.com",

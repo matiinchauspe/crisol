@@ -98,9 +98,59 @@ export function assertDockerReachable(): void {
   }
 }
 
+export const UNSUPPORTED_BASE_MESSAGE =
+  "Crisol builds its Agent layer with apk (Alpine) or apt-get (Debian, Ubuntu), and this Project layer image has neither. Base .crisol/Dockerfile on an Alpine, Debian or Ubuntu image.";
+
+/**
+ * A layer built on top of a repo's own image cannot know its distro ahead of time, so the shell
+ * picks the package manager at build time.
+ */
+export function installPackagesStep(packages: { apk: readonly string[]; apt: readonly string[] }): string {
+  const apt =
+    packages.apt.length > 0
+      ? `apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${packages.apt.join(" ")} && rm -rf /var/lib/apt/lists/*`
+      : ":";
+  return [
+    `RUN if command -v apk >/dev/null 2>&1; then apk add --no-cache ${packages.apk.join(" ")};`,
+    `elif command -v apt-get >/dev/null 2>&1; then ${apt};`,
+    `else echo "${UNSUPPORTED_BASE_MESSAGE}" >&2; exit 1; fi`,
+  ].join(" ");
+}
+
+const DOCKER_RUN_OWN_FAILURE = 125;
+
+/**
+ * Asked before a build on top of `image`, so an unsupported base is refused with the constraint
+ * named. A failed `docker build` would print it too, but under the whole failing step's text.
+ */
+export async function assertInstallableBase(image: string): Promise<void> {
+  const probe = await runDocker([
+    "docker",
+    "run",
+    "--rm",
+    "--pull",
+    "never",
+    "--entrypoint",
+    "/bin/sh",
+    image,
+    "-c",
+    "command -v apk || command -v apt-get",
+  ]);
+  if (probe.exitCode === 0) return;
+  if (probe.exitCode === DOCKER_RUN_OWN_FAILURE) {
+    throw new Error(`Could not start ${image} to check its package manager: ${probe.stderr.trim()}`);
+  }
+  throw new Error(UNSUPPORTED_BASE_MESSAGE);
+}
+
 /** No build context: the Dockerfile arrives over stdin, so it cannot `COPY`. */
-export async function ensureImageFromDockerfile(tag: string, dockerfile: string): Promise<string> {
+export async function ensureImageFromDockerfile(
+  tag: string,
+  dockerfile: string,
+  options: { beforeBuild?: () => Promise<void> } = {},
+): Promise<string> {
   if (imageExists(tag)) return tag;
+  await options.beforeBuild?.();
 
   // Not detached: it runs in pre-flight, before the Run has anything to tear down, so a Ctrl+C
   // should kill the build at once.

@@ -1,6 +1,6 @@
 import { ProviderFailureError, type Adapter, type AdapterContext, type PreStartDeclaration } from "../adapter";
 import { existsSync } from "node:fs";
-import { contentHash, ensureImageFromDockerfile, type ExecResult } from "../docker";
+import { assertInstallableBase, contentHash, ensureImageFromDockerfile, installPackagesStep, type ExecResult } from "../docker";
 import { CLAUDE_TOKEN_SECRET_NAME } from "../secret-store";
 import { TENAZA_RELEASE, hostTenazaHome, tenazaLayerSteps, tenazaMounts, type TenazaRelease } from "../tenaza";
 
@@ -27,14 +27,17 @@ function hostClaudeVersion(): string {
 /**
  * Attribution is off by configuration, never by asking the model. `attribution.commit`/`.pr`
  * take the trailer string (empty hides it), not a boolean: `claude doctor` rejects a boolean.
- * `USE_BUILTIN_RIPGREP: "0"` because the bundled ripgrep targets glibc and the image is musl.
+ * `USE_BUILTIN_RIPGREP: "0"` because the bundled ripgrep targets glibc and an Alpine image is musl.
  */
 const AGENT_SETTINGS = {
   attribution: { commit: "", pr: "", sessionUrl: false },
   env: { USE_BUILTIN_RIPGREP: "0" },
 };
 
-/** A real account, not a bare numeric `-u`, so `$HOME` resolves for every tool, Claude Code included. */
+/**
+ * A real account, not a bare numeric `-u`, so `$HOME` resolves for every tool, Claude Code included.
+ * Where an image already holds uid 1000 (`node`, `ubuntu`), that account is dropped and its files pass to `agent`.
+ */
 const AGENT_USER = "agent";
 const AGENT_UID = 1000;
 const AGENT_HOME = "/home/agent";
@@ -68,7 +71,8 @@ export interface AgentLayerSpec {
 /**
  * Pinned to the host's exact Claude Code version, so a Gate never passes or fails on version
  * drift. Non-root, because Claude Code refuses `--dangerously-skip-permissions` as root. No
- * `COPY`: the image is built from stdin, with no build context.
+ * `COPY`: the image is built from stdin, with no build context. Builds only on an Alpine, Debian or
+ * Ubuntu Project layer.
  */
 export function buildAgentLayerDockerfile(options: {
   baseImage: string;
@@ -85,12 +89,23 @@ export function buildAgentLayerDockerfile(options: {
   const settingsJson = JSON.stringify(tenaza !== undefined ? { ...AGENT_SETTINGS, hooks: TENAZA_HOOKS } : AGENT_SETTINGS);
   return [
     `FROM ${baseImage}`,
-    // What Claude Code's docs require on Alpine/musl; ripgrep because the bundled one targets glibc.
-    "RUN apk add --no-cache curl libgcc libstdc++ ripgrep",
+    // A Project layer may end on its own `USER`, and installing packages needs root.
+    "USER root",
+    // `libgcc`/`libstdc++` are what Claude Code's docs require on Alpine/musl; glibc images carry
+    // both already. `git` and `bash` because Crisol itself runs them inside the Sandbox.
+    installPackagesStep({
+      apk: ["bash", "ca-certificates", "curl", "git", "libgcc", "libstdc++", "ripgrep"],
+      apt: ["bash", "ca-certificates", "curl", "git", "ripgrep"],
+    }),
     // As root, before `USER`: the binary lands in /usr/local/bin.
     ...(tenaza !== undefined ? tenazaLayerSteps(tenaza, AGENT_TENAZA_HOME) : []),
-    // `-D`: without it BusyBox prompts for a password, and the build has no stdin to answer it.
-    `RUN adduser -D -h ${AGENT_HOME} -s /bin/bash -u ${AGENT_UID} ${AGENT_USER}`,
+    [
+      `RUN taken="$(awk -F: '$3 == ${AGENT_UID} { print $1 }' /etc/passwd)"`,
+      '&& if [ -n "$taken" ]; then if command -v userdel >/dev/null 2>&1; then userdel "$taken"; else deluser "$taken"; fi; fi',
+      // BusyBox's `adduser` needs `-D`, or it prompts for a password the build has no stdin to answer.
+      `&& if command -v useradd >/dev/null 2>&1; then useradd -m -d ${AGENT_HOME} -s /bin/bash -u ${AGENT_UID} ${AGENT_USER};`,
+      `else adduser -D -h ${AGENT_HOME} -s /bin/bash -u ${AGENT_UID} ${AGENT_USER}; fi`,
+    ].join(" "),
     `USER ${AGENT_USER}`,
     `ENV HOME="${AGENT_HOME}"`,
     `RUN curl -fsSL https://claude.ai/install.sh | bash -s ${claudeCodeVersion}`,
@@ -260,7 +275,8 @@ export class ClaudeCodeAdapter implements Adapter {
     return {
       envNames: [CLAUDE_TOKEN_SECRET_NAME],
       mounts: this.tenaza ? tenazaMounts(this.tenazaHome, AGENT_TENAZA_HOME) : [],
-      ensureImage: () => ensureImageFromDockerfile(tag, dockerfile),
+      ensureImage: () =>
+        ensureImageFromDockerfile(tag, dockerfile, { beforeBuild: () => assertInstallableBase(projectImage) }),
       ...(this.tenaza ? {} : { unguarded: `no Tenaza home at ${this.tenazaHome}` }),
     };
   }
