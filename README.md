@@ -30,10 +30,6 @@ $ crisol run "fix the login bug with + in emails" --json
 {"run":"9f496a56","branch":"crisol/9f496a56","base":"main@a2689ba","status":"unverified", …}
 ```
 
-> [!NOTE]
-> `crisol run` still defaults to a scripted stand-in Adapter that does no work. Pass
-> `--adapter claude-code` to have Claude Code work the Task, as every example below does.
-
 ## Why
 
 You can tell an agent to work on its own, but that is only safe if nothing it does can leak out.
@@ -116,14 +112,14 @@ full name is how you tell it you trust this one. A plain `brew install crisol` f
    Review and commit `.crisol/`:
 
    ```sh
-   crisol init --adapter claude-code
+   crisol init
    ```
 
 3. **Run a Task.** Crisol clones the repo, lets Claude Code work in a Sandbox until every Gate is
    green, and fetches back one branch:
 
    ```sh
-   crisol run "fix the login bug with + in emails" --adapter claude-code
+   crisol run "fix the login bug with + in emails"
    ```
 
    Read the result's `status`: `verified` means every Gate passed. Review the branch it names
@@ -155,7 +151,7 @@ crisol --version
 | `--max-iterations <n>` | `5` | Overrides how many Gate-fail-then-resume attempts this Run gets before `not-converged`. Must be a positive integer. |
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
 | `--network <allowlist\|learn\|open>` | `allowlist` | `learn` lets the Run reach any host and records which; `open` drops the wall. See [Network](#network). |
-| `--adapter <fake\|claude-code>` | `fake`; on `--continue`, the Run's own recorded Adapter | Which Adapter runs the Task. `fake` is the suite's own scripted stand-in; `claude-code` runs the real Claude Code Adapter (`crisol auth` first — see [Credentials](#credentials)). See [Continue a Run](#continue-a-run) for how a Continuation matches it. |
+| `--adapter <fake\|claude-code>` | `claude-code`; on `--continue`, the Run's own recorded Adapter | Which Adapter runs the Task. `claude-code` runs Claude Code (`crisol auth` first — see [Credentials](#credentials)); `fake` is the suite's own scripted stand-in, which does no work. See [Continue a Run](#continue-a-run) for how a Continuation matches it. |
 | `--json` | off | Print the Run result as JSON instead of one line — one JSON line per Run when there are several Tasks. |
 | `--detach` | off | Return at once with the run id and let the Run finish in the background. One Task only, and not with `--json`. See [Detach, status and logs](#detach-status-and-logs). |
 
@@ -184,7 +180,7 @@ Prepares the repo you run it in, and never overwrites a file that is already the
    adds another.
 
 Then it offers a first learn Run (`[y/N]`; anything else declines). Accepting starts one
-`--network learn` Run of a fixed Task, with one iteration, through `--adapter` (the stand-in by
+`--network learn` Run of a fixed Task, with one iteration, through `--adapter` (Claude Code by
 default), and appends every host it reached that is neither built in nor on the repo level to
 `.crisol/network`. Unlike `crisol run --network learn`, which only prints the lines, this writes
 them: you asked for it, and the file is yours to review before you commit `.crisol/`
@@ -428,8 +424,7 @@ it with `crisol allow` or finds it with `--network learn`
 
 ### Credentials
 
-By default, no secret enters the Sandbox at all — the scripted stand-in Adapter declares none.
-The real Claude Code Adapter (`--adapter claude-code`) declares exactly one,
+The Claude Code Adapter, the default, declares exactly one secret,
 `CLAUDE_CODE_OAUTH_TOKEN`, resolved from `crisol auth`'s Keychain entry below — run that first, or
 the Run fails before anything happens, naming it. A repo that needs another secret declares it by
 NAME, never by value, in the same `.crisol/config.toml`:
@@ -745,7 +740,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0018](docs/adr/0018-gc-ages-runs-by-a-stored-finishedat-and-verifies-the-host-branch-live.md): `RunResult` gains `finishedAt` (a dir's own birthtime cannot be back-dated, verified live) for `crisol gc`'s 7-day rule; "the recorded commit" is read live from the Clone's own branch tip, never persisted; `--include-failed` lifts only the status restriction, never the age or branch-verification checks; the confirmation prompt is one `y`/`yes` comparison with no `--yes` escape hatch (ADR 0013's lesson); `gc` deletes exactly `repo/` and the per-Run `network/` dir; the size-warning threshold is a plain, overridable byte count (`gc_warn_bytes`); amended by ticket 35 to collect a Run whose branch is gone from the host while a host branch or tag still contains the Clone's tip, refusing it as work that exists only in the Clone when none does
 - [0019](docs/adr/0019-the-final-message-is-what-a-turn-resolves-with-and-the-stop-line-is-its-last-line.md): `launch`/`resumeWithFeedback` resolve with the turn's last message (amends ADR 0005's `Promise<void>`), kept as `finalMessage` from the last iteration only; the Stop line is `CRISOL-STOP: parked` or `CRISOL-STOP: checkpoint`, exact, on the last non-blank line; it is read before the Gates, even with none declared; `parked` and `checkpoint` resolve `run()` and exit 0
 - [0020](docs/adr/0020-a-continuation-re-enters-its-runs-own-dir-and-keeps-only-the-session-transcripts.md): a Continuation keeps its Run's id, dir and lock and rewrites `result.json`; an Adapter names a `sessionStore` Crisol mounts from `runs/<id>/sessions/` (Claude Code: `~/.claude/projects` only, so the image's `settings.json` stays visible); the Gates default to the Run's own, kept in `gates.json`; Fetch-back stays fast-forward only
-- [0021](docs/adr/0021-crisol-init-writes-only-what-is-missing-and-declares-the-real-adapter.md): `crisol init` writes only the files a repo lacks; Gates come from `typecheck`, `lint` and `test` scripts; the `## Sandbox` block declares `--adapter claude-code`, since the default Adapter is still the stand-in; accepting the learn offer writes the reached hosts, which `crisol run --network learn` never does; the CLI's stand-in now ends each turn with a Final message
+- [0021](docs/adr/0021-crisol-init-writes-only-what-is-missing-and-declares-the-real-adapter.md): `crisol init` writes only the files a repo lacks; Gates come from `typecheck`, `lint` and `test` scripts; the `## Sandbox` block declares `--adapter claude-code`, since the default Adapter is still the stand-in; accepting the learn offer writes the reached hosts, which `crisol run --network learn` never does; the CLI's stand-in now ends each turn with a Final message (amended by 0032: the default Adapter is now Claude Code)
 - [0022](docs/adr/0022-gc-probes-and-holds-the-run-lock-before-collecting.md): `planGc` probes each candidate's Run lock the way `recover` does, skipping a held one as `in-use`; a lock it takes is kept open on the returned `GcCandidate` rather than released, so the caller holds it across the confirmation prompt and releases it only once the Run is either declined or collected (amends ADR 0018, which never considered a Continuation)
 - [0023](docs/adr/0023-a-continuation-pre-flights-its-branch-before-any-sandbox-starts.md): `findContinuedRun` refuses a branch checked out in the host repo or one of its worktrees (`git worktree list --porcelain`), or one whose tip there no longer matches the Run's Clone, before any Slot or Sandbox; Fetch-back's own fast-forward-only refusal stays as the race window's last line of defense (amends ADR 0020, resolving two of its "Known limits")
 - [0024](docs/adr/0024-a-continuation-finds-its-run-by-a-live-clone-not-a-run-result.md): a Run claims its branch only when its own Clone still has a local branch by that name, never merely because `result.json` names it; a Run that ended before a Slot, or whose Clone `crisol gc` collected, no longer claims, so reusing a `--name` after that no longer refuses `--continue` as claimed by two Runs forever; when a Clone-less Run's result still names the branch, the refusal says so and names the true cause (`crisol gc` only when that Run's own Fetch-back had completed, never otherwise) rather than claiming nobody named it (amends ADR 0020)
@@ -755,6 +750,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0028](docs/adr/0028-tenaza-decides-inside-the-sandbox-from-mounted-config-and-state.md): with the host's Tenaza home present, the Claude Code Adapter mounts its `config/` read-only and `state/` read-write and bakes Tenaza v0.5.2's checksum-verified musl binary and its plugin's hooks into the Agent layer, which decide locally, never over HTTP; the release's version enters the cache key (amends ADR 0016's placeholder); the Adapter labels the session with the host repo through `tenaza hook claude` before launching with `--session-id`; without Tenaza, `PreStartDeclaration.unguarded` makes the Run print one no-guard line
 - [0030](docs/adr/0030-the-ceiling-is-a-timer-and-the-sandboxs-removal-ends-what-it-interrupts.md): the wall-clock ceiling is a timer started before the first turn and raced against the whole loop, so a hung turn or Gate, or a Run with no Gates, ends on time; on it the Sandbox is removed at once, before the commit scan, since only that kills a `docker exec` in flight; the Run resolves `not-converged` with `reason: "ceiling"`, `iterations` counting finished turns (amends ADR 0006)
 - [0031](docs/adr/0031-recover-settles-only-dead-runs-and-every-dead-run.md): the Run lock record also carries the round's `base`, `network` and `adapter`, so `crisol recover` settles a first round killed before its result from it; a Continuation ended before its Slot restores the lock's mtime, keeping the previous round's result current; recover skips a Run whose current result records `fetchBack: true`, so a merged-and-deleted or advanced branch is left alone (amends ADRs 0010 and 0025)
+- [0032](docs/adr/0032-crisol-run-and-init-default-to-claude-code.md): `crisol run` and `crisol init` build the Claude Code Adapter when no `--adapter` is given, and the stand-in only as `--adapter fake`; `run()` itself keeps its `FakeAdapter` fallback; every suite test that starts a Run through the CLI names `--adapter fake` (amends ADR 0021)
 
 ## Development
 
@@ -769,8 +765,8 @@ bun run build:release  # dist/crisol-darwin-arm64 and dist/crisol-darwin-x64
 To run from source instead of a binary: `bun /path/to/crisol/src/cli.ts run …`.
 
 The tests drive real `git` and real Docker against throwaway repos and a throwaway `CRISOL_HOME`.
-`crisol run` always defaults to the scripted stand-in Adapter unless `--adapter claude-code` is
-passed explicitly, so the suite never calls a model or builds the real Agent layer image.
+The suite names `--adapter fake`, the scripted stand-in, on every Run it starts through the CLI
+(a Continuation inherits it), so it never calls a model or builds the real Agent layer image.
 
 ### Releasing
 
