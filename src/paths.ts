@@ -103,6 +103,10 @@ export function runSessionIdPath(id: string, home: string = crisolHome()): strin
   return path.join(runDir(id, home), "session-id");
 }
 
+export function runInstallDirtPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "install-dirt.json");
+}
+
 /** So a Continuation given no `--gate` verifies against the Gates its Run had. */
 export function runGatesPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "gates.json");

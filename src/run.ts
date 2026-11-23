@@ -18,8 +18,8 @@ import {
 } from "./docker";
 import type { MountSpec, Sandbox } from "./docker";
 import { addTrackedSize, runDirSizeBytes } from "./gc";
-import { formatGateFeedback, resolveGates, runGates } from "./gates";
-import type { Gate } from "./gates";
+import { checkCommitted, formatGateFeedback, resolveGates, runGates, snapshotInstallDirt } from "./gates";
+import type { Gate, InstallDirt } from "./gates";
 import { createInternalNetwork, ensureProxyImage, removeNetworkByRunId, startNetworkWall } from "./network";
 import type { Blocked, NetworkMode, NetworkWall, WallPolicy } from "./network";
 import { readProjectDockerfile, resolveProjectLayer } from "./project-layer";
@@ -51,6 +51,7 @@ import {
   crisolHome,
   runDir,
   runGatesPath,
+  runInstallDirtPath,
   runLockPath,
   runLogPath,
   runPidPath,
@@ -549,6 +550,17 @@ function readKeptGates(id: string, home: string): readonly string[] | undefined 
   if (!existsSync(file)) return undefined;
   const gates: unknown = JSON.parse(readFileSync(file, "utf8"));
   return Array.isArray(gates) && gates.every((gate) => typeof gate === "string") ? gates : undefined;
+}
+
+/** Empty for a Run that predates `install-dirt.json`: excusing nothing is the safe reading. */
+function readKeptInstallDirt(id: string, home: string): InstallDirt[] {
+  const file = runInstallDirtPath(id, home);
+  if (!existsSync(file)) return [];
+  const dirt: unknown = JSON.parse(readFileSync(file, "utf8"));
+  if (!Array.isArray(dirt)) return [];
+  return dirt.filter(
+    (entry): entry is InstallDirt => typeof entry?.path === "string" && typeof entry?.fingerprint === "string",
+  );
 }
 
 function readKeptSessionId(id: string, home: string): string | undefined {
@@ -1089,6 +1101,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   let status: RunStatus = "unverified";
   let reason: string | undefined;
   let gateResults: Gate[] = [];
+  let installDirt: InstallDirt[] = [];
   const warnings: string[] = [];
   let primaryError: unknown;
   let fetchBackError: unknown;
@@ -1159,33 +1172,45 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         return;
       }
 
-      const { results, firstFailure } = await runGates(ctx.sandbox, gates);
+      let feedback: string;
+      let failure: string;
+      let failureOutput: string;
+      const uncommitted = await checkCommitted(ctx.sandbox, branch, installDirt);
       throwIfStopped(clock);
-      gateResults = results;
-      appendLog(
-        logPath,
-        `gates (iteration ${iterations}): ${results
-          .map((gate) => `${gate.cmd} => ${gate.ok ? "ok" : "FAIL"}`)
-          .join("; ")}`,
-      );
+      if (uncommitted !== undefined) {
+        feedback = uncommitted;
+        failure = "the Clone is not committed on its branch";
+        failureOutput = uncommitted;
+        appendLog(logPath, `iteration ${iterations}: ${failure}, no Gate runs`);
+      } else {
+        const { results, firstFailure } = await runGates(ctx.sandbox, gates);
+        throwIfStopped(clock);
+        gateResults = results;
+        appendLog(
+          logPath,
+          `gates (iteration ${iterations}): ${results
+            .map((gate) => `${gate.cmd} => ${gate.ok ? "ok" : "FAIL"}`)
+            .join("; ")}`,
+        );
 
-      if (firstFailure === undefined) {
-        status = "verified";
-        return;
+        if (firstFailure === undefined) {
+          status = "verified";
+          return;
+        }
+        feedback = formatGateFeedback(firstFailure);
+        failure = `failing Gate "${firstFailure.cmd}"`;
+        failureOutput = firstFailure.output;
       }
 
       if (iterations >= maxIterations) {
         status = "not-converged";
         reason = "ceiling";
-        appendLog(
-          logPath,
-          `ceiling reached at iteration ${iterations}; last failing Gate "${firstFailure.cmd}": ${firstFailure.output}`,
-        );
+        appendLog(logPath, `ceiling reached at iteration ${iterations}; last ${failure}: ${failureOutput}`);
         return;
       }
 
-      appendLog(logPath, `resuming with feedback for failing Gate "${firstFailure.cmd}"`);
-      await runTurn(adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure)), clock);
+      appendLog(logPath, `resuming with feedback for ${failure}`);
+      await runTurn(adapter.resumeWithFeedback(ctx, feedback), clock);
       iterations += 1;
     }
   };
@@ -1294,6 +1319,17 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       if (packageManager !== undefined) {
         await installDependencies(sandbox, packageManager);
         appendLog(logPath, `dependencies installed with ${packageManager}`);
+      }
+      // A Continuation's Clone also holds what the last round left uncommitted, so only the first
+      // round's snapshot tells the install's dirt from the agent's.
+      if (continued !== undefined) {
+        installDirt = readKeptInstallDirt(id, home);
+      } else {
+        installDirt = packageManager !== undefined ? await snapshotInstallDirt(sandbox) : [];
+        writeFileSync(runInstallDirtPath(id, home), JSON.stringify(installDirt));
+      }
+      if (installDirt.length > 0) {
+        appendLog(logPath, `left dirty by the dependency install, not asked of the agent: ${installDirt.map((dirt) => dirt.path).join(", ")}`);
       }
       await letSignalsLand();
       interruption.throwIfInterrupted();
