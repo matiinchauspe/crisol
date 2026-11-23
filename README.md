@@ -606,6 +606,10 @@ timeout_minutes = 90
 An invalid value (anything other than a positive integer) in either the flag or the config file
 fails the Run before anything happens, naming the flag — or the config file's path — and the key.
 
+The wall clock starts before the agent's first turn and ends the Run on time whatever is running —
+a turn that never returns, a Gate that never exits, a Run with no Gates at all: the Sandbox is
+removed, which ends what ran in it, and the Run is `not-converged` with `reason: "ceiling"`.
+
 ### The Run result
 
 The fields are only ever added within 0.x, never renamed or removed:
@@ -742,6 +746,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0026](docs/adr/0026-a-run-records-its-adapter-and-a-continuation-matches-it.md): every real Adapter carries a `name` (`fake`, `claude-code`), kept as `adapter` in `result.json`; `--continue` with no `--adapter` inherits the recorded one and names it, one from before this ticket refuses and asks for `--adapter` instead of assuming the fake one, and an explicit `--adapter` that disagrees with the recorded one is refused naming both — all before any Sandbox starts; amended by ticket 31 to require `name` on any Adapter implementing `continueSession` and to announce an inherited Adapter only once it is built (amends ADR 0020, whose rewritten `result.json` fields never named an Adapter)
 - [0027](docs/adr/0027-gc-never-ages-out-a-parked-or-checkpoint-run.md): a `parked` or `checkpoint` Run is checked ahead of age in `planGc`, so no amount of waiting makes it collectable; skipped as a new `awaits-continuation` `GcSkipKind`, reported by name like `in-use` rather than folded into the silent kinds; removal stays a deliberate, by-hand act today — no acceptance criterion asked for a new flag, so none was added; amended by ticket 31 to name the resolved Run dir and only its `repo/`, `sessions/` and `network/`, keeping the record (amends ADR 0018, which protected only `not-converged`)
 - [0028](docs/adr/0028-tenaza-decides-inside-the-sandbox-from-mounted-config-and-state.md): with the host's Tenaza home present, the Claude Code Adapter mounts its `config/` read-only and `state/` read-write and bakes Tenaza v0.5.2's checksum-verified musl binary and its plugin's hooks into the Agent layer, which decide locally, never over HTTP; the release's version enters the cache key (amends ADR 0016's placeholder); the Adapter labels the session with the host repo through `tenaza hook claude` before launching with `--session-id`; without Tenaza, `PreStartDeclaration.unguarded` makes the Run print one no-guard line
+- [0030](docs/adr/0030-the-ceiling-is-a-timer-and-the-sandboxs-removal-ends-what-it-interrupts.md): the wall-clock ceiling is a timer started before the first turn and raced against the whole loop, so a hung turn or Gate, or a Run with no Gates, ends on time; on it the Sandbox is removed at once, before the commit scan, since only that kills a `docker exec` in flight; the Run resolves `not-converged` with `reason: "ceiling"`, `iterations` counting finished turns (amends ADR 0006)
 
 ## Development
 
