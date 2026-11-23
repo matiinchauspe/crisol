@@ -74,6 +74,14 @@ describe("parseAllowlistFile reads either level: one host per line", () => {
   );
 });
 
+describe("the built-in level", () => {
+  test("lets a yarn repo install: Yarn 1's registry and the host Corepack fetches Yarn 2+ from", () => {
+    // Both hosts from Corepack's own config.json (github.com/nodejs/corepack), definitions.yarn.ranges.
+    expect(BUILT_IN_ALLOWLIST).toContain("registry.yarnpkg.com");
+    expect(BUILT_IN_ALLOWLIST).toContain("repo.yarnpkg.com");
+  });
+});
+
 describe("mergedAllowlist merges built-in, user and repo levels", () => {
   test("every level contributes, with no duplicates", () => {
     const home = createTempHome();

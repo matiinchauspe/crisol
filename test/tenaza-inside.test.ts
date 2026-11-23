@@ -34,26 +34,39 @@ function settingsFrom(dockerfile: string): { hooks?: Record<string, { matcher?: 
 }
 
 describe("the pinned Tenaza release", () => {
-  test("is v0.5.2's musl builds, with the sha256s its release publishes", () => {
-    // Verify with: gh release view v0.5.2 -R matiinchauspe/tenaza
+  test("is v0.5.2's musl and glibc builds, with the sha256s its release publishes", () => {
+    // Each name and sha256 as `gh release view <tag> -R matiinchauspe/tenaza --json assets` lists them.
     expect(TENAZA_RELEASE.version).toBe("0.5.2");
     expect(TENAZA_RELEASE.assets).toEqual({
-      aarch64: {
-        name: "tenaza-linux-arm64-musl",
-        sha256: "a61fff23e27af6434275e2fa2e2bfd8994c128901a9201f3453584eb788bfcac",
+      musl: {
+        aarch64: {
+          name: "tenaza-linux-arm64-musl",
+          sha256: "a61fff23e27af6434275e2fa2e2bfd8994c128901a9201f3453584eb788bfcac",
+        },
+        x86_64: {
+          name: "tenaza-linux-x64-musl",
+          sha256: "7989c7cc44109115ea07e0d60b3e2ceab6896a586935364ecc161cb3449cfc49",
+        },
       },
-      x86_64: {
-        name: "tenaza-linux-x64-musl",
-        sha256: "7989c7cc44109115ea07e0d60b3e2ceab6896a586935364ecc161cb3449cfc49",
+      glibc: {
+        aarch64: {
+          name: "tenaza-linux-arm64",
+          sha256: "0fc38bac013cea13844c63dc9a3f3b3e39dd90c4d2ce77f56e64bd1710c5e1f6",
+        },
+        x86_64: {
+          name: "tenaza-linux-x64",
+          sha256: "a3583da49fb13ec4717da98c5d37808a43e7a04e71bc62be4f96099f62001d7c",
+        },
       },
     });
   });
 
-  test("the layer steps download the arch's asset from the release, verify its sha256, and add the libraries it links", () => {
+  test("the layer steps download the libc's and arch's asset from the release, verify its sha256, and add the libraries the musl build links", () => {
     const steps = tenazaLayerSteps(TENAZA_RELEASE, "/home/agent/.tenaza").join("\n");
     expect(steps).toContain("https://github.com/matiinchauspe/tenaza/releases/download/v0.5.2/");
     expect(steps).toContain("uname -m");
-    for (const asset of Object.values(TENAZA_RELEASE.assets)) {
+    expect(steps).toContain("/lib/ld-musl-");
+    for (const asset of Object.values(TENAZA_RELEASE.assets).flatMap((byArch) => Object.values(byArch))) {
       expect(steps).toContain(asset.name);
       expect(steps).toContain(asset.sha256);
     }

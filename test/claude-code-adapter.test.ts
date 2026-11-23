@@ -68,7 +68,13 @@ describe("buildAgentLayerDockerfile (ticket 14)", () => {
     const installLine = dockerfile.indexOf("install.sh");
     expect(userLine).toBeGreaterThan(-1);
     expect(installLine).toBeGreaterThan(userLine);
-    expect(dockerfile).not.toContain("USER root");
+    const users = dockerfile.split("\n").filter((line) => line.startsWith("USER "));
+    expect(users.at(-1)).toBe("USER agent");
+  });
+
+  test("takes root first, since a Project layer may end on its own `USER`", () => {
+    const dockerfile = buildAgentLayerDockerfile({ baseImage: "crisol-base:test", claudeCodeVersion: "9.9.9" });
+    expect(dockerfile.split("\n").slice(0, 2)).toEqual(["FROM crisol-base:test", "USER root"]);
   });
 
   test("never installs via npm — the native installer, not @anthropic-ai/claude-code", () => {
