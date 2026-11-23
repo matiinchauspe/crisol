@@ -138,7 +138,7 @@ describe("parseServicesYaml: a restricted compose subset, no Docker needed", () 
 });
 
 describe("buildServiceRunArgs: the docker run shape, no Docker needed", () => {
-  test("joins the given network under the service's own name as its alias, labelled for sweep-up", () => {
+  test("joins the given network under the service's own name as its alias, labelled for sweep-up, and outlives its own exit", () => {
     const args = buildServiceRunArgs("run1", "crisol-net-run1", {
       name: "db",
       image: "postgres:16-alpine",
@@ -148,7 +148,6 @@ describe("buildServiceRunArgs: the docker run shape, no Docker needed", () => {
       "docker",
       "run",
       "-d",
-      "--rm",
       "--init",
       "--network",
       "crisol-net-run1",
@@ -371,6 +370,95 @@ describe("Services end to end, against a real Docker engine", () => {
       }
     },
     30_000,
+  );
+
+  test(
+    "behind the Allowlist wall, an HTTP Service is reachable by name with HTTP_PROXY set",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        // node:22-alpine carries Node for the server and busybox `wget` for the healthcheck,
+        // both checked live in that image.
+        writeServicesYaml(
+          repo.path,
+          [
+            "services:",
+            "  web:",
+            "    image: node:22-alpine",
+            `    command: ["node", "-e", "require('http').createServer((q, s) => s.end('svc-ok')).listen(8080)"]`,
+            "    healthcheck:",
+            '      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/"]',
+            "      interval: 1s",
+            "      timeout: 2s",
+            "      retries: 30",
+            "",
+          ].join("\n"),
+        );
+
+        const gate = 'test -n "$HTTP_PROXY" && curl -fsS --max-time 10 http://web:8080/ | grep -q svc-ok';
+        const result = await run({ task: "reach the web service", cwd: repo.path, home: home.path, gates: [gate] });
+
+        expect(result.network).toBe("allowlist");
+        expect(result.gates).toEqual([{ cmd: gate, ok: true }]);
+        expect(result.status).toBe("verified");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "a Service that exits before it is healthy fails the Run within seconds, with its exit code and last log lines",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        // A 30s interval keeps the healthcheck itself from settling anything within this test:
+        // only noticing the exit can end the wait this early.
+        writeServicesYaml(
+          repo.path,
+          [
+            "services:",
+            "  broken:",
+            "    image: alpine:3.20",
+            '    command: ["sh", "-c", "echo starting broken; echo missing DATABASE_URL >&2; exit 1"]',
+            "    healthcheck:",
+            '      test: ["CMD-SHELL", "exit 1"]',
+            "      interval: 30s",
+            "      retries: 10",
+            "",
+          ].join("\n"),
+        );
+
+        const startedAt = Date.now();
+        const failure = await run({ task: "never reached", cwd: repo.path, home: home.path }).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        const elapsedMs = Date.now() - startedAt;
+
+        expect(failure).toBeInstanceOf(Error);
+        const message = (failure as Error).message;
+        expect(message).toContain('"broken"');
+        expect(message).toContain("exited with code 1");
+        expect(message).toContain("starting broken");
+        expect(message).toContain("missing DATABASE_URL");
+        expect(elapsedMs).toBeLessThan(30_000);
+
+        const [runId] = readdirSync(path.join(home.path, "runs"));
+        const result = JSON.parse(readFileSync(path.join(home.path, "runs", runId!, "result.json"), "utf8")) as RunResult;
+        expect(result.iterations).toBe(0);
+        expect(result.reason).toContain("exited with code 1");
+        expect(dockerInspect(`crisol-svc-${runId}-broken`)).toBeUndefined();
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
   );
 
   test(

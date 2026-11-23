@@ -204,6 +204,12 @@ describe("buildProxyEnv sets both casings tinyproxy's clients actually read", ()
     expect(env.https_proxy).toBe("http://crisol-proxy-abc123:8888");
     expect(env.NO_PROXY).toBe(env.no_proxy);
   });
+
+  test("every declared Service name bypasses the proxy, beside loopback", () => {
+    const env = buildProxyEnv("crisol-proxy-abc123", ["db", "cache"]);
+    expect(env.NO_PROXY).toBe("localhost,127.0.0.1,db,cache");
+    expect(env.no_proxy).toBe(env.NO_PROXY);
+  });
 });
 
 describe("buildDockerRunArgs attaches the Sandbox to the Allowlist wall's network", () => {
@@ -258,7 +264,7 @@ describe("startNetworkWall fails closed when the internal network's subnet canno
       const home = createTempHome();
       const id = `wallfail${Date.now()}`;
       try {
-        await expect(startNetworkWall(id, home.path, image, { mode: "allowlist", hosts: [] }, () => undefined)).rejects.toThrow(/subnet/i);
+        await expect(startNetworkWall(id, home.path, image, { mode: "allowlist", hosts: [] }, [], () => undefined)).rejects.toThrow(/subnet/i);
         expect(dockerNetworkExists(`crisol-net-${id}`)).toBe(false);
       } finally {
         home.cleanup();
