@@ -13,7 +13,6 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-0.1.0-2dd4bf" alt="version 0.1.0">
-  <img src="https://img.shields.io/badge/status-walking%20skeleton-f59e0b" alt="status: walking skeleton">
   <img src="https://img.shields.io/badge/platform-macOS-8b93a0" alt="platform macOS">
   <img src="https://img.shields.io/badge/runtime-Bun-f9f1e1" alt="runtime Bun">
   <img src="https://img.shields.io/badge/license-MIT-34d399" alt="license MIT">
@@ -32,10 +31,8 @@ $ crisol run "fix the login bug with + in emails" --json
 ```
 
 > [!NOTE]
-> **Crisol is a walking skeleton.** Every stage of a Run below works end to end today, including
-> Gates, converge, least-privilege credentials and the Allowlist network wall. `crisol run` still
-> defaults to a scripted stand-in Adapter; the real Claude Code Adapter exists
-> (`--adapter claude-code`) but isn't the default yet. See [Roadmap](#roadmap).
+> `crisol run` still defaults to a scripted stand-in Adapter that does no work. Pass
+> `--adapter claude-code` to have Claude Code work the Task, as every example below does.
 
 ## Why
 
@@ -85,22 +82,52 @@ flowchart LR
 
 | | |
 |---|---|
-| **OS** | macOS (Linux is planned) |
-| **Runtime** | [Bun](https://bun.sh) |
+| **OS** | macOS, Apple silicon or Intel (Linux is planned) |
 | **Containers** | A running Docker engine: OrbStack, Docker Desktop, or Colima |
+| **Agent** | Claude Code (`claude`) on your host; the Sandbox installs the same version |
 | **Repo** | Any git repo with at least one commit |
 
-## Quick start
+## Install
 
 ```sh
-git clone https://github.com/matiinchauspe/crisol.git
-cd crisol && bun install
-
-# from inside any git repo you want to run against:
-bun /path/to/crisol/src/cli.ts run "say hello" --json
+brew tap matiinchauspe/crisol https://github.com/matiinchauspe/crisol
+brew install matiinchauspe/crisol/crisol
+crisol --version
 ```
 
-To get a standalone `crisol` binary instead, run `bun run build`. It writes `dist/crisol`.
+Use the full name in `brew install`. Homebrew only loads formulae from taps you trust, and the
+full name is how you tell it you trust this one. A plain `brew install crisol` fails with
+"Refusing to load formula … from untrusted tap". If you see that error, run
+`brew trust --formula matiinchauspe/crisol/crisol`.
+
+## Getting started
+
+1. **Authenticate once.** `crisol auth` runs `claude setup-token` and stores the token in
+   Crisol's own macOS Keychain entry, never on disk:
+
+   ```sh
+   crisol auth
+   ```
+
+2. **Onboard a repo.** From inside the repo, `crisol init` writes `.crisol/config.toml` with Gates
+   taken from your `package.json` scripts, an empty `.crisol/network`, and a `## Sandbox` block in
+   `AGENTS.md` (or `CLAUDE.md`). It never overwrites a file that is already there. It then offers a
+   first `--network learn` Run that records the hosts your repo needs; answer `y` or skip it.
+   Review and commit `.crisol/`:
+
+   ```sh
+   crisol init --adapter claude-code
+   ```
+
+3. **Run a Task.** Crisol clones the repo, lets Claude Code work in a Sandbox until every Gate is
+   green, and fetches back one branch:
+
+   ```sh
+   crisol run "fix the login bug with + in emails" --adapter claude-code
+   ```
+
+   Read the result's `status`: `verified` means every Gate passed. Review the branch it names
+   like any other.
 
 ## Usage
 
@@ -113,6 +140,7 @@ crisol auth
 crisol recover
 crisol gc [--include-failed]
 crisol init [--adapter <fake|claude-code>]
+crisol --version
 ```
 
 | Flag | Default | What it does |
@@ -667,13 +695,13 @@ v1 is built as 18 tracer-bullet tickets. Each one leaves Crisol working end to e
 | 06 | Network wall | ✅ |
 | 07 | Editable Allowlist, learn and open | ✅ |
 | 08 | Credentials | ✅ |
-| 09 | Commits | |
+| 09 | Commits | ✅ |
 | 10 | Text input | ✅ |
 | 11 | Services | ✅ |
 | 12 | Two-layer image and dependencies | ✅ |
 | 13 | Provider failure and capacity | ✅ |
 | 14 | Claude Code Adapter | ✅ |
-| 15 | Tenaza inside | |
+| 15 | Tenaza inside | ✅ |
 | 16 | `crisol gc` | ✅ |
 | 17 | `crisol init` | ✅ |
 | 18 | Release 0.1.0 | |
@@ -718,13 +746,27 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 ## Development
 
 ```sh
-bun test     # the suite; needs a running Docker engine
-bun check    # typecheck
+bun install
+bun test               # the suite; needs a running Docker engine
+bun check              # typecheck
+bun run build          # dist/crisol for this Mac
+bun run build:release  # dist/crisol-darwin-arm64 and dist/crisol-darwin-x64
 ```
+
+To run from source instead of a binary: `bun /path/to/crisol/src/cli.ts run …`.
 
 The tests drive real `git` and real Docker against throwaway repos and a throwaway `CRISOL_HOME`.
 `crisol run` always defaults to the scripted stand-in Adapter unless `--adapter claude-code` is
 passed explicitly, so the suite never calls a model or builds the real Agent layer image.
+
+### Releasing
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`: it checks the tag against
+`package.json`'s `version`, compiles both macOS binaries and publishes them with a
+`checksums.txt` as a GitHub Release. It does not run `bun test`, since hosted runners have no
+Docker engine, so run the suite on the commit before tagging it. This repo is its own Homebrew
+tap: once the release is out, set `version` and the two `sha256` values in `Formula/crisol.rb`
+from `checksums.txt` and push that to `main`.
 
 ## License
 
