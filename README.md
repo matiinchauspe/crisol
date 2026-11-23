@@ -477,11 +477,13 @@ services:
 Any other key — `ports`, `volumes`, `depends_on`, anything compose otherwise allows — fails the Run
 before anything happens, naming it. Each declared Service gets its own container, one per Run,
 reachable from inside the Sandbox by its name alone (`db:5432`) — never by its real container name,
-which carries the run id so two parallel Runs' same-named Services never collide. It is destroyed
-with the Run.
+which carries the run id so two parallel Runs' same-named Services never collide. Every Service
+name is in the Sandbox's `NO_PROXY`, so a tool that honours `HTTP_PROXY` (curl, npm, pip) reaches it
+directly instead of through the Allowlist proxy. It is destroyed with the Run.
 
 The agent launches only once every Service that declares a `healthcheck` reports healthy; one that
-never does fails the Run before any iteration is spent, with `iterations: 0`. `environment` takes a
+never does fails the Run before any iteration is spent, with `iterations: 0`. One that exits
+before it is healthy fails the Run on the next poll, naming its exit code and its last log lines. `environment` takes a
 mapping or compose's `KEY=VALUE` list form; `command` takes a list (exec form) or a single string
 (run through the image's shell, like compose's shell form); `healthcheck.test` is `["CMD", …]`,
 `["CMD-SHELL", "<cmd>"]`, or `["NONE"]`, with optional `interval`, `timeout`, `retries` and
@@ -756,6 +758,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0031](docs/adr/0031-recover-settles-only-dead-runs-and-every-dead-run.md): the Run lock record also carries the round's `base`, `network` and `adapter`, so `crisol recover` settles a first round killed before its result from it; a Continuation ended before its Slot restores the lock's mtime, keeping the previous round's result current; recover skips a Run whose current result records `fetchBack: true`, so a merged-and-deleted or advanced branch is left alone (amends ADRs 0010 and 0025)
 - [0032](docs/adr/0032-crisol-run-and-init-default-to-claude-code.md): `crisol run` and `crisol init` build the Claude Code Adapter when no `--adapter` is given, and the stand-in only as `--adapter fake`; `run()` itself keeps its `FakeAdapter` fallback; every suite test that starts a Run through the CLI names `--adapter fake` (amends ADR 0021)
 - [0033](docs/adr/0033-gates-run-only-on-a-clean-clone-with-head-on-the-branch.md): before every round of Gates, the Clone must be clean (untracked files included) with `HEAD` on `refs/heads/<branch>`, checked inside the Sandbox and raced against the wall clock; otherwise no Gate runs and the agent is resumed with that as feedback, spending an iteration; a Run with no Gates is not checked; paths the Run's first dependency install left dirty are excused while their content is unchanged, from a snapshot kept in the Run dir so a Continuation never excuses its previous round's uncommitted work
+- [0034](docs/adr/0034-service-names-bypass-the-proxy-and-a-service-that-exits-fails-the-run-at-once.md): every declared Service name joins `NO_PROXY`, so a proxy-honouring tool reaches it instead of being refused by tinyproxy (amends 0012); Service containers run without `--rm`, and the health wait reads `State.Status` first, so a Service that exits fails the Run at once with its exit code and last 20 log lines (amends 0015)
 
 ## Development
 

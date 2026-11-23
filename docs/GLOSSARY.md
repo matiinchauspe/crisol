@@ -107,7 +107,8 @@ _Avoid_: Whitelist, firewall rule
 **Service**:
 A container `.crisol/services.yml` declares, one instance per Run, reachable by its own name on
 the Run's network, destroyed with it. The agent launches only once every Service's healthcheck
-passes; one that never becomes healthy fails the Run before any iteration is spent.
+passes; one that never becomes healthy, or exits first, fails the Run before any iteration is
+spent.
 _Avoid_: Dependency, sidecar (a Service is scoped to one Run, like the Sandbox — never shared or
 long-lived across Runs)
 
