@@ -1243,7 +1243,13 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
           networkMode === "learn"
             ? { mode: "learn" }
             : { mode: "allowlist", hosts: allowlist.map((entry) => entry.host) };
-        wall = await startNetworkWall(id, home, proxyImage, policy);
+        wall = await startNetworkWall(
+          id,
+          home,
+          proxyImage,
+          policy,
+          services.map((service) => service.name),
+        );
         appendLog(logPath, `network wall up (${networkMode}): ${wall.networkName}`);
         if (networkMode === "allowlist") appendLog(logPath, `allowlist: ${formatAllowlistLevels(allowlist)}`);
       } else {

@@ -365,7 +365,6 @@ export function buildServiceRunArgs(id: string, network: string, service: Servic
     "docker",
     "run",
     "-d",
-    "--rm",
     "--init",
     "--network",
     network,
@@ -391,11 +390,39 @@ async function startServiceContainer(id: string, network: string, service: Servi
   return name;
 }
 
-async function inspectHealth(name: string): Promise<string | undefined> {
-  const result = await runDocker(["docker", "inspect", "--format", "{{.State.Health.Status}}", name]);
-  if (result.exitCode !== 0) return undefined;
-  const status = result.stdout.trim();
-  return status.length > 0 ? status : undefined;
+type ServiceState =
+  | { kind: "running"; health: string | undefined }
+  | { kind: "exited"; exitCode: number }
+  | { kind: "gone" }
+  | { kind: "unknown" };
+
+async function inspectService(name: string): Promise<ServiceState> {
+  const result = await runDocker([
+    "docker",
+    "inspect",
+    "--format",
+    "{{.State.Status}} {{.State.ExitCode}} {{if .State.Health}}{{.State.Health.Status}}{{end}}",
+    name,
+  ]);
+  if (result.exitCode !== 0) return /no such/i.test(result.stderr) ? { kind: "gone" } : { kind: "unknown" };
+  const [status, exitCode, health] = result.stdout.trim().split(" ");
+  // An exited container reports its health as `unhealthy` too, so the exit is read first.
+  if (status === "exited" || status === "dead") return { kind: "exited", exitCode: Number(exitCode) };
+  return { kind: "running", health: health !== undefined && health.length > 0 ? health : undefined };
+}
+
+const LOG_TAIL_LINES = 20;
+
+/** `docker logs` keeps the container's stdout and stderr apart, so their interleaving is lost. */
+async function tailLogs(name: string): Promise<string> {
+  const result = await runDocker(["docker", "logs", "--tail", String(LOG_TAIL_LINES), name]);
+  return [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
+}
+
+async function exitedMessage(service: string, container: string, exitCode: number): Promise<string> {
+  const logs = await tailLogs(container);
+  const tail = logs.length > 0 ? ` Its last log lines:\n${logs}` : " It logged nothing.";
+  return `Service "${service}" exited with code ${exitCode} before it became healthy.${tail}`;
 }
 
 const HEALTH_POLL_INTERVAL_MS = 500;
@@ -409,7 +436,7 @@ const HEALTH_WAIT_CEILING_MS = 10 * 60 * 1000;
 
 export interface ServiceRuntime {
   names: readonly string[];
-  /** Resolves once every service that declared a healthcheck reports `healthy`; throws naming the first to report `unhealthy`, or on the backstop ceiling. */
+  /** Throws naming the first gated service to exit, vanish or turn `unhealthy`, or at the backstop ceiling. */
   waitHealthy(): Promise<void>;
   /** Never throws; the caller reports a failed teardown. */
   teardown(): Promise<StopResult>;
@@ -443,10 +470,15 @@ export async function startServices(
       while (pending.size > 0) {
         for (const service of gated) {
           if (!pending.has(service.name)) continue;
-          const status = await inspectHealth(serviceContainerName(id, service.name));
-          if (status === "healthy") {
+          const container = serviceContainerName(id, service.name);
+          const state = await inspectService(container);
+          if (state.kind === "exited") {
+            throw new Error(await exitedMessage(service.name, container, state.exitCode));
+          } else if (state.kind === "gone") {
+            throw new Error(`Service "${service.name}" was removed before it became healthy.`);
+          } else if (state.kind === "running" && state.health === "healthy") {
             pending.delete(service.name);
-          } else if (status === "unhealthy") {
+          } else if (state.kind === "running" && state.health === "unhealthy") {
             throw new Error(`Service "${service.name}" never became healthy (its healthcheck reports "unhealthy").`);
           }
         }

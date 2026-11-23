@@ -182,10 +182,14 @@ export function parseReachedHosts(log: string): Blocked[] {
   return countTargets(requests, (host) => connected.has(host));
 }
 
-/** curl reads only lowercase `http_proxy` (httpoxy); npm, pip and git read the uppercase names. */
-export function buildProxyEnv(proxyHost: string): Record<string, string> {
+/**
+ * curl reads only lowercase `http_proxy` (httpoxy); npm, pip and git read the uppercase names.
+ * A Service lives on the internal network itself, and the proxy refuses any host off the
+ * Allowlist, so its name must bypass the proxy.
+ */
+export function buildProxyEnv(proxyHost: string, serviceNames: readonly string[] = []): Record<string, string> {
   const proxyUrl = `http://${proxyHost}:${PROXY_PORT}`;
-  const noProxy = "localhost,127.0.0.1";
+  const noProxy = ["localhost", "127.0.0.1", ...serviceNames].join(",");
   return {
     HTTP_PROXY: proxyUrl,
     http_proxy: proxyUrl,
@@ -307,6 +311,7 @@ export async function startNetworkWall(
   home: string,
   proxyImage: string,
   policy: WallPolicy,
+  serviceNames: readonly string[] = [],
   inspectSubnetFn: (name: string) => string | undefined = inspectSubnet,
 ): Promise<NetworkWall> {
   const network = await createInternalNetwork(id);
@@ -337,7 +342,7 @@ export async function startNetworkWall(
 
     return {
       networkName: network,
-      proxyEnv: buildProxyEnv(container),
+      proxyEnv: buildProxyEnv(container, serviceNames),
       async readTraffic() {
         const logs = await runDocker(["docker", "logs", container]);
         const log = `${logs.stdout}\n${logs.stderr}`;
