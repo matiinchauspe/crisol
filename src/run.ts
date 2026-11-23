@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { ProviderFailureError } from "./adapter";
 import type { Adapter, AdapterContext, PreStartDeclaration } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
@@ -155,11 +155,21 @@ function attachResult(error: unknown, result: RunResult): unknown {
   return error;
 }
 
-/** What the Run lock file holds, for `crisol recover` to find a dead Run's branch and host repo. */
+/**
+ * What the Run lock file holds: where `crisol recover` finds a dead Run's branch and host repo, and
+ * what it builds a Run result from when the dead round never wrote one. A lock written by a Crisol
+ * from before the round fields existed holds only `host` and `branch`.
+ */
 export interface RunLockRecord {
   host: string;
   branch: string;
+  /** `<ref>@<sha>`, as the Run result records it. */
+  base?: string;
+  network?: NetworkMode;
+  adapter?: string;
 }
+
+type RoundRecord = Omit<RunLockRecord, "host" | "branch">;
 
 export interface RunOptions extends TaskInput {
   cwd: string;
@@ -249,6 +259,8 @@ interface Reservation {
   branch: string;
   host: string;
   lock: HeldLock;
+  /** A Continuation's only: the lock's mtime before its reservation rewrote it. */
+  priorLockTime?: Date;
 }
 
 /**
@@ -273,6 +285,7 @@ function reserveRun(
   home: string,
   explicitName: string | undefined,
   generateId: () => string,
+  round: RoundRecord,
   maxAttempts = 20,
 ): Reservation {
   mkdirSync(runsRoot(home), { recursive: true });
@@ -293,7 +306,7 @@ function reserveRun(
       if (!isEexist(error)) throw error;
       continue;
     }
-    return { id, branch, host: hostRepoPath, lock: lockRun(id, home, { host: hostRepoPath, branch }) };
+    return { id, branch, host: hostRepoPath, lock: lockRun(id, home, { host: hostRepoPath, branch, ...round }) };
   }
   throw new Error(`Could not allocate a unique run id after ${maxAttempts} attempts.`);
 }
@@ -786,11 +799,25 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
   };
 }
 
+function roundRecord(prepared: PreparedRun, options: RunOptions): RoundRecord {
+  return {
+    base: `${prepared.baseRef}@${prepared.baseSha}`,
+    network: options.network ?? "allowlist",
+    ...(prepared.adapter.name !== undefined ? { adapter: prepared.adapter.name } : {}),
+  };
+}
+
 function reserveFresh(prepared: PreparedRun, options: RunOptions): Reservation {
   const { home, hostRepoPath } = prepared;
   let reservation: Reservation | undefined;
   try {
-    reservation = reserveRun(hostRepoPath, home, options.name, options.generateRunId ?? generateRunId);
+    reservation = reserveRun(
+      hostRepoPath,
+      home,
+      options.name,
+      options.generateRunId ?? generateRunId,
+      roundRecord(prepared, options),
+    );
     writeFileSync(runLogPath(reservation.id, home), "");
     writeFileSync(runPromptPath(reservation.id, home), prepared.prompt);
     writeFileSync(runGatesPath(reservation.id, home), JSON.stringify(prepared.gates));
@@ -810,23 +837,34 @@ function reserveFresh(prepared: PreparedRun, options: RunOptions): Reservation {
  * Re-takes the finished Run's own lock, so a second Continuation of it, or `crisol recover`, waits
  * out this one. The log is appended to, never reset: it is the only record of earlier rounds.
  */
-function reserveContinuation(prepared: PreparedRun, continued: ContinuedRun): Reservation {
+function reserveContinuation(prepared: PreparedRun, continued: ContinuedRun, options: RunOptions): Reservation {
   const { home, hostRepoPath } = prepared;
-  const lock = lockRun(continued.id, home, { host: hostRepoPath, branch: continued.branch });
+  const priorLockTime = statSync(runLockPath(continued.id, home)).mtime;
+  const lock = lockRun(continued.id, home, { host: hostRepoPath, branch: continued.branch, ...roundRecord(prepared, options) });
   appendLog(
     runLogPath(continued.id, home),
     `continuation of ${continued.branch} reserved, resuming session ${continued.sessionId}: ` +
       `prompt ${JSON.stringify(prepared.prompt)}`,
   );
-  return { id: continued.id, branch: continued.branch, host: hostRepoPath, lock };
+  return { id: continued.id, branch: continued.branch, host: hostRepoPath, lock, priorLockTime };
 }
 
 /**
  * A Continuation that ends before its Slot leaves the Run result as the last round wrote it: that
- * round's branch and status still stand, and this one changed nothing.
+ * round's branch and status still stand, and this one changed nothing. Its reservation bumped the
+ * lock's mtime, which `resultIsStale` reads as a round that began and died, so the mtime goes back.
  */
 function endUnstartedContinuation(reservation: Reservation, home: string, signal: AbortSignal | undefined, error: unknown): void {
   const reason = signal?.aborted ? `interrupted: ${typeof signal.reason === "string" ? signal.reason : "abort"}` : `error: ${errorMessage(error)}`;
+  try {
+    if (reservation.priorLockTime !== undefined) {
+      utimesSync(runLockPath(reservation.id, home), new Date(), reservation.priorLockTime);
+    }
+  } catch (utimesError) {
+    try {
+      appendLog(runLogPath(reservation.id, home), `the Run lock's time could not be restored: ${errorMessage(utimesError)}`);
+    } catch {}
+  }
   try {
     appendLog(runLogPath(reservation.id, home), `continuation ended before it held a Slot (${reason}); the Run result is unchanged`);
   } catch {}
@@ -970,7 +1008,9 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     if (options.signal?.aborted) throw interruptedBeforeReserving();
     // Reserved before the Slot wait, so `crisol status` can show the Run as queued.
     reservation =
-      prepared.continued !== undefined ? reserveContinuation(prepared, prepared.continued) : reserveFresh(prepared, options);
+      prepared.continued !== undefined
+        ? reserveContinuation(prepared, prepared.continued, options)
+        : reserveFresh(prepared, options);
     base = `${prepared.baseRef}@${prepared.baseSha}`;
     try {
       writeFileSync(runPidPath(reservation.id, home), String(process.pid));

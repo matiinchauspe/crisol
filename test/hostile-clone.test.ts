@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DEFAULT_SCRIPT, FakeAdapter, WIDEN_REPO_LEVEL_SCRIPT } from "../src/adapters/fake";
 import { discoverGitRoot } from "../src/git";
-import { runRepoPath } from "../src/paths";
+import { runRepoPath, runResultPath } from "../src/paths";
 import { run } from "../src/run";
+import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
@@ -147,7 +148,11 @@ describe("Fetch-back brings back exactly one ref", () => {
       expect(result.fetchBack).toBe(true);
       expect(tagNames(repo.path)).toEqual([]);
 
-      // What a dead Run's agent leaves for recover: a commit the host lacks, tagged.
+      // What recover acts on: a Run whose own Fetch-back failed (`run()` then writes `fetchBack:
+      // false`), its Clone holding a tagged commit the host lacks.
+      const resultPath = runResultPath(result.run, home.path);
+      const written = JSON.parse(readFileSync(resultPath, "utf8")) as RunResult;
+      writeFileSync(resultPath, JSON.stringify({ ...written, fetchBack: false }, null, 2));
       const clone = runRepoPath(result.run, home.path);
       git(clone, ["commit", "--quiet", "--allow-empty", "-m", "late"]);
       git(clone, ["tag", "-a", "v9.9.10", "-m", "release"]);

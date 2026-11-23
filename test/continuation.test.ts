@@ -12,9 +12,11 @@ import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
+import { startCli, waitFor } from "./support/liveCli";
 import { cloneSha, commitSubjects, readLog, readResult, refSha, runIds } from "./support/runState";
 
 const HOLD_RUN_LOCK = path.join(import.meta.dir, "support", "holdRunLock.ts");
+const HOLD_SLOT = path.join(import.meta.dir, "support", "holdSlot.ts");
 
 const STORE = "/crisol-fake-sessions";
 
@@ -839,4 +841,46 @@ describe("ticket 30: recover keeps the recorded Adapter", () => {
     },
     90_000,
   );
+});
+
+describe("a Continuation stopped while queued for a Slot leaves the earlier round current", () => {
+  test("status still reports that round's result, and recover leaves it untouched", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    let holder: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+    try {
+      writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
+      const started = await runCli(["run", "x", "--gate", "true", "--json", "--name", "queued/continuation"], { cwd: repo.path, home: home.path });
+      expect(started.exitCode).toBe(0);
+      const first = JSON.parse(started.stdout) as RunResult;
+      expect(first.status).toBe("verified");
+      const resultBefore = readFileSync(runResultPath(first.run, home.path), "utf8");
+
+      holder = Bun.spawn(["bun", "run", HOLD_SLOT, home.path], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      const reader = holder.stdout.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("held 1");
+
+      const continuation = startCli(["run", "--continue", "queued/continuation", "more", "--json"], {
+        cwd: repo.path,
+        home: home.path,
+      });
+      await waitFor(() => continuation.stderr().includes("Waiting for a free Slot"));
+      continuation.proc.kill("SIGINT");
+      expect((await continuation.finished()).exitCode).not.toBe(0);
+
+      const status = await runCli(["status"], { cwd: repo.path, home: home.path });
+      const line = status.stdout.split("\n").find((entry) => entry.startsWith(first.run));
+      expect(line).toContain("verified");
+
+      const recovered = await runCli(["recover"], { cwd: repo.path, home: home.path });
+      expect(recovered.exitCode).toBe(0);
+      expect(recovered.stdout.trim()).toBe("Nothing to recover.");
+      expect(readFileSync(runResultPath(first.run, home.path), "utf8")).toBe(resultBefore);
+    } finally {
+      holder?.kill("SIGKILL");
+      await holder?.exited;
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 90_000);
 });

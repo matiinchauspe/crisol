@@ -32,9 +32,14 @@ export function readRunLockRecord(id: string, home: string): RunLockRecord | und
   if (!existsSync(lockPath)) return undefined;
   try {
     const record = JSON.parse(readFileSync(lockPath, "utf8")) as Partial<RunLockRecord>;
-    return typeof record.host === "string" && typeof record.branch === "string"
-      ? { host: record.host, branch: record.branch }
-      : undefined;
+    if (typeof record.host !== "string" || typeof record.branch !== "string") return undefined;
+    return {
+      host: record.host,
+      branch: record.branch,
+      ...(typeof record.base === "string" ? { base: record.base } : {}),
+      ...(typeof record.network === "string" ? { network: record.network } : {}),
+      ...(typeof record.adapter === "string" ? { adapter: record.adapter } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -54,33 +59,63 @@ export function resultIsStale(id: string, home: string, result: RunResult): bool
   }
 }
 
-/** The field list deliberately omits the stale `finalMessage`. */
-function settleResult(id: string, home: string): void {
+function readStoredResult(id: string, home: string): RunResult | undefined {
   const resultPath = runResultPath(id, home);
-  if (!existsSync(resultPath)) return;
-  const result = JSON.parse(readFileSync(resultPath, "utf8")) as RunResult;
-  if (resultIsStale(id, home, result)) {
-    const settled: RunResult = {
-      run: result.run,
-      branch: result.branch,
-      base: result.base,
-      status: "not-converged",
-      reason: "interrupted: the round ended before it wrote a result",
-      ...(result.adapter !== undefined ? { adapter: result.adapter } : {}),
-      iterations: result.iterations,
-      gates: result.gates,
-      network: result.network,
-      blocked: result.blocked,
-      ...(result.reached !== undefined ? { reached: result.reached } : {}),
-      warnings: result.warnings,
-      fetchBack: true,
-      finishedAt: Date.now(),
-    };
-    writeFileSync(resultPath, JSON.stringify(settled, null, 2));
-    return;
-  }
-  if (result.fetchBack) return;
-  writeFileSync(resultPath, JSON.stringify({ ...result, fetchBack: true }, null, 2));
+  return existsSync(resultPath) ? (JSON.parse(readFileSync(resultPath, "utf8")) as RunResult) : undefined;
+}
+
+const INTERRUPTED = "interrupted: the round ended before it wrote a result";
+
+/**
+ * A first round that died leaves no result, so the lock record stands in for one; a record from
+ * before it carried the round's base has nothing to build one from, and leaves the Run unsettled.
+ */
+function interruptedFirstRound(id: string, record: RunLockRecord): RunResult | undefined {
+  if (record.base === undefined || record.network === undefined) return undefined;
+  return {
+    run: id,
+    branch: record.branch,
+    base: record.base,
+    status: "not-converged",
+    reason: INTERRUPTED,
+    ...(record.adapter !== undefined ? { adapter: record.adapter } : {}),
+    iterations: 0,
+    gates: [],
+    network: record.network,
+    blocked: [],
+    warnings: [],
+    fetchBack: true,
+    finishedAt: Date.now(),
+  };
+}
+
+/** The field list deliberately omits the stale `finalMessage`. */
+function interruptedContinuation(result: RunResult): RunResult {
+  return {
+    run: result.run,
+    branch: result.branch,
+    base: result.base,
+    status: "not-converged",
+    reason: INTERRUPTED,
+    ...(result.adapter !== undefined ? { adapter: result.adapter } : {}),
+    iterations: result.iterations,
+    gates: result.gates,
+    network: result.network,
+    blocked: result.blocked,
+    ...(result.reached !== undefined ? { reached: result.reached } : {}),
+    warnings: result.warnings,
+    fetchBack: true,
+    finishedAt: Date.now(),
+  };
+}
+
+function settleResult(id: string, home: string, record: RunLockRecord): void {
+  const result = readStoredResult(id, home);
+  let settled: RunResult | undefined;
+  if (result === undefined) settled = interruptedFirstRound(id, record);
+  else if (resultIsStale(id, home, result)) settled = interruptedContinuation(result);
+  else if (!result.fetchBack) settled = { ...result, fetchBack: true };
+  if (settled !== undefined) writeFileSync(runResultPath(id, home), JSON.stringify(settled, null, 2));
 }
 
 /**
@@ -122,7 +157,7 @@ async function recoverDeadRun(
   if (!existsSync(record.host)) return { run: id, kind: "failed", error: `its host repo ${record.host} is gone` };
 
   if (branchSha(record.host, record.branch) === cloneSha) {
-    settleResult(id, home);
+    settleResult(id, home, record);
     return { run: id, kind: "up-to-date" };
   }
   try {
@@ -133,14 +168,15 @@ async function recoverDeadRun(
     return { run: id, kind: "failed", error: message };
   }
   appendLog(id, home, `fetch-back complete: ${record.branch} now in ${record.host} at ${cloneSha}`);
-  settleResult(id, home);
+  settleResult(id, home, record);
   return { run: id, kind: "recovered", branch: record.branch, host: record.host, sha: cloneSha };
 }
 
 /**
  * Performs the Fetch-back every dead Run is missing. A Run is dead when its Run lock can be
- * taken; it is held while recover works, so a second recover never races the first. Fetch-back
- * only fast-forwards, so a host branch that has moved on is reported, never overwritten.
+ * taken and no current result records a Fetch-back; the lock is held while recover works, so a
+ * second recover never races the first. Fetch-back only fast-forwards, so a host branch that
+ * has moved on is reported, never overwritten.
  */
 export async function recover(home: string): Promise<RecoverReport> {
   const ids = existsSync(runsRoot(home)) ? readdirSync(runsRoot(home)).sort() : [];
@@ -165,6 +201,9 @@ export async function recover(home: string): Promise<RecoverReport> {
       continue;
     }
     try {
+      const result = readStoredResult(id, home);
+      // Once fetched back, the branch is the user's to merge, delete or advance.
+      if (result?.fetchBack && !resultIsStale(id, home, result)) continue;
       report.outcomes.push(await recoverDeadRun(id, home, record, sandboxIds?.has(id) ?? false));
       // After fetch-back, and only when Docker answered: a network left behind is a leak to report,
       // never a reason to leave the branch unrecovered.
