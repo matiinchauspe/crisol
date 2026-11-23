@@ -335,7 +335,8 @@ before Crisol recorded one, which asks for `--adapter` rather than assuming the 
 Adapter that implements `continueSession` must carry a `name`, or a Run refuses it.
 
 While a round runs, `crisol status` shows it `queued` or `running`, never the previous round's
-outcome. One killed mid-round shows `dead`; after `crisol recover`, its result reads
+outcome. A Continuation stopped while still queued for a Slot changed nothing, so the previous
+round's result stays current. One killed mid-round shows `dead`; after `crisol recover`, its result reads
 `not-converged`, `interrupted: …`, with no `finalMessage` — the round before it never wrote one, so
 that message is dropped rather than shown as this round's own.
 
@@ -539,11 +540,14 @@ crisol recover
 
 Brings back the branch of every Run that died without its Fetch-back, for example after
 `kill -9` or a crash. A Run holds its own lock while it is alive, so recover never touches a live
-Run. For a dead Run, it first removes the Run's container, so the agent cannot keep writing to the
-Clone. Then it fetches the branch into the repo the Run came from, at the Clone's last commit.
-Fetch-back only fast-forwards: a branch you have since moved is reported and left alone, and
-recover never deletes a branch. It prints one line per Run it acted on or left alone, or
-`Nothing to recover.`
+Run, and it skips a finished Run whose result says its Fetch-back completed: that branch is yours
+to merge, delete or move on, and recover never re-creates or reports it. For a dead Run, it first
+removes the Run's container, so the agent cannot keep writing to the Clone. Then it fetches the
+branch into the repo the Run came from, at the Clone's last commit, and settles its Run result: a
+Run killed before it wrote one gets a `not-converged`, `interrupted: …` result, so `status`,
+`crisol gc` and `--continue` treat it like any finished Run. Fetch-back only fast-forwards: a branch
+you have since moved is reported and left alone, and recover never deletes a branch. It prints one
+line per Run it acted on or left alone, or `Nothing to recover.`
 
 ### Garbage collection
 
@@ -747,6 +751,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0027](docs/adr/0027-gc-never-ages-out-a-parked-or-checkpoint-run.md): a `parked` or `checkpoint` Run is checked ahead of age in `planGc`, so no amount of waiting makes it collectable; skipped as a new `awaits-continuation` `GcSkipKind`, reported by name like `in-use` rather than folded into the silent kinds; removal stays a deliberate, by-hand act today — no acceptance criterion asked for a new flag, so none was added; amended by ticket 31 to name the resolved Run dir and only its `repo/`, `sessions/` and `network/`, keeping the record (amends ADR 0018, which protected only `not-converged`)
 - [0028](docs/adr/0028-tenaza-decides-inside-the-sandbox-from-mounted-config-and-state.md): with the host's Tenaza home present, the Claude Code Adapter mounts its `config/` read-only and `state/` read-write and bakes Tenaza v0.5.2's checksum-verified musl binary and its plugin's hooks into the Agent layer, which decide locally, never over HTTP; the release's version enters the cache key (amends ADR 0016's placeholder); the Adapter labels the session with the host repo through `tenaza hook claude` before launching with `--session-id`; without Tenaza, `PreStartDeclaration.unguarded` makes the Run print one no-guard line
 - [0030](docs/adr/0030-the-ceiling-is-a-timer-and-the-sandboxs-removal-ends-what-it-interrupts.md): the wall-clock ceiling is a timer started before the first turn and raced against the whole loop, so a hung turn or Gate, or a Run with no Gates, ends on time; on it the Sandbox is removed at once, before the commit scan, since only that kills a `docker exec` in flight; the Run resolves `not-converged` with `reason: "ceiling"`, `iterations` counting finished turns (amends ADR 0006)
+- [0031](docs/adr/0031-recover-settles-only-dead-runs-and-every-dead-run.md): the Run lock record also carries the round's `base`, `network` and `adapter`, so `crisol recover` settles a first round killed before its result from it; a Continuation ended before its Slot restores the lock's mtime, keeping the previous round's result current; recover skips a Run whose current result records `fetchBack: true`, so a merged-and-deleted or advanced branch is left alone (amends ADRs 0010 and 0025)
 
 ## Development
 
