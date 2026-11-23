@@ -91,7 +91,7 @@ describe("a detached Run always ends with a Run result", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const detached = await runCli(["run", "x", "--detach"], { cwd: repo.path, home: home.path });
+      const detached = await runCli(["run", "x", "--detach", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       process.kill(pidFromDetach(detached.stderr), "SIGTERM");
       const id = detached.stdout.trim();
 
@@ -114,7 +114,7 @@ describe("a detached Run always ends with a Run result", () => {
     const tools = wrapTools([{ tool: "docker", subcommand: "info", mode: { kind: "pass-once" } }]);
     try {
       const env = { PATH: `${tools.binDir}:${process.env.PATH}` };
-      const detached = await runCli(["run", "x", "--detach"], { cwd: repo.path, home: home.path, env });
+      const detached = await runCli(["run", "x", "--detach", "--adapter", "fake"], { cwd: repo.path, home: home.path, env });
       expect(detached.exitCode).toBe(0);
       const id = detached.stdout.trim();
 
@@ -138,7 +138,7 @@ describe("a detached Run always ends with a Run result", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const detach = startCli(["run", "x", "--detach", "--gate", "sleep 3"], { cwd: repo.path, home: home.path });
+      const detach = startCli(["run", "x", "--detach", "--gate", "sleep 3", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       let detachDone = false;
       void detach.finished().then(() => {
         detachDone = true;
@@ -241,7 +241,7 @@ describe("Ctrl+C in a foreground pre-flight", () => {
     const repo = createFixtureRepo();
     const tools = wrapTools([{ tool: "docker", subcommand: "info", mode: { kind: "stall", seconds: 4 } }]);
     try {
-      const cli = startCli(["run", "x"], {
+      const cli = startCli(["run", "x", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { PATH: `${tools.binDir}:${process.env.PATH}` },
@@ -268,10 +268,10 @@ describe("stopRuns, the suite's own cleanup", () => {
     const repo = createFixtureRepo();
     try {
       writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
-      const running = await runCli(["run", "a", "--detach", "--gate", "sleep 60"], { cwd: repo.path, home: home.path });
+      const running = await runCli(["run", "a", "--detach", "--gate", "sleep 60", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const runningId = running.stdout.trim();
       await waitFor(() => readLog(runningId, home.path).includes(" started from "));
-      const queuedId = (await runCli(["run", "b", "--detach"], { cwd: repo.path, home: home.path })).stdout.trim();
+      const queuedId = (await runCli(["run", "b", "--detach", "--adapter", "fake"], { cwd: repo.path, home: home.path })).stdout.trim();
       await waitFor(() => readLog(queuedId, home.path).includes("Waiting for a free Slot"));
 
       await stopRuns(home.path);

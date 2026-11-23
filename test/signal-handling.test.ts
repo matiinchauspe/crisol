@@ -40,7 +40,7 @@ describe("a signal during the Adapter phase", () => {
       const repo = createFixtureRepo();
       let id: string | undefined;
       try {
-        const cli = startCli(["run", "x", "--gate", "sleep 60", "--json"], { cwd: repo.path, home: home.path });
+        const cli = startCli(["run", "x", "--gate", "sleep 60", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
         await waitFor(() => runIds(home.path).length === 1);
         id = runIds(home.path)[0]!;
         await waitFor(() => readLog(id!, home.path).includes("adapter reported completion"));
@@ -75,7 +75,7 @@ describe("a signal before the Sandbox is up", () => {
     const tools = wrapTools([{ tool: "docker", subcommand: "run", mode: { kind: "stall", seconds: 3 } }]);
     let id: string | undefined;
     try {
-      const cli = startCli(["run", "x", "--json"], {
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { PATH: `${tools.binDir}:${process.env.PATH}` },
@@ -105,7 +105,7 @@ describe("a signal before the Sandbox is up", () => {
     const tools = wrapTools([{ tool: "git", subcommand: "clone", mode: { kind: "stall", seconds: 3 } }]);
     let id: string | undefined;
     try {
-      const cli = startCli(["run", "x", "--json"], {
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { PATH: `${tools.binDir}:${process.env.PATH}` },
@@ -142,7 +142,7 @@ describe("Ctrl+C again while the Run is already stopping", () => {
     ]);
     let id: string | undefined;
     try {
-      const cli = startCli(["run", "x", "--gate", "sleep 60", "--json"], {
+      const cli = startCli(["run", "x", "--gate", "sleep 60", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { PATH: `${tools.binDir}:${process.env.PATH}` },

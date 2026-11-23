@@ -73,7 +73,7 @@ describe("--file (ticket 10)", () => {
     try {
       writeFileSync(path.join(repo.path, "ticket.md"), "Rename foo to bar.\n");
 
-      const result = await runCli(["run", "--file", "ticket.md", "--json"], { cwd: repo.path, home: home.path });
+      const result = await runCli(["run", "--file", "ticket.md", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
       expect(result.exitCode).toBe(0);
       expect(savedPrompt(home.path)).toContain("<task>\nRename foo to bar.\n</task>");
@@ -91,8 +91,8 @@ describe("--file (ticket 10)", () => {
       writeFileSync(path.join(repo.path, "empty.md"), "\n");
 
       const both = await runCli(["run", "a phrase", "--file", "ticket.md"], { cwd: repo.path, home: home.path });
-      const missing = await runCli(["run", "--file", "nope.md"], { cwd: repo.path, home: home.path });
-      const empty = await runCli(["run", "--file", "empty.md"], { cwd: repo.path, home: home.path });
+      const missing = await runCli(["run", "--file", "nope.md", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      const empty = await runCli(["run", "--file", "empty.md", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
       expect(both.exitCode).toBe(1);
       expect(both.stderr).toContain("--file");
@@ -111,8 +111,8 @@ describe("--file (ticket 10)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const blank = await runCli(["run", ""], { cwd: repo.path, home: home.path });
-      const whitespace = await runCli(["run", "   "], { cwd: repo.path, home: home.path });
+      const blank = await runCli(["run", "", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      const whitespace = await runCli(["run", "   ", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
       expect(blank.exitCode).toBe(1);
       expect(blank.stderr).toContain("Task phrase is empty");
@@ -161,15 +161,15 @@ describe("--context (ticket 10)", () => {
       writeFileSync(path.join(repo.path, "spec.md"), "The spec body.\n");
       writeFileSync(path.join(repo.path, "empty.md"), "");
 
-      const missing = await runCli(["run", "x", "--context", "nope.md"], { cwd: repo.path, home: home.path });
-      const empty = await runCli(["run", "x", "--context", "empty.md"], { cwd: repo.path, home: home.path });
+      const missing = await runCli(["run", "x", "--context", "nope.md", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      const empty = await runCli(["run", "x", "--context", "empty.md", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       expect(missing.exitCode).toBe(1);
       expect(missing.stderr).toContain("--context nope.md");
       expect(empty.exitCode).toBe(1);
       expect(empty.stderr).toContain("--context empty.md is empty");
       expect(existsSync(path.join(home.path, "runs"))).toBe(false);
 
-      const ok = await runCli(["run", "x", "--context", "spec.md", "--json"], { cwd: repo.path, home: home.path });
+      const ok = await runCli(["run", "x", "--context", "spec.md", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       expect(ok.exitCode).toBe(0);
       expect(savedPrompt(home.path)).toContain('<reference file="spec.md">\nThe spec body.\n</reference>');
     } finally {
@@ -185,8 +185,8 @@ describe("--context (ticket 10)", () => {
       writeFileSync(path.join(repo.path, "doc.pdf"), Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x53, 0x45, 0x43, 0x52, 0x45, 0x54]));
       writeFileSync(path.join(repo.path, "latin1.md"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
 
-      const binary = await runCli(["run", "x", "--context", "doc.pdf"], { cwd: repo.path, home: home.path });
-      const latin1 = await runCli(["run", "--file", "latin1.md"], { cwd: repo.path, home: home.path });
+      const binary = await runCli(["run", "x", "--context", "doc.pdf", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      const latin1 = await runCli(["run", "--file", "latin1.md", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
       expect(binary.exitCode).toBe(1);
       expect(binary.stderr).toContain("--context doc.pdf holds a NUL byte");
@@ -234,7 +234,7 @@ describe("--detach resolves the text once, in the process the user launched (tic
     const repo = createFixtureRepo();
     try {
       const detached = Bun.spawnSync(
-        ["bash", "-c", `bun run "${CLI_ENTRY}" run --detach --file <(printf 'from a pipe')`],
+        ["bash", "-c", `bun run "${CLI_ENTRY}" run --detach --file <(printf 'from a pipe') --adapter fake`],
         { cwd: repo.path, env: { ...process.env, CRISOL_HOME: home.path }, stdout: "pipe", stderr: "pipe" },
       );
       expect(detached.exitCode).toBe(0);
@@ -257,7 +257,7 @@ describe("--detach resolves the text once, in the process the user launched (tic
       const contextFile = path.join(repo.path, "tmp-context.md");
       writeFileSync(contextFile, "temporary context\n");
 
-      const detached = await runCli(["run", "x", "--detach", "--context", contextFile], {
+      const detached = await runCli(["run", "x", "--detach", "--context", contextFile, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -331,8 +331,8 @@ describe("--prompt templates (ticket 10)", () => {
       writeTemplate(prompts, "ticket", "Ticket {{ticket}}: {{task}}");
       writeTemplate(prompts, "spaced", "{{ task }}");
 
-      const result = await runCli(["run", "x", "--prompt", "ticket"], { cwd: repo.path, home: home.path });
-      const spaced = await runCli(["run", "x", "--prompt", "spaced"], { cwd: repo.path, home: home.path });
+      const result = await runCli(["run", "x", "--prompt", "ticket", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      const spaced = await runCli(["run", "x", "--prompt", "spaced", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("{{ticket}}");
@@ -353,7 +353,7 @@ describe("--prompt templates (ticket 10)", () => {
       writeTemplate(prompts, "static", "Do something else.");
       mkdirSync(path.join(prompts, "folder.md"));
       writeFileSync(path.join(repo.path, "escape.md"), "{{task}}");
-      const cli = (...args: string[]) => runCli(["run", "x", ...args], { cwd: repo.path, home: home.path });
+      const cli = (...args: string[]) => runCli(["run", "x", ...args, "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
       const noTask = await cli("--prompt", "static");
       const climbing = await cli("--prompt", "../../escape");
@@ -501,7 +501,7 @@ describe("fan-out shares its inputs safely (ticket 10, round 2)", () => {
       // would fail (the pipe is drained) or hang (the FIFO has no writer left).
       const script =
         `(printf 'Do: {{task}}\\n' > "${templateFifo}" &) ; ` +
-        `bun run "${CLI_ENTRY}" run "task one" "task two" --context <(printf 'spec body') --prompt once --json`;
+        `bun run "${CLI_ENTRY}" run "task one" "task two" --context <(printf 'spec body') --prompt once --json --adapter fake`;
 
       const proc = Bun.spawnSync(["bash", "-c", script], {
         cwd: repo.path,

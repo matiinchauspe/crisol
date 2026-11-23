@@ -27,7 +27,7 @@ describe("--base <annotated tag> resolves and checks out the TARGET commit (tag)
       // An annotated tag's OWN object sha differs from the commit it targets.
       expect(tagSha).not.toBe(commitSha);
 
-      const result = await runCli(["run", "say hello", "--json", "--base", "v1.0"], {
+      const result = await runCli(["run", "say hello", "--json", "--base", "v1.0", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -71,7 +71,7 @@ describe("detached HEAD with a new commit, no --base (round-4 finding C1)", () =
         .stdout.toString("utf8")
         .trim();
 
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });

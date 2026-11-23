@@ -58,7 +58,7 @@ describe("Host ref snapshot before/after a Run (W7b)", () => {
         .split("\n")
         .sort();
 
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });

@@ -313,7 +313,7 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
-        const started = await runCli(["run", "say hello", "--json", "--name", "cli/continued"], {
+        const started = await runCli(["run", "say hello", "--json", "--name", "cli/continued", "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         });
@@ -850,7 +850,7 @@ describe("a Continuation stopped while queued for a Slot leaves the earlier roun
     let holder: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
     try {
       writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
-      const started = await runCli(["run", "x", "--gate", "true", "--json", "--name", "queued/continuation"], { cwd: repo.path, home: home.path });
+      const started = await runCli(["run", "x", "--gate", "true", "--json", "--name", "queued/continuation", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       expect(started.exitCode).toBe(0);
       const first = JSON.parse(started.stdout) as RunResult;
       expect(first.status).toBe("verified");

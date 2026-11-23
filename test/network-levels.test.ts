@@ -25,7 +25,7 @@ describe("crisol allow edits one Allowlist level", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const runArgs = ["run", "x", "--json", "--max-iterations", "1", "--gate", REACH_EXAMPLE_GATE];
+      const runArgs = ["run", "x", "--json", "--max-iterations", "1", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"];
       const before = JSON.parse((await runCli(runArgs, { cwd: repo.path, home: home.path })).stdout) as RunResult;
       expect(before.status).toBe("not-converged");
       expect(before.blocked).toEqual([{ host: "example.com", count: 1 }]);
@@ -78,7 +78,7 @@ describe("crisol allow edits one Allowlist level", () => {
     try {
       writeFileSync(path.join(home.path, "network"), "example.com # the docs site\n");
       const result = JSON.parse(
-        (await runCli(["run", "x", "--json", "--max-iterations", "1", "--gate", REACH_EXAMPLE_GATE], {
+        (await runCli(["run", "x", "--json", "--max-iterations", "1", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         })).stdout,
@@ -184,7 +184,7 @@ describe("crisol allow edits one Allowlist level", () => {
     const repo = createFixtureRepo();
     try {
       writeFileSync(path.join(home.path, "network"), "a$(id)b.com\n");
-      const result = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const result = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain('"a$(id)b.com" is not a plain hostname');
       expect(existsSync(path.join(home.path, "runs"))).toBe(false);
@@ -234,7 +234,7 @@ describe("--network learn and --network open", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const cli = await runCli(["run", "x", "--network", "learn", "--gate", REACH_EXAMPLE_GATE], {
+      const cli = await runCli(["run", "x", "--network", "learn", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -254,7 +254,7 @@ describe("--network learn and --network open", () => {
     const repo = createFixtureRepo();
     try {
       writeFileSync(path.join(home.path, "network"), "example.com\n");
-      const cli = await runCli(["run", "x", "--network", "learn", "--gate", REACH_EXAMPLE_GATE], {
+      const cli = await runCli(["run", "x", "--network", "learn", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -272,7 +272,7 @@ describe("--network learn and --network open", () => {
     try {
       mkdirSync(path.join(repo.path, ".crisol"), { recursive: true });
       writeFileSync(repoLevel(repo.path), "example.com\n");
-      const cli = await runCli(["run", "x", "--network", "learn", "--gate", REACH_EXAMPLE_GATE], {
+      const cli = await runCli(["run", "x", "--network", "learn", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -288,7 +288,7 @@ describe("--network learn and --network open", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const cli = await runCli(["run", "a", "b", "--network", "learn", "--gate", REACH_EXAMPLE_GATE], {
+      const cli = await runCli(["run", "a", "b", "--network", "learn", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -306,7 +306,7 @@ describe("--network learn and --network open", () => {
     try {
       mkdirSync(path.join(repo.path, ".crisol"), { recursive: true });
       writeFileSync(repoLevel(repo.path), "example.com\nnot a host\n");
-      const cli = await runCli(["run", "x", "--network", "learn", "--gate", REACH_EXAMPLE_GATE], {
+      const cli = await runCli(["run", "x", "--network", "learn", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -323,7 +323,7 @@ describe("--network learn and --network open", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const cli = await runCli(["run", "x", "--json", "--network", "learn", "--gate", REACH_EXAMPLE_GATE], {
+      const cli = await runCli(["run", "x", "--json", "--network", "learn", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -346,7 +346,7 @@ describe("--network learn and --network open", () => {
       writeFileSync(path.join(home.path, "network"), "not a host\n");
       mkdirSync(path.join(repo.path, ".crisol"), { recursive: true });
       writeFileSync(repoLevel(repo.path), "a$(id)b.com\n");
-      const cli = await runCli(["run", "x", "--json", "--network", "open", "--gate", REACH_EXAMPLE_GATE], {
+      const cli = await runCli(["run", "x", "--json", "--network", "open", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -444,10 +444,10 @@ describe("the repo level is made visible", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      // A Gate is the CLI's only way to run a command inside the Sandbox; the default fake Adapter
+      // A Gate is the CLI's only way to run a command inside the Sandbox; the CLI's fake Adapter
       // cannot be pointed at another script.
       const widen = WIDEN_REPO_LEVEL_SCRIPT.join(" && ");
-      const cli = await runCli(["run", "a", "b", "--gate", widen], { cwd: repo.path, home: home.path });
+      const cli = await runCli(["run", "a", "b", "--gate", widen, "--adapter", "fake"], { cwd: repo.path, home: home.path });
       expect(cli.exitCode).toBe(0);
       const warnings = cli.stderr.split("\n").filter((line) => line.startsWith("Warning: ") && line.includes('"evil.example.com"'));
       expect(warnings).toHaveLength(2);

@@ -169,7 +169,7 @@ describe("ticket 02: Gates and converge", () => {
         );
 
         const result = await runCli(
-          ["run", "say hello", "--json", "--gate", "test -f CRISOL_RUN.md"],
+          ["run", "say hello", "--json", "--gate", "test -f CRISOL_RUN.md", "--adapter", "fake"],
           { cwd: repo.path, home: home.path },
         );
 
@@ -255,7 +255,7 @@ describe("ticket 02: Gates and converge", () => {
           'gates = ["test -f CRISOL_RUN.md"]\n',
         );
 
-        const result = await runCli(["run", "say hello", "--json"], {
+        const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         });

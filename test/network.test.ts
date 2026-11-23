@@ -350,7 +350,7 @@ describe("the Allowlist wall end to end, against a real Docker engine", () => {
       const repo = createFixtureRepo();
       try {
         const cli = await runCli(
-          ["run", "say hello", "--gate", "curl -sS --max-time 20 -o /dev/null https://example.com/ || true"],
+          ["run", "say hello", "--gate", "curl -sS --max-time 20 -o /dev/null https://example.com/ || true", "--adapter", "fake"],
           { cwd: repo.path, home: home.path },
         );
         expect(cli.exitCode).toBe(0);

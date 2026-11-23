@@ -247,7 +247,7 @@ describe("Services end to end, against a real Docker engine", () => {
       try {
         writeServicesYaml(repo.path, ["services:", "  db:", "    image: postgres:16-alpine", "    ports:", '      - "5432:5432"', ""].join("\n"));
 
-        const result = await runCli(["run", "say hello", "--json"], { cwd: repo.path, home: home.path });
+        const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toContain('service "db" has key "ports"');

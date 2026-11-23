@@ -19,7 +19,7 @@ describe("crisol run --detach", () => {
     const repo = createFixtureRepo();
     let id: string | undefined;
     try {
-      const detached = await runCli(["run", "x", "--detach", "--gate", "sleep 8"], {
+      const detached = await runCli(["run", "x", "--detach", "--gate", "sleep 8", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -49,7 +49,7 @@ describe("crisol run --detach", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const detached = await runCli(["run", "x", "--detach", "--base", "no-such-ref"], {
+      const detached = await runCli(["run", "x", "--detach", "--base", "no-such-ref", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -92,10 +92,10 @@ describe("stopping a detached Run", () => {
     try {
       writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
 
-      const running = await runCli(["run", "a", "--detach", "--gate", "sleep 60"], { cwd: repo.path, home: home.path });
+      const running = await runCli(["run", "a", "--detach", "--gate", "sleep 60", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       ids.push(running.stdout.trim());
       await waitFor(() => readLog(ids[0]!, home.path).includes(" started from "));
-      const queued = await runCli(["run", "b", "--detach"], { cwd: repo.path, home: home.path });
+      const queued = await runCli(["run", "b", "--detach", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       ids.push(queued.stdout.trim());
       await waitFor(() => readLog(ids[1]!, home.path).includes("Waiting for a free Slot"));
 
@@ -138,10 +138,10 @@ describe("crisol status", () => {
     try {
       writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
 
-      const first = await runCli(["run", "first", "--detach", "--gate", "sleep 6"], { cwd: repo.path, home: home.path });
+      const first = await runCli(["run", "first", "--detach", "--gate", "sleep 6", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       ids.push(first.stdout.trim());
       await waitFor(() => readLog(ids[0]!, home.path).includes(" started from "));
-      const second = await runCli(["run", "second", "--detach"], { cwd: repo.path, home: home.path });
+      const second = await runCli(["run", "second", "--detach", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       ids.push(second.stdout.trim());
       await waitFor(() => readLog(ids[1]!, home.path).includes("Waiting for a free Slot"));
 
@@ -167,7 +167,7 @@ describe("crisol status", () => {
     const repo = createFixtureRepo();
     let id: string | undefined;
     try {
-      const cli = startCli(["run", "x", "--gate", "sleep 120"], { cwd: repo.path, home: home.path });
+      const cli = startCli(["run", "x", "--gate", "sleep 120", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       await waitFor(() => runIds(home.path).length === 1);
       id = runIds(home.path)[0]!;
       await waitFor(() => readLog(id!, home.path).includes("adapter reported completion"));
@@ -204,7 +204,7 @@ describe("crisol logs", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const id = runIds(home.path)[0]!;
       expect(done.exitCode).toBe(0);
 

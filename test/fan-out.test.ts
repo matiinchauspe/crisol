@@ -26,7 +26,7 @@ describe('crisol run "a" "b" "c" — independent Runs from one base', () => {
       const baseSha = git(repo.path, "rev-parse", "HEAD").stdout;
 
       // The Gate keeps each Sandbox alive long enough that the three Runs provably overlap.
-      const cli = await runCli(["run", "a", "b", "c", "--gate", "sleep 2", "--json"], {
+      const cli = await runCli(["run", "a", "b", "c", "--gate", "sleep 2", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -86,7 +86,7 @@ describe('crisol run "a" "b" "c" — independent Runs from one base', () => {
     const repo = createFixtureRepo();
     try {
       writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
-      const cli = await runCli(["run", "a", "b", "--json"], { cwd: repo.path, home: home.path });
+      const cli = await runCli(["run", "a", "b", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       expect(cli.exitCode).toBe(0);
       const results = cli.stdout.trim().split("\n").map((line) => JSON.parse(line) as RunResult);
       expect(results.map((result) => result.status)).toEqual(["unverified", "unverified"]);

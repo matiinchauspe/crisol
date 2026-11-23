@@ -21,7 +21,7 @@ describe("non-git cwd (failure path)", () => {
     const home = createTempHome();
     const plainDir = mkdtempSync(path.join(tmpdir(), "crisol-nongit-"));
     try {
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: plainDir,
         home: home.path,
       });
@@ -42,7 +42,7 @@ describe("branch-name collision (failure path, W3/W5)", () => {
     try {
       Bun.spawnSync(["git", "-C", repo.path, "branch", "taken"]);
 
-      const result = await runCli(["run", "say hello", "--json", "--name", "taken"], {
+      const result = await runCli(["run", "say hello", "--json", "--name", "taken", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -60,7 +60,7 @@ describe("branch-name collision (failure path, W3/W5)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const result = await runCli(["run", "say hello", "--json", "--name", "..bad.."], {
+      const result = await runCli(["run", "say hello", "--json", "--name", "..bad..", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -82,7 +82,7 @@ describe("--name ambiguous with an existing tag (failure path, finding 1)", () =
     try {
       Bun.spawnSync(["git", "-C", repo.path, "tag", "v1.0"]);
 
-      const result = await runCli(["run", "say hello", "--json", "--name", "v1.0"], {
+      const result = await runCli(["run", "say hello", "--json", "--name", "v1.0", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -102,7 +102,7 @@ describe("--name starting with refs/ (failure path, finding 1)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const result = await runCli(["run", "say hello", "--json", "--name", "refs/heads/evil"], {
+      const result = await runCli(["run", "say hello", "--json", "--name", "refs/heads/evil", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -125,7 +125,7 @@ describe("--name D/F prefix collision with an existing branch (failure path, fin
     try {
       Bun.spawnSync(["git", "-C", repo.path, "branch", "crisol/existing-run"]);
 
-      const result = await runCli(["run", "say hello", "--json", "--name", "crisol"], {
+      const result = await runCli(["run", "say hello", "--json", "--name", "crisol", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -145,7 +145,7 @@ describe("--name D/F prefix collision with an existing branch (failure path, fin
     try {
       Bun.spawnSync(["git", "-C", repo.path, "branch", "crisol"]);
 
-      const result = await runCli(["run", "say hello", "--json", "--name", "crisol/new-run"], {
+      const result = await runCli(["run", "say hello", "--json", "--name", "crisol/new-run", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -172,7 +172,7 @@ describe("a default-named Run collides with a plain \"crisol\" branch (failure p
     try {
       Bun.spawnSync(["git", "-C", repo.path, "branch", "crisol"]);
 
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -236,7 +236,7 @@ describe("--base <unreachable sha> fails before any side effect (failure path, f
       Bun.spawnSync(["git", "-C", repo.path, "checkout", "-q", "main"]);
       Bun.spawnSync(["git", "-C", repo.path, "branch", "-D", "tmp"]);
 
-      const result = await runCli(["run", "say hello", "--json", "--base", orphanSha], {
+      const result = await runCli(["run", "say hello", "--json", "--base", orphanSha, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -282,7 +282,7 @@ describe("--base origin/<branch> ahead of every local branch (failure path, roun
         .stdout.toString("utf8")
         .trim();
 
-      const result = await runCli(["run", "say hello", "--json", "--base", "origin/main"], {
+      const result = await runCli(["run", "say hello", "--json", "--base", "origin/main", "--adapter", "fake"], {
         cwd: hostPath,
         home: home.path,
       });
@@ -315,7 +315,7 @@ describe("--base <stash sha> (failure path, round-4 finding C1)", () => {
         .stdout.toString("utf8")
         .trim();
 
-      const result = await runCli(["run", "say hello", "--json", "--base", stashSha], {
+      const result = await runCli(["run", "say hello", "--json", "--base", stashSha, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -338,7 +338,7 @@ describe("docker CLI missing from PATH (failure path, extra)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { PATH: "/opt/homebrew/bin:/usr/bin" },
@@ -366,7 +366,7 @@ describe("missing git identity (failure path, W5)", () => {
       Bun.spawnSync(["git", "-C", repo.path, "config", "--unset", "user.name"]);
       Bun.spawnSync(["git", "-C", repo.path, "config", "--unset", "user.email"]);
 
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
@@ -387,7 +387,7 @@ describe("Docker engine unreachable (failure path, W5)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { DOCKER_HOST: "unix:///tmp/crisol-test-nonexistent-engine.sock" },

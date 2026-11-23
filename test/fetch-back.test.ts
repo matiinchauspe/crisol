@@ -14,7 +14,7 @@ describe("result.json records whether Fetch-back completed", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
       expect(done.exitCode).toBe(0);
       const printed = JSON.parse(done.stdout) as RunResult;
@@ -65,7 +65,7 @@ describe("Fetch-back on a red-Gate exit", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--gate", "false", "--max-iterations", "1", "--json"], {
+      const done = await runCli(["run", "x", "--gate", "false", "--max-iterations", "1", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -88,7 +88,7 @@ describe("a Fetch-back whose git process is killed", () => {
     const repo = createFixtureRepo();
     const tools = wrapTools([{ tool: "git", subcommand: "fetch", mode: { kind: "stall", seconds: 3 } }]);
     try {
-      const cli = startCli(["run", "x", "--json"], {
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { PATH: `${tools.binDir}:${process.env.PATH}` },
@@ -119,7 +119,7 @@ describe("a Sandbox that fails to stop", () => {
     const tools = wrapTools([{ tool: "docker", subcommand: "rm", mode: { kind: "fail-once" } }]);
     let id: string | undefined;
     try {
-      const done = await runCli(["run", "x", "--json"], {
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { PATH: `${tools.binDir}:${process.env.PATH}` },
@@ -144,7 +144,7 @@ describe("a Sandbox that fails to stop", () => {
     const tools = wrapTools([{ tool: "docker", subcommand: "rm", mode: { kind: "fail-always" } }]);
     let id: string | undefined;
     try {
-      const done = await runCli(["run", "x", "--json"], {
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
         env: { PATH: `${tools.binDir}:${process.env.PATH}` },

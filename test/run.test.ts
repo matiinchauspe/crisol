@@ -30,7 +30,7 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
-        const result = await runCli(["run", "say hello", "--json"], {
+        const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         });
@@ -107,7 +107,7 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
           .trim();
 
         const result = await runCli(
-          ["run", "say hello", "--json", "--base", firstSha, "--name", "crisol/custom"],
+          ["run", "say hello", "--json", "--base", firstSha, "--name", "crisol/custom", "--adapter", "fake"],
           { cwd: repo.path, home: home.path },
         );
 
@@ -136,7 +136,7 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
-        const result = await runCli(["run", "say hello"], { cwd: repo.path, home: home.path });
+        const result = await runCli(["run", "say hello", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
         expect(result.exitCode).toBe(0);
         expect(result.stdout).toMatch(
@@ -177,7 +177,7 @@ describe("the branch is actually CUT from --base, not merely reported (round-4 f
           .stdout.toString("utf8")
           .trim();
 
-        const result = await runCli(["run", "say hello", "--json", "--base", "HEAD~1"], {
+        const result = await runCli(["run", "say hello", "--json", "--base", "HEAD~1", "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         });
@@ -211,7 +211,7 @@ describe("the branch is actually CUT from --base, not merely reported (round-4 f
           { cwd: repo.path },
         );
 
-        const result = await runCli(["run", "say hello", "--json", "--base", "v-old"], {
+        const result = await runCli(["run", "say hello", "--json", "--base", "v-old", "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         });

@@ -120,7 +120,7 @@ describe("a repo-declared secret missing from the host env (failure path)", () =
     writeFileSync(path.join(repo.path, ".crisol", "config.toml"), 'env = ["CRISOL_TEST_MISSING"]\n');
     delete process.env.CRISOL_TEST_MISSING;
     try {
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });

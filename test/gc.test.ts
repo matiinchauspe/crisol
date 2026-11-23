@@ -592,7 +592,7 @@ describe("crisol gc end to end, against a real Docker engine", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const { run: id, branch } = JSON.parse(done.stdout) as RunResult;
       ageResultBy(id, home.path, 8);
 
@@ -612,7 +612,7 @@ describe("crisol gc end to end, against a real Docker engine", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const { run: id, branch } = JSON.parse(done.stdout) as RunResult;
       const beforeSha = refSha(repo.path, branch);
       ageResultBy(id, home.path, 8);
@@ -653,7 +653,7 @@ describe("crisol gc end to end, against a real Docker engine", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const { run: id } = JSON.parse(done.stdout) as RunResult;
       ageResultBy(id, home.path, 8);
       addTrackedSize(home.path, 500_000_000_000); // stale drift from before this gc
@@ -673,7 +673,7 @@ describe("crisol gc end to end, against a real Docker engine", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const { run: id, branch } = JSON.parse(done.stdout) as RunResult;
       ageResultBy(id, home.path, 8);
       Bun.spawnSync(["git", "-C", repo.path, "checkout", "--quiet", branch]);
@@ -695,7 +695,7 @@ describe("crisol gc end to end, against a real Docker engine", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--gate", "false", "--max-iterations", "1", "--json"], {
+      const done = await runCli(["run", "x", "--gate", "false", "--max-iterations", "1", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -790,7 +790,7 @@ describe("crisol run's size warning", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       expect(done.stderr).not.toContain("crisol gc");
     } finally {
       home.cleanup();
@@ -803,7 +803,7 @@ describe("crisol run's size warning", () => {
     const repo = createFixtureRepo();
     try {
       writeFileSync(path.join(home.path, "config"), "gc_warn_bytes = 1\n");
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       expect(done.exitCode).toBe(0);
       expect(done.stderr).toContain("crisol gc");
     } finally {

@@ -178,7 +178,7 @@ describe("crisol init", () => {
         // The Gate is what reaches the network: the stand-in Adapter itself never does.
         commitFile(repo.path, "package.json", packageJson({ test: "curl -fsS --max-time 20 -o /dev/null https://example.com/" }));
 
-        const result = await runCli(["init"], { cwd: repo.path, home: home.path, stdin: "y\n" });
+        const result = await runCli(["init", "--adapter", "fake"], { cwd: repo.path, home: home.path, stdin: "y\n" });
 
         expect(result.stdout).toMatch(/Run \w+: branch crisol\/\w+, status verified\./);
         expect(result.stdout).toContain("Added example.com to the repo Allowlist (.crisol/network).");

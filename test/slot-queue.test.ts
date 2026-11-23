@@ -58,11 +58,11 @@ describe("Slots across processes (max_parallel = 1)", () => {
     try {
       writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
 
-      const first = startCli(["run", "first", "--gate", "sleep 3", "--json"], repo.path, home.path);
+      const first = startCli(["run", "first", "--gate", "sleep 3", "--json", "--adapter", "fake"], repo.path, home.path);
       await waitFor(() => runIds(home.path).length === 1);
       const [firstId] = runIds(home.path);
 
-      const second = startCli(["run", "second", "--json"], repo.path, home.path);
+      const second = startCli(["run", "second", "--json", "--adapter", "fake"], repo.path, home.path);
       await waitFor(() => second.stderr().includes("Waiting for a free Slot"));
       // Reserved but queued: it has a run dir, and no Clone until it holds the Slot.
       const queuedId = runIds(home.path).find((id) => id !== firstId)!;
@@ -89,11 +89,11 @@ describe("Slots across processes (max_parallel = 1)", () => {
     try {
       writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
 
-      const first = startCli(["run", "first", "--gate", "sleep 3", "--json"], repo.path, home.path);
+      const first = startCli(["run", "first", "--gate", "sleep 3", "--json", "--adapter", "fake"], repo.path, home.path);
       await waitFor(() => runIds(home.path).length === 1);
       const [firstId] = runIds(home.path);
 
-      const second = startCli(["run", "second", "--json"], repo.path, home.path);
+      const second = startCli(["run", "second", "--json", "--adapter", "fake"], repo.path, home.path);
       await waitFor(() => second.stderr().includes("Waiting for a free Slot"));
       second.proc.kill("SIGINT");
 
@@ -131,12 +131,12 @@ describe("Slots across processes (max_parallel = 1)", () => {
     try {
       writeFileSync(path.join(home.path, "config"), "max_parallel = 1\n");
 
-      const first = startCli(["run", "first", "--gate", "sleep 120", "--json"], repo.path, home.path);
+      const first = startCli(["run", "first", "--gate", "sleep 120", "--json", "--adapter", "fake"], repo.path, home.path);
       await waitFor(() => runIds(home.path).length === 1);
       firstId = runIds(home.path)[0]!;
       await waitFor(() => readFileSync(runLogPath(firstId!, home.path), "utf8").includes(" started from "));
 
-      const second = startCli(["run", "second", "--json"], repo.path, home.path);
+      const second = startCli(["run", "second", "--json", "--adapter", "fake"], repo.path, home.path);
       await waitFor(() => second.stderr().includes("Waiting for a free Slot"));
 
       first.proc.kill("SIGKILL");

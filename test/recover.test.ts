@@ -38,7 +38,7 @@ describe("crisol recover", () => {
     const repo = createFixtureRepo();
     let id: string | undefined;
     try {
-      const cli = startCli(["run", "x", "--gate", "sleep 120", "--json"], { cwd: repo.path, home: home.path });
+      const cli = startCli(["run", "x", "--gate", "sleep 120", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       await waitFor(() => runIds(home.path).length === 1);
       id = runIds(home.path)[0]!;
       await waitFor(() => readLog(id!, home.path).includes("adapter reported completion"));
@@ -71,7 +71,7 @@ describe("crisol recover", () => {
     const repo = createFixtureRepo();
     let id: string | undefined;
     try {
-      const cli = startCli(["run", "x", "--gate", "sleep 60", "--json"], { cwd: repo.path, home: home.path });
+      const cli = startCli(["run", "x", "--gate", "sleep 60", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       await waitFor(() => runIds(home.path).length === 1);
       id = runIds(home.path)[0]!;
       await waitFor(() => readLog(id!, home.path).includes("adapter reported completion"));
@@ -98,7 +98,7 @@ describe("crisol recover", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const result = JSON.parse(done.stdout) as RunResult;
       markFetchBackFailed(result.run, home.path);
       Bun.spawnSync(["git", "-C", runRepoPath(result.run, home.path), "commit", "--quiet", "--allow-empty", "-m", "late"]);
@@ -120,7 +120,7 @@ describe("crisol recover", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const result = JSON.parse(done.stdout) as RunResult;
       markFetchBackFailed(result.run, home.path);
       Bun.spawnSync(["git", "-C", runRepoPath(result.run, home.path), "commit", "--quiet", "--allow-empty", "-m", "late"]);
@@ -146,7 +146,7 @@ describe("crisol recover", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const id = onlyRunId(home.path);
 
       const recovered = await runCli(["recover"], { cwd: repo.path, home: home.path });
@@ -169,7 +169,7 @@ describe("recover settles only dead Runs, and every dead Run", () => {
     let id: string | undefined;
     try {
       const baseSha = shortSha(repo.path, "main");
-      const cli = startCli(["run", "x", "--gate", "sleep 120", "--name", branch, "--json"], { cwd: repo.path, home: home.path });
+      const cli = startCli(["run", "x", "--gate", "sleep 120", "--name", branch, "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       await waitFor(() => runIds(home.path).length === 1);
       id = runIds(home.path)[0]!;
       await waitFor(() => readLog(id!, home.path).includes("adapter reported completion"));
@@ -182,7 +182,7 @@ describe("recover settles only dead Runs, and every dead Run", () => {
       expect(recovered.exitCode).toBe(0);
 
       const settled = readResult(id, home.path)!;
-      // The run was started with no --base, so it was cut from main; the CLI defaults to the fake Adapter.
+      // The run was started with no --base, so it was cut from main.
       expect(settled).toMatchObject({
         run: id,
         branch,
@@ -220,7 +220,7 @@ describe("recover settles only dead Runs, and every dead Run", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const result = JSON.parse(done.stdout) as RunResult;
       git(repo.path, ["merge", "--quiet", "--ff-only", result.branch]);
       git(repo.path, ["branch", "--quiet", "-d", result.branch]);
@@ -240,7 +240,7 @@ describe("recover settles only dead Runs, and every dead Run", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const done = await runCli(["run", "x", "--json"], { cwd: repo.path, home: home.path });
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const result = JSON.parse(done.stdout) as RunResult;
       const advanced = git(repo.path, ["commit-tree", `${result.branch}^{tree}`, "-p", result.branch, "-m", "user's own follow-up"]);
       git(repo.path, ["update-ref", `refs/heads/${result.branch}`, advanced]);
