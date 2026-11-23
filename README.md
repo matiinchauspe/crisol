@@ -66,8 +66,12 @@ flowchart LR
    does the work and commits there.
 4. **Converge.** Crisol — never the agent — decides done. It runs every declared Gate; any red one
    resumes the same session with the failing command and its output, up to a ceiling (5 iterations
-   or 60 minutes). All green is `verified`; no Gate declared anywhere is `unverified`; hitting the
-   ceiling is `not-converged`.
+   or 60 minutes). The Gates judge only what Fetch-back will bring back: while the Clone has
+   uncommitted changes or `HEAD` is off the Run's branch, no Gate runs and the agent is told to
+   commit, which spends an iteration like a red Gate. What the dependency install itself left dirty,
+   such as a rewritten lockfile or an untracked `node_modules`, does not count while it stays as the
+   install left it. All green is `verified`; no Gate declared
+   anywhere is `unverified`; hitting the ceiling is `not-converged`.
 5. **Teardown and Fetch-back.** The container is removed, and the branch is fetched back into
    your repo. If the Run fails, Fetch-back still runs, so no work is lost. If it fails too, you
    see both errors. Ctrl+C, `kill` and closing the terminal stop a Run the same way: the
@@ -751,6 +755,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0030](docs/adr/0030-the-ceiling-is-a-timer-and-the-sandboxs-removal-ends-what-it-interrupts.md): the wall-clock ceiling is a timer started before the first turn and raced against the whole loop, so a hung turn or Gate, or a Run with no Gates, ends on time; on it the Sandbox is removed at once, before the commit scan, since only that kills a `docker exec` in flight; the Run resolves `not-converged` with `reason: "ceiling"`, `iterations` counting finished turns (amends ADR 0006)
 - [0031](docs/adr/0031-recover-settles-only-dead-runs-and-every-dead-run.md): the Run lock record also carries the round's `base`, `network` and `adapter`, so `crisol recover` settles a first round killed before its result from it; a Continuation ended before its Slot restores the lock's mtime, keeping the previous round's result current; recover skips a Run whose current result records `fetchBack: true`, so a merged-and-deleted or advanced branch is left alone (amends ADRs 0010 and 0025)
 - [0032](docs/adr/0032-crisol-run-and-init-default-to-claude-code.md): `crisol run` and `crisol init` build the Claude Code Adapter when no `--adapter` is given, and the stand-in only as `--adapter fake`; `run()` itself keeps its `FakeAdapter` fallback; every suite test that starts a Run through the CLI names `--adapter fake` (amends ADR 0021)
+- [0033](docs/adr/0033-gates-run-only-on-a-clean-clone-with-head-on-the-branch.md): before every round of Gates, the Clone must be clean (untracked files included) with `HEAD` on `refs/heads/<branch>`, checked inside the Sandbox and raced against the wall clock; otherwise no Gate runs and the agent is resumed with that as feedback, spending an iteration; a Run with no Gates is not checked; paths the Run's first dependency install left dirty are excused while their content is unchanged, from a snapshot kept in the Run dir so a Continuation never excuses its previous round's uncommitted work
 
 ## Development
 
