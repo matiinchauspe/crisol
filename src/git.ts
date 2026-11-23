@@ -1,3 +1,6 @@
+import { existsSync, lstatSync } from "node:fs";
+import path from "node:path";
+
 export interface GitIdentity {
   name: string;
   email: string;
@@ -113,18 +116,54 @@ export function cloneLocal(hostRepoPath: string, clonePath: string): void {
   runOrThrow(["git", "clone", "--no-local", "--quiet", `file://${hostRepoPath}`, clonePath]);
 }
 
+/** Only ever before a Sandbox mounts the Clone, while its `.git` is still the one `cloneLocal` made. */
 export function checkoutNewBranch(clonePath: string, name: string, baseSha: string): void {
   runOrThrow(["git", "-C", clonePath, "checkout", "--quiet", "-b", name, baseSha]);
-}
-
-export function checkoutBranch(clonePath: string, name: string): void {
-  runOrThrow(["git", "-C", clonePath, "checkout", "--quiet", name]);
 }
 
 /** `undefined` when `repoPath` has no such branch, or is not a repo at all. */
 export function branchSha(repoPath: string, name: string): string | undefined {
   const result = run(["git", "-C", repoPath, "rev-parse", "--verify", "--quiet", `refs/heads/${name}`]);
   return result.exitCode === 0 ? result.stdout.trim() : undefined;
+}
+
+/**
+ * A gitfile or a symlink in its place would point host git at whatever gitdir the agent named — the
+ * host repo's own among them.
+ */
+function assertCloneGitDir(clonePath: string): void {
+  const gitDir = path.join(clonePath, ".git");
+  let isDirectory = false;
+  try {
+    isDirectory = lstatSync(gitDir).isDirectory();
+  } catch {}
+  if (!isDirectory) {
+    throw new Error(`${gitDir} is no longer a directory, so Crisol runs no git command against this Clone.`);
+  }
+}
+
+/**
+ * The agent writes the Clone's `.git`, so host git reads it only as a remote: `upload-pack` is the
+ * one side git restricts to the config and hooks that are safe to serve.
+ */
+export function cloneBranchSha(clonePath: string, name: string): string | undefined {
+  if (!existsSync(clonePath)) return undefined;
+  assertCloneGitDir(clonePath);
+  const ref = `refs/heads/${name}`;
+  const result = run(["git", "ls-remote", clonePath, ref]);
+  if (result.exitCode !== 0) return undefined;
+  return result.stdout
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .find(([, refName]) => refName === ref)?.[0];
+}
+
+/** Moves no ref, so the host gains only objects; the scans then read the branch from there. */
+export function fetchCloneObjects(hostRepoPath: string, clonePath: string, name: string): string {
+  const tip = cloneBranchSha(clonePath, name);
+  if (tip === undefined) throw new Error(`The Clone at ${clonePath} has no branch "${name}".`);
+  runOrThrow(["git", "-C", hostRepoPath, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", clonePath, `refs/heads/${name}`]);
+  return tip;
 }
 
 /**
@@ -162,8 +201,9 @@ const FETCH_BACK_ATTEMPTS = 3;
  * The refspec is qualified on both sides: unqualified, git looks up tags before heads and
  * would silently fetch a same-named tag instead of the Run's branch. No leading `+`, so a host
  * branch that moved since the Clone last saw it is refused, never overwritten. No `--quiet`, so git's
- * own reason reaches the error. A `git fetch` killed by a signal was stopped, not refused, and
- * fetching again is safe, so it is retried.
+ * own reason reaches the error. `--no-tags`, so a tag the agent made never lands in the host. A
+ * `git fetch` killed by a signal was stopped, not refused, and fetching again is safe, so it is
+ * retried.
  */
 export function fetchBack(
   hostRepoPath: string,
@@ -171,8 +211,9 @@ export function fetchBack(
   name: string,
   onKilled?: (signal: string) => void,
 ): void {
+  assertCloneGitDir(clonePath);
   const ref = `refs/heads/${name}`;
-  const args = ["git", "-C", hostRepoPath, "fetch", clonePath, `${ref}:${ref}`];
+  const args = ["git", "-C", hostRepoPath, "fetch", "--no-tags", clonePath, `${ref}:${ref}`];
   for (let attempt = 1; ; attempt++) {
     const result = run(args);
     if (result.exitCode === 0) break;
@@ -184,7 +225,7 @@ export function fetchBack(
       `\`${args.join(" ")}\` failed: ${result.stderr.trim() || result.stdout.trim() || `killed by ${result.signal}`}`,
     );
   }
-  const cloneSha = runOrThrow(["git", "-C", clonePath, "rev-parse", ref]);
+  const cloneSha = cloneBranchSha(clonePath, name) ?? "no such branch";
   const hostSha = runOrThrow(["git", "-C", hostRepoPath, "rev-parse", ref]);
   assertFetchedBack(ref, hostSha, cloneSha);
 }
@@ -249,12 +290,12 @@ function identityMismatch(name: string, email: string, identity: GitIdentity): b
 
 /** Flags, never rewrites, an attribution trailer or an identity other than the one passed in. */
 export function scanCommitsForWarnings(
-  clonePath: string,
+  repoPath: string,
   range: string,
   identity: GitIdentity,
 ): string[] {
   const format = `%H${FIELD_SEP}%an${FIELD_SEP}%ae${FIELD_SEP}%cn${FIELD_SEP}%ce${FIELD_SEP}%B${RECORD_SEP}`;
-  const result = run(["git", "-C", clonePath, "log", `--format=${format}`, range]);
+  const result = run(["git", "-C", repoPath, "log", `--format=${format}`, range]);
   if (result.exitCode !== 0) {
     throw new Error(`\`git log ${range}\` failed: ${result.stderr.trim()}`);
   }
@@ -280,8 +321,8 @@ export function scanCommitsForWarnings(
 }
 
 /** `undefined` when the range leaves `file` untouched; otherwise the lines it adds, without the `+`. */
-export function addedLines(clonePath: string, range: string, file: string): string[] | undefined {
-  const result = run(["git", "-C", clonePath, "diff", "--no-color", "--no-ext-diff", "--unified=0", range, "--", file]);
+export function addedLines(repoPath: string, range: string, file: string): string[] | undefined {
+  const result = run(["git", "-C", repoPath, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0", range, "--", file]);
   if (result.exitCode !== 0) {
     throw new Error(`\`git diff ${range} -- ${file}\` failed: ${result.stderr.trim()}`);
   }

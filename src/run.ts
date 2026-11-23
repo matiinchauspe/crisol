@@ -30,12 +30,13 @@ import {
   branchExists,
   branchSha,
   checkedOutWorktree,
-  checkoutBranch,
   checkoutNewBranch,
+  cloneBranchSha,
   cloneLocal,
   currentRefName,
   discoverGitRoot,
   fetchBack,
+  fetchCloneObjects,
   hasPrefixCollision,
   isReachableFromClonedRefs,
   isValidBranchName,
@@ -527,7 +528,7 @@ function assertBranchContinuable(hostRepoPath: string, clonePath: string, branch
     );
   }
   const hostSha = branchSha(hostRepoPath, branch);
-  const cloneSha = branchSha(clonePath, branch);
+  const cloneSha = cloneBranchSha(clonePath, branch);
   if (hostSha !== cloneSha) {
     throw new Error(
       `Branch "${branch}" is at ${hostSha ?? "no such branch"} in ${hostRepoPath}, but at ` +
@@ -1109,8 +1110,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   try {
     try {
       if (continued !== undefined) {
-        checkoutBranch(clonePath, branch);
-        scanFrom = branchSha(clonePath, branch) ?? baseSha;
+        scanFrom = cloneBranchSha(clonePath, branch) ?? baseSha;
         appendLog(logPath, `continuing in the Clone at ${clonePath}, branch ${branch} at ${scanFrom}`);
       } else {
         // Made even when a signal already landed: an interrupted Run still leaves its branch.
@@ -1199,6 +1199,14 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       );
       appendLog(logPath, `sandbox capacity: cpus=${cpus}, memory=${memory}`);
 
+      // Inside the Sandbox: a checkout runs the hooks, filters and fsmonitor the Clone's `.git` names.
+      if (continued !== undefined) {
+        const checkout = await sandbox.exec(["git", "checkout", "--quiet", branch]);
+        if (checkout.exitCode !== 0) {
+          throw new Error(`\`git checkout ${branch}\` in the Sandbox failed: ${checkout.stderr.trim() || checkout.stdout.trim()}`);
+        }
+      }
+
       // Before the agent launches, so a broken install fails the Run with `iterations: 0`.
       if (packageManager !== undefined) {
         await installDependencies(sandbox, packageManager);
@@ -1214,8 +1222,9 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
 
       // Best-effort: a failed scan must not turn a converged Run into a failed one.
       try {
-        warnings.push(...scanCommitsForWarnings(clonePath, `${scanFrom}..${branch}`, identity));
-        const repoLevelChange = addedLines(clonePath, `${scanFrom}..${branch}`, REPO_ALLOWLIST_FILE);
+        const range = `${scanFrom}..${fetchCloneObjects(hostRepoPath, clonePath, branch)}`;
+        warnings.push(...scanCommitsForWarnings(hostRepoPath, range, identity));
+        const repoLevelChange = addedLines(hostRepoPath, range, REPO_ALLOWLIST_FILE);
         if (repoLevelChange !== undefined) warnings.push(repoLevelChangeWarning(repoLevelChange));
       } catch (error) {
         appendLog(logPath, `commit scan failed: ${errorMessage(error)}`);

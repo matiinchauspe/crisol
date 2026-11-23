@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { branchExists } from "./git";
+import { cloneBranchSha } from "./git";
 import { runDir, runLockPath, runLogPath, runPidPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import { readRunLockRecord, resultIsStale } from "./recover";
 import type { RunResult } from "./run";
@@ -42,7 +42,7 @@ export function runsNamingBranch(home: string, hostRepoPath: string, branch: str
     .filter((id) => readResult(id, home)?.branch === branch && readRunLockRecord(id, home)?.host === hostRepoPath)
     .map((id) => ({
       run: id,
-      hasClone: branchExists(runRepoPath(id, home), branch),
+      hasClone: cloneBranchSha(runRepoPath(id, home), branch) !== undefined,
       fetchBack: readResult(id, home)!.fetchBack,
     }));
 }

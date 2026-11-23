@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { listRunSandboxIds, removeRunSandboxes } from "./docker";
-import { branchSha, fetchBack } from "./git";
+import { branchSha, cloneBranchSha, fetchBack } from "./git";
 import { removeNetworkByRunId } from "./network";
 import { runLockPath, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
 import type { RunLockRecord, RunResult } from "./run";
@@ -110,7 +110,14 @@ async function recoverDeadRun(
       ? { run: id, kind: "never-cut" }
       : { run: id, kind: "skipped", why: "it has no Clone" };
   }
-  const cloneSha = branchSha(clonePath, record.branch);
+  let cloneSha: string | undefined;
+  try {
+    cloneSha = cloneBranchSha(clonePath, record.branch);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendLog(id, home, `recover refused the Clone: ${message}`);
+    return { run: id, kind: "failed", error: message };
+  }
   if (cloneSha === undefined) return { run: id, kind: "skipped", why: `${record.branch} was never cut in its Clone` };
   if (!existsSync(record.host)) return { run: id, kind: "failed", error: `its host repo ${record.host} is gone` };
 

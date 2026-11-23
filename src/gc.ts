@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { GlobalConfig } from "./config";
-import { branchSha } from "./git";
+import { branchSha, cloneBranchSha } from "./git";
 import { runDir, runLockPath, runNetworkDir, runRepoPath, runSessionStorePath, runsRoot, runsSizeTrackerPath } from "./paths";
 import { readRunLockRecord } from "./recover";
 import { readResult } from "./runs";
@@ -34,6 +34,7 @@ export type GcSkipKind =
   | "no-record"
   | "host-missing"
   | "branch-moved"
+  | "clone-refused"
   | "in-use";
 
 export interface GcSkip {
@@ -122,9 +123,14 @@ function hostBranchOutcome(
   host: string,
   clonePath: string,
   branch: string,
-): { ok: true } | { ok: false; kind: "host-missing" | "branch-moved"; why: string } {
+): { ok: true } | { ok: false; kind: "host-missing" | "branch-moved" | "clone-refused"; why: string } {
   if (!existsSync(host)) return { ok: false, kind: "host-missing", why: `its host repo ${host} is gone` };
-  const cloneSha = branchSha(clonePath, branch);
+  let cloneSha: string | undefined;
+  try {
+    cloneSha = cloneBranchSha(clonePath, branch);
+  } catch (error) {
+    return { ok: false, kind: "clone-refused", why: error instanceof Error ? error.message : String(error) };
+  }
   if (cloneSha === undefined) {
     return { ok: false, kind: "branch-moved", why: `"${branch}" is missing from its own Clone` };
   }

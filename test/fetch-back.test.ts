@@ -93,15 +93,16 @@ describe("a Fetch-back whose git process is killed", () => {
         home: home.path,
         env: { PATH: `${tools.binDir}:${process.env.PATH}` },
       });
-      await waitFor(() => tools.hits("git", "fetch").length === 1);
-      process.kill(tools.hits("git", "fetch")[0]!, "SIGKILL");
+      // The first `git fetch` is the commit scan's; Fetch-back's is the second.
+      await waitFor(() => tools.hits("git", "fetch").length === 2);
+      process.kill(tools.hits("git", "fetch")[1]!, "SIGKILL");
       const done = await cli.finished();
 
       expect(done.exitCode).toBe(0);
       const result = JSON.parse(done.stdout) as RunResult;
       expect(result.fetchBack).toBe(true);
       expect(refSha(repo.path, result.branch)).toBe(cloneSha(result.run, home.path, result.branch)!);
-      expect(tools.hits("git", "fetch")).toHaveLength(2);
+      expect(tools.hits("git", "fetch")).toHaveLength(3);
       expect(readLog(result.run, home.path)).toContain("killed by SIGKILL; retrying");
     } finally {
       tools.cleanup();
