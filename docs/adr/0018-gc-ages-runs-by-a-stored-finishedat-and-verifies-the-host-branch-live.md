@@ -118,3 +118,20 @@ exactly the "nothing ever reconciles it" bug this round exists to close. Declini
 nothing on disk changes; the counter is bookkeeping, not disk, so correcting it costs nothing and
 owes the user nothing in exchange for a "no." The README names `crisol gc` as what resyncs the
 total, so a warning that looks wrong has an answer.
+
+## Ticket 35 amends this (2026-11-23): a branch merged and deleted is collected
+
+"The branch missing from either side refuses the Run as `branch-moved`" kept every reviewed Run
+forever: merging the branch and deleting it is how one normally ends, so its 2-4 GB `repo/` stayed
+and `gc` printed a refusal for it on every call. The check exists so `gc` never destroys work that
+exists nowhere else, and a Clone tip the host still reaches is not that work.
+
+So a branch gone from the host is no longer refused by itself. The Clone's tip is still read through
+`cloneBranchSha` (ADR 0029: host git reads a Clone only as a remote), and the host repo is asked
+whether any `refs/heads/*` or `refs/tags/*` contains it (`git for-each-ref --contains`). If one does,
+the Run is collected like any other. If none does, it stays refused as `branch-moved`, and the
+reason says the work exists only in this Run's Clone; a squash merge leaves a Run that way, as does a
+branch deleted without merging. A tip the host never received reads as reached by nothing, never as
+an error.
+
+A branch that still exists in the host at a different commit is refused exactly as before.
