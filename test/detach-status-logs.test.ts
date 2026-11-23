@@ -35,7 +35,9 @@ describe("crisol run --detach", () => {
       expect(result.status).toBe("verified");
       expect(result.fetchBack).toBe(true);
       expect(refSha(repo.path, result.branch)).toBeDefined();
-      expect(readLog(id, home.path)).toContain(`Run ${id}: branch ${result.branch}, status verified.`);
+      // The detached process prints its summary into the log after it writes result.json.
+      const summary = `Run ${id}: branch ${result.branch}, status verified.`;
+      await waitFor(() => readLog(id!, home.path).includes(summary), 10_000);
     } finally {
       await stopRuns(home.path);
       home.cleanup();
