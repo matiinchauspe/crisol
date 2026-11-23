@@ -345,9 +345,9 @@ that message is dropped rather than shown as this round's own.
 Every Sandbox sits on its own Docker `--internal` network — no route out at all except through a
 proxy that allows HTTPS `CONNECT` on port 443 (and plain HTTP on port 80) to an Allowlist, with no
 TLS interception and no certificate anywhere in the image. The built-in Allowlist covers the Anthropic API and the package
-registries a Run needs to install dependencies (`registry.npmjs.org`, `github.com`,
-`codeload.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`,
-`pypi.org`, `files.pythonhosted.org`).
+registries a Run needs to install dependencies (`registry.npmjs.org`, `registry.yarnpkg.com`,
+`repo.yarnpkg.com`, `github.com`, `codeload.github.com`, `objects.githubusercontent.com`,
+`release-assets.githubusercontent.com`, `pypi.org`, `files.pythonhosted.org`).
 A host it doesn't name is refused, and every refusal is counted:
 
 ```json
@@ -505,12 +505,31 @@ version, see [Credentials](#credentials)); cached by a hash of the Project layer
 agent version and the Tenaza version, so a change to any of the three rebuilds it on the next
 Run.
 
+#### What a `.crisol/Dockerfile` must allow
+
+Crisol builds your `.crisol/Dockerfile`, then the Agent layer on top of it, under four constraints:
+
+- **Base distro: Alpine, Debian or Ubuntu.** The Agent layer installs `bash`, `curl`, `git` and
+  `rg` with `apk` or `apt-get`, so the image needs one of them and a `/bin/sh`. An image with
+  neither, such as a distroless one, is refused before anything is built:
+  `Crisol builds its Agent layer with apk (Alpine) or apt-get (Debian, Ubuntu), and this Project layer image has neither.`
+- **uid 1000 belongs to Crisol.** Every agent command runs as a user `agent`, uid 1000. An
+  account that already holds that uid, like `node` in the official Node images or `ubuntu` in
+  Ubuntu's, is removed, and the files it owned stay owned by uid 1000, so they pass to `agent`.
+- **Your `USER` is not the one that runs.** The Agent layer switches to `root` to install, then
+  to `agent`. Put the tools a Run needs where uid 1000 can read and run them, never under `/root`,
+  which is `0700`.
+- **No build context.** Both layers are built from a Dockerfile piped over stdin, so nothing
+  from your repo can be copied in: `COPY` and `ADD` of a local path fail the build. Fetch what you
+  need with `RUN`, or copy it out of another image with `COPY --from=<image>`, which needs no
+  context. Your repo's own files reach the Sandbox as the Run's Clone, never through the image.
+
 ### Tenaza
 
 With [Tenaza](https://github.com/matiinchauspe/tenaza) installed on your host (`TENAZA_HOME`, else
 `~/.tenaza`, exists), a `--adapter claude-code` Run's reserved actions still reach you. The Agent
-layer carries Tenaza's Linux binary (pinned to v0.5.2, its musl build checked against the
-release's sha256) and its Claude Code hooks, which decide inside the Sandbox — never over HTTP to
+layer carries Tenaza's Linux binary (pinned to v0.5.2, its musl or glibc build to match the
+Project layer, checked against the release's sha256) and its Claude Code hooks, which decide inside the Sandbox — never over HTTP to
 your daemon. `~/.tenaza/config` is mounted read-only, so the agent cannot edit `policy.toml`, and
 `~/.tenaza/state` read-write, so a reserved action lands in your Inbox. The Run shows on Tenaza's
 board as a session in your repo's project. Without Tenaza the Run still proceeds, and prints once:
@@ -759,6 +778,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0032](docs/adr/0032-crisol-run-and-init-default-to-claude-code.md): `crisol run` and `crisol init` build the Claude Code Adapter when no `--adapter` is given, and the stand-in only as `--adapter fake`; `run()` itself keeps its `FakeAdapter` fallback; every suite test that starts a Run through the CLI names `--adapter fake` (amends ADR 0021)
 - [0033](docs/adr/0033-gates-run-only-on-a-clean-clone-with-head-on-the-branch.md): before every round of Gates, the Clone must be clean (untracked files included) with `HEAD` on `refs/heads/<branch>`, checked inside the Sandbox and raced against the wall clock; otherwise no Gate runs and the agent is resumed with that as feedback, spending an iteration; a Run with no Gates is not checked; paths the Run's first dependency install left dirty are excused while their content is unchanged, from a snapshot kept in the Run dir so a Continuation never excuses its previous round's uncommitted work
 - [0034](docs/adr/0034-service-names-bypass-the-proxy-and-a-service-that-exits-fails-the-run-at-once.md): every declared Service name joins `NO_PROXY`, so a proxy-honouring tool reaches it instead of being refused by tinyproxy (amends 0012); Service containers run without `--rm`, and the health wait reads `State.Status` first, so a Service that exits fails the Run at once with its exit code and last 20 log lines (amends 0015)
+- [0035](docs/adr/0035-the-agent-layer-builds-on-alpine-debian-or-ubuntu-and-takes-uid-1000.md): the Agent layer installs with `apk` or `apt-get`, picked at build time, and an image with neither is refused before `docker build` by a probe of the Project layer image; an account already holding uid 1000 is removed before `agent` is created; the layer opens with `USER root`; Tenaza's asset is picked by libc as well as arch (amends 0008 and 0028)
 
 ## Development
 
