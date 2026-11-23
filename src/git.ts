@@ -230,24 +230,21 @@ export function fetchBack(
   assertFetchedBack(ref, hostSha, cloneSha);
 }
 
+/** `false`, never a throw, for a sha the repo does not hold at all. */
+export function isReachableFromBranchOrTag(repoPath: string, sha: string): boolean {
+  return (
+    run(["git", "-C", repoPath, "for-each-ref", "--count=1", "--contains", sha, "refs/heads/", "refs/tags/"])
+      .stdout.trim().length > 0
+  );
+}
+
 /**
  * Reachable from what `cloneLocal` transfers — a local branch, a tag, or HEAD — not merely
  * present in the object store. Remote-tracking refs and stashes never reach the Clone, and a
  * detached HEAD has no ref under `refs/` to list, hence the separate `merge-base` check.
  */
 export function isReachableFromClonedRefs(repoPath: string, sha: string): boolean {
-  const fromBranchOrTag =
-    run([
-      "git",
-      "-C",
-      repoPath,
-      "for-each-ref",
-      "--contains",
-      sha,
-      "refs/heads/",
-      "refs/tags/",
-    ]).stdout.trim().length > 0;
-  if (fromBranchOrTag) return true;
+  if (isReachableFromBranchOrTag(repoPath, sha)) return true;
   return run(["git", "-C", repoPath, "merge-base", "--is-ancestor", sha, "HEAD"]).exitCode === 0;
 }
 

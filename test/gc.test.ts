@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { Adapter } from "../src/adapter";
 import { FakeAdapter } from "../src/adapters/fake";
-import { addTrackedSize, collectRun, formatSizeWarning, planGc, reconcileTrackedSize, runDirSizeBytes, trackedRunsSizeBytes } from "../src/gc";
+import { GC_MIN_AGE_MS, addTrackedSize, collectRun, formatSizeWarning, planGc, reconcileTrackedSize, runDirSizeBytes, trackedRunsSizeBytes } from "../src/gc";
 import { checkoutNewBranch, cloneLocal, discoverGitRoot, shortSha } from "../src/git";
 import { runDir, runLockPath, runLogPath, runNetworkDir, runRepoPath, runResultPath, runSessionIdPath } from "../src/paths";
 import { run } from "../src/run";
@@ -49,6 +49,21 @@ function writeFakeRun(
     finishedAt,
   };
   writeFileSync(runResultPath(id, home), JSON.stringify(result, null, 2));
+}
+
+function git(args: string[]): void {
+  const proc = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+  if (proc.exitCode !== 0) throw new Error(`\`git ${args.join(" ")}\` failed: ${proc.stderr.toString("utf8")}`);
+}
+
+function commitInClone(home: string, id: string): void {
+  // The Clone has no identity of its own; these are the fixture repo's.
+  git(["-C", runRepoPath(id, home), "-c", "user.name=Crisol Fixture", "-c", "user.email=fixture@crisol.test", "commit", "--quiet", "--allow-empty", "-m", "feat: the Run's work"]);
+}
+
+function commitInCloneAndFetchBack(home: string, host: string, id: string, branch: string): void {
+  commitInClone(home, id);
+  git(["-C", host, "fetch", "--quiet", runRepoPath(id, home), `refs/heads/${branch}:refs/heads/${branch}`]);
 }
 
 function ageResultBy(id: string, home: string, days: number): void {
@@ -202,6 +217,113 @@ describe("planGc, no Docker needed", () => {
       expect(plan.collectable).toEqual([]);
       expect(plan.skipped[0]).toMatchObject({ run: "r1", kind: "branch-moved" });
       expect(plan.skipped[0]!.why).toContain("crisol/r1");
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("collects a Run whose branch was merged and then deleted in the host", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const host = discoverGitRoot(repo.path)!;
+      writeFakeRun(home.path, host, {
+        id: "r1",
+        branch: "crisol/r1",
+        status: "verified",
+        fetchBack: true,
+        finishedAt: Date.now() - GC_MIN_AGE_MS - DAY_MS,
+      });
+      commitInCloneAndFetchBack(home.path, host, "r1", "crisol/r1");
+      git(["-C", host, "merge", "--quiet", "--no-ff", "-m", "Merge crisol/r1", "crisol/r1"]);
+      git(["-C", host, "branch", "-D", "crisol/r1"]);
+
+      const plan = planGc(home.path, { includeFailed: false });
+      expect(plan.collectable.map((c) => c.run)).toEqual(["r1"]);
+      expect(plan.skipped).toEqual([]);
+      plan.collectable[0]!.release();
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("collects a Run whose deleted branch a host tag still reaches", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const host = discoverGitRoot(repo.path)!;
+      writeFakeRun(home.path, host, {
+        id: "r1",
+        branch: "crisol/r1",
+        status: "verified",
+        fetchBack: true,
+        finishedAt: Date.now() - GC_MIN_AGE_MS - DAY_MS,
+      });
+      commitInCloneAndFetchBack(home.path, host, "r1", "crisol/r1");
+      git(["-C", host, "tag", "kept", "crisol/r1"]);
+      git(["-C", host, "branch", "-D", "crisol/r1"]);
+
+      const plan = planGc(home.path, { includeFailed: false });
+      expect(plan.collectable.map((c) => c.run)).toEqual(["r1"]);
+      plan.collectable[0]!.release();
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("refuses a Run whose branch was squash-merged and deleted, saying the work exists only in its Clone", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const host = discoverGitRoot(repo.path)!;
+      writeFakeRun(home.path, host, {
+        id: "r1",
+        branch: "crisol/r1",
+        status: "verified",
+        fetchBack: true,
+        finishedAt: Date.now() - GC_MIN_AGE_MS - DAY_MS,
+      });
+      commitInCloneAndFetchBack(home.path, host, "r1", "crisol/r1");
+      const tip = shortSha(host, "crisol/r1");
+      git(["-C", host, "merge", "--quiet", "--squash", "crisol/r1"]);
+      git(["-C", host, "commit", "--quiet", "--allow-empty", "-m", "Squash crisol/r1"]);
+      git(["-C", host, "branch", "-D", "crisol/r1"]);
+
+      const plan = planGc(home.path, { includeFailed: false });
+      expect(plan.collectable).toEqual([]);
+      expect(plan.skipped[0]).toMatchObject({ run: "r1", kind: "branch-moved" });
+      expect(plan.skipped[0]!.why).toContain(`"crisol/r1" no longer exists in ${host}`);
+      expect(plan.skipped[0]!.why).toContain(tip);
+      expect(plan.skipped[0]!.why).toContain("exists only in this Run's Clone");
+      expect(existsSync(runRepoPath("r1", home.path))).toBe(true);
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  });
+
+  test("refuses a Run whose branch is gone from a host that never received its tip", () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const host = discoverGitRoot(repo.path)!;
+      writeFakeRun(home.path, host, {
+        id: "r1",
+        branch: "crisol/r1",
+        status: "verified",
+        fetchBack: true,
+        finishedAt: Date.now() - GC_MIN_AGE_MS - DAY_MS,
+      });
+      commitInClone(home.path, "r1");
+      git(["-C", host, "branch", "-D", "crisol/r1"]);
+
+      const plan = planGc(home.path, { includeFailed: false });
+      expect(plan.collectable).toEqual([]);
+      expect(plan.skipped[0]).toMatchObject({ run: "r1", kind: "branch-moved" });
+      expect(plan.skipped[0]!.why).toContain("exists only in this Run's Clone");
     } finally {
       home.cleanup();
       repo.cleanup();
@@ -663,7 +785,7 @@ describe("crisol gc end to end, against a real Docker engine", () => {
   }, 60_000);
 });
 
-describe("crisol run's size warning (ticket 16)", () => {
+describe("crisol run's size warning", () => {
   test("stays quiet under the default threshold", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();

@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { GlobalConfig } from "./config";
-import { branchSha, cloneBranchSha } from "./git";
+import { branchSha, cloneBranchSha, isReachableFromBranchOrTag } from "./git";
 import { runDir, runLockPath, runNetworkDir, runRepoPath, runSessionStorePath, runsRoot, runsSizeTrackerPath } from "./paths";
 import { readRunLockRecord } from "./recover";
 import { readResult } from "./runs";
@@ -117,7 +117,8 @@ function finishedRunIds(home: string): string[] {
 /**
  * The branch's tip in its own Clone, which still holds it: `fetchBack: true` means the host
  * SHOULD already be there too, so a mismatch means the host moved since Fetch-back, never that
- * the Clone is wrong — gc only ever reads one, it never writes one.
+ * the Clone is wrong — gc only ever reads one, it never writes one. A branch gone from the host
+ * is no loss while some host branch or tag still reaches that tip.
  */
 function hostBranchOutcome(
   host: string,
@@ -136,7 +137,14 @@ function hostBranchOutcome(
   }
   const hostSha = branchSha(host, branch);
   if (hostSha === undefined) {
-    return { ok: false, kind: "branch-moved", why: `"${branch}" no longer exists in ${host}` };
+    if (isReachableFromBranchOrTag(host, cloneSha)) return { ok: true };
+    return {
+      ok: false,
+      kind: "branch-moved",
+      why:
+        `"${branch}" no longer exists in ${host} and its tip ${cloneSha.slice(0, 7)} is on no branch or tag ` +
+        `there, so that work exists only in this Run's Clone`,
+    };
   }
   if (hostSha !== cloneSha) {
     return {
