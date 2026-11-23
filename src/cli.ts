@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import packageJson from "../package.json";
 import type { Adapter } from "./adapter";
 import { ClaudeCodeAdapter } from "./adapters/claude-code";
 import { DEFAULT_SCRIPT, FakeAdapter } from "./adapters/fake";
@@ -40,6 +41,8 @@ const LOGS_USAGE = "Usage: crisol logs <run>";
 const GC_USAGE = "Usage: crisol gc [--include-failed]";
 
 const INIT_USAGE = "Usage: crisol init [--adapter <fake|claude-code>]";
+
+const VERSION_USAGE = "Usage: crisol --version";
 
 const NETWORK_MODES: readonly NetworkMode[] = ["allowlist", "learn", "open"];
 
@@ -580,6 +583,10 @@ async function main(argv: string[]): Promise<number> {
   assertSupportedPlatform();
 
   const [command, ...rest] = argv;
+  if (command === "--version") {
+    console.log(packageJson.version);
+    return 0;
+  }
   if (command === "auth") {
     return runAuthCommand(rest);
   }
@@ -603,7 +610,7 @@ async function main(argv: string[]): Promise<number> {
   }
   if (command !== "run") {
     process.stderr.write(
-      `${USAGE}\n${ALLOW_USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n${STATUS_USAGE}\n${LOGS_USAGE}\n${GC_USAGE}\n${INIT_USAGE}\n`,
+      `${USAGE}\n${ALLOW_USAGE}\n${AUTH_USAGE}\n${RECOVER_USAGE}\n${STATUS_USAGE}\n${LOGS_USAGE}\n${GC_USAGE}\n${INIT_USAGE}\n${VERSION_USAGE}\n`,
     );
     return 1;
   }
