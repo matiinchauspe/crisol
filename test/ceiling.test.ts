@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
+import { DEFAULT_SCRIPT, FakeAdapter } from "../src/adapters/fake";
 import { parseGlobalConfig, readGlobalConfig } from "../src/config";
-import { resolveCeiling } from "../src/run";
+import { slotPath } from "../src/paths";
+import { resolveCeiling, run } from "../src/run";
+import type { RunOptions } from "../src/run";
+import { DarwinFlockSlotLock } from "../src/slots";
 import { createTempHome } from "./support/crisolHome";
+import { createFixtureRepo } from "./support/fixtureRepo";
+import { onlyRunId, readLog, readResult, removeRunContainers, runContainers } from "./support/runState";
 
 describe("parseGlobalConfig (~/.crisol/config's max_iterations / timeout_minutes)", () => {
   test("parses both keys", () => {
@@ -104,4 +110,56 @@ describe("resolveCeiling (a per-Run value beats ~/.crisol/config beats the built
       ceilingMs: 60_000,
     });
   });
+});
+
+/** The Sandbox's own keep-alive (`startSandbox`): a process that, by design, never exits. */
+const NEVER_EXITS = "tail -f /dev/null";
+const BUDGET_MS = 3_000;
+
+describe("the wall-clock ceiling ends a Run whatever it is doing", () => {
+  async function runUntilCeiling(options: Pick<RunOptions, "adapter" | "gates">): Promise<void> {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    let id: string | undefined;
+    try {
+      const startedAt = Date.now();
+      const result = await run({
+        task: "hang",
+        cwd: repo.path,
+        home: home.path,
+        ...options,
+        maxIterations: 1000,
+        ceilingMs: BUDGET_MS,
+      });
+      const elapsedMs = Date.now() - startedAt;
+      id = onlyRunId(home.path);
+
+      expect(result).toMatchObject({ status: "not-converged", reason: "ceiling", fetchBack: true });
+      expect(readResult(id, home.path)).toMatchObject({ status: "not-converged", reason: "ceiling" });
+      expect(elapsedMs).toBeGreaterThanOrEqual(BUDGET_MS);
+      // Sandbox start, teardown and Fetch-back on top of the budget, never another budget's worth of waiting.
+      expect(elapsedMs).toBeLessThan(BUDGET_MS + 30_000);
+      expect(readLog(id, home.path)).toContain(`ceiling reached: ${BUDGET_MS}ms`);
+      expect(runContainers(id)).toEqual([]);
+      const slot = new DarwinFlockSlotLock().tryLock(slotPath(1, home.path));
+      expect(slot).toBeDefined();
+      slot?.release();
+    } finally {
+      if (id !== undefined) removeRunContainers(id);
+      home.cleanup();
+      repo.cleanup();
+    }
+  }
+
+  test(
+    "a first turn that never returns, in a Run with no Gates, ends at the budget",
+    () => runUntilCeiling({ adapter: new FakeAdapter([NEVER_EXITS]), gates: [] }),
+    60_000,
+  );
+
+  test(
+    "a Gate that never exits ends at the budget",
+    () => runUntilCeiling({ adapter: new FakeAdapter(DEFAULT_SCRIPT), gates: [NEVER_EXITS] }),
+    60_000,
+  );
 });

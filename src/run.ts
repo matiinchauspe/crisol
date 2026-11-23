@@ -432,6 +432,39 @@ function armInterruption(logPath: string, alreadyAborted: AbortSignal | undefine
   };
 }
 
+class CeilingReached extends Error {
+  constructor(readonly ceilingMs: number) {
+    super(`ceiling reached: ${ceilingMs}ms wall clock ran out`);
+    this.name = "CeilingReached";
+  }
+}
+
+interface WallClock {
+  readonly reached: Promise<never>;
+  throwIfReached(): void;
+  disarm(): void;
+}
+
+/** A timer, not a check between steps: a turn or Gate that never returns gets no step to check at. */
+function armWallClock(ceilingMs: number): WallClock {
+  const deadline = Date.now() + ceilingMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const reached = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new CeilingReached(ceilingMs)), ceilingMs);
+  });
+  // The budget can run out before anything races this promise.
+  reached.catch(() => {});
+  return {
+    reached,
+    throwIfReached() {
+      if (Date.now() >= deadline) throw new CeilingReached(ceilingMs);
+    },
+    disarm() {
+      clearTimeout(timer);
+    },
+  };
+}
+
 /** A signal that lands during a synchronous git call reaches its handler only once the event loop turns. */
 function letSignalsLand(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -1022,6 +1055,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   let resultError: unknown;
   let fetchedBack = false;
   let sandbox: Sandbox | undefined;
+  let sandboxRemoved = false;
+  let teardownWarning: string | undefined;
   let wall: NetworkWall | undefined;
   let serviceRuntime: ServiceRuntime | undefined;
   /** Set only when Services created their own network because no wall did (open mode); teardown removes it only then. */
@@ -1043,21 +1078,31 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     }
   };
 
-  // Cleared before the await: a throw here leaves no message, not the prior turn's.
-  const runTurn = async (turn: Promise<string | void>): Promise<void> => {
-    finalMessage = undefined;
-    keepTurn(await turn);
+  // The race below has already moved on from an interrupted or timed-out loop; this keeps it from
+  // resuming the agent or overwriting what the Run reports.
+  const throwIfStopped = (clock: WallClock): void => {
+    interruption.throwIfInterrupted();
+    clock.throwIfReached();
   };
 
-  const converge = async (ctx: AdapterContext): Promise<void> => {
-    await runTurn(continued !== undefined ? adapter.continueSession!(ctx, continued.sessionId, prompt) : adapter.launch(ctx));
+  // Cleared before the await: a throw here leaves no message, not the prior turn's.
+  const runTurn = async (turn: Promise<string | void>, clock: WallClock): Promise<void> => {
+    finalMessage = undefined;
+    const message = await turn;
+    throwIfStopped(clock);
+    keepTurn(message);
+  };
+
+  const converge = async (ctx: AdapterContext, clock: WallClock): Promise<void> => {
+    await runTurn(
+      continued !== undefined ? adapter.continueSession!(ctx, continued.sessionId, prompt) : adapter.launch(ctx),
+      clock,
+    );
     iterations = 1;
-    const startedAt = Date.now();
 
     while (true) {
-      // The race below has already moved on; this keeps an interrupted loop from resuming the agent.
-      interruption.throwIfInterrupted();
       const completed = await adapter.reportCompletion(ctx);
+      throwIfStopped(clock);
       appendLog(logPath, `adapter reported completion=${completed} after ${iterations} iteration(s)`);
 
       // Before any Gate: an agent that stopped on purpose is not pushed back to work.
@@ -1075,7 +1120,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       }
 
       const { results, firstFailure } = await runGates(ctx.sandbox, gates);
-      interruption.throwIfInterrupted();
+      throwIfStopped(clock);
       gateResults = results;
       appendLog(
         logPath,
@@ -1089,20 +1134,18 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         return;
       }
 
-      const elapsedMs = Date.now() - startedAt;
-      if (iterations >= maxIterations || elapsedMs >= ceilingMs) {
+      if (iterations >= maxIterations) {
         status = "not-converged";
         reason = "ceiling";
         appendLog(
           logPath,
-          `ceiling reached at iteration ${iterations} (elapsed ${elapsedMs}ms); ` +
-            `last failing Gate "${firstFailure.cmd}": ${firstFailure.output}`,
+          `ceiling reached at iteration ${iterations}; last failing Gate "${firstFailure.cmd}": ${firstFailure.output}`,
         );
         return;
       }
 
       appendLog(logPath, `resuming with feedback for failing Gate "${firstFailure.cmd}"`);
-      await runTurn(adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure)));
+      await runTurn(adapter.resumeWithFeedback(ctx, formatGateFeedback(firstFailure)), clock);
       iterations += 1;
     }
   };
@@ -1215,10 +1258,26 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       await letSignalsLand();
       interruption.throwIfInterrupted();
 
-      await Promise.race([
-        converge({ sandbox, repoPath: clonePath, hostRepoPath, prompt, instructions }),
-        interruption.rejected,
-      ]);
+      // The clock starts before the first turn, so a turn that never returns still spends it.
+      const clock = armWallClock(ceilingMs);
+      try {
+        await Promise.race([
+          converge({ sandbox, repoPath: clonePath, hostRepoPath, prompt, instructions }, clock),
+          interruption.rejected,
+          clock.reached,
+        ]);
+      } catch (error) {
+        if (!(error instanceof CeilingReached)) throw error;
+        status = "not-converged";
+        reason = "ceiling";
+        appendLog(logPath, `${error.message} after ${iterations} finished iteration(s); removing the Sandbox`);
+        // Removing the container is what ends the exec still in flight, and an agent still running
+        // in it would otherwise commit past the scan below.
+        teardownWarning = await tearDown(sandbox, id, logPath);
+        sandboxRemoved = true;
+      } finally {
+        clock.disarm();
+      }
 
       // Best-effort: a failed scan must not turn a converged Run into a failed one.
       try {
@@ -1246,7 +1305,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       }
     }
 
-    const teardownWarning = await tearDown(sandbox, id, logPath);
+    if (!sandboxRemoved) teardownWarning = await tearDown(sandbox, id, logPath);
     if (teardownWarning !== undefined) {
       warnings.push(teardownWarning);
       options.onWarning?.(teardownWarning);
