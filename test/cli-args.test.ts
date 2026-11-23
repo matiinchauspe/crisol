@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { runResultPath } from "../src/paths";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
@@ -252,11 +254,8 @@ describe("crisol run --max-iterations / --timeout validation", () => {
 });
 
 /**
- * `--adapter`'s own validation — checked ONLY through the usage-error paths,
- * which fail during argument parsing, BEFORE `run()` is ever called. `--adapter claude-code`
- * itself is never exercised here: that would reach the real `ClaudeCodeAdapter` and, through
- * it, the real `claude --version` and a real Docker image build — exactly what the automated
- * suite must never do. See `test/claude-code-adapter.test.ts` for the real Adapter's own tests.
+ * A Run on the real Claude Code Adapter would call a model and build the real Agent layer, which
+ * the suite never does, so `claude-code` is reached here only behind a failing `claude` stub.
  */
 describe("crisol run --adapter validation (ticket 14)", () => {
   test("--adapter with no value at all is a usage error", async () => {
@@ -292,7 +291,7 @@ describe("crisol run --adapter validation (ticket 14)", () => {
     }
   });
 
-  test("--adapter fake (explicit default) behaves exactly like omitting it", async () => {
+  test("--adapter fake runs the scripted stand-in, which leaves the Run unverified", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
@@ -309,12 +308,69 @@ describe("crisol run --adapter validation (ticket 14)", () => {
   }, 60_000);
 });
 
+/**
+ * A `claude` on PATH whose `--version` fails stops the Claude Code Adapter at its pre-start
+ * declaration, before it reads the Keychain or builds an image, so the default is observable
+ * without a model or a real Agent layer.
+ */
+function failingClaude(): { binDir: string; cleanup(): void } {
+  const binDir = mkdtempSync(path.join(tmpdir(), "crisol-claude-stub-"));
+  const stub = path.join(binDir, "claude");
+  writeFileSync(stub, '#!/bin/sh\necho "stub claude, not a real agent" >&2\nexit 1\n');
+  chmodSync(stub, 0o755);
+  return { binDir, cleanup: () => rmSync(binDir, { recursive: true, force: true }) };
+}
+
+describe("with no --adapter, the CLI runs the Claude Code Adapter", () => {
+  test("crisol run builds the Claude Code Adapter and starts no Run when it cannot", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    const claude = failingClaude();
+    try {
+      const result = await runCli(["run", "say hello", "--json"], {
+        cwd: repo.path,
+        home: home.path,
+        env: { PATH: `${claude.binDir}:${process.env.PATH}` },
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("`claude --version` failed: stub claude, not a real agent");
+      expect(existsSync(path.join(home.path, "runs"))).toBe(false);
+    } finally {
+      claude.cleanup();
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+
+  test("crisol init's learn Run builds the Claude Code Adapter", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    const claude = failingClaude();
+    try {
+      const result = await runCli(["init"], {
+        cwd: repo.path,
+        home: home.path,
+        env: { PATH: `${claude.binDir}:${process.env.PATH}` },
+        stdin: "y\n",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("`claude --version` failed: stub claude, not a real agent");
+    } finally {
+      claude.cleanup();
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+});
+
 describe("crisol run --continue refuses an Adapter mismatch at the CLI (ticket 30)", () => {
   test("exit 1, stderr names both Adapters, and the mismatched attempt starts no Run of its own", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const first = await runCli(["run", "say hello", "--name", "cli-mismatch", "--json"], {
+      const first = await runCli(["run", "say hello", "--name", "cli-mismatch", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -342,7 +398,7 @@ describe("crisol run --continue announces an inherited Adapter only once it is b
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const first = await runCli(["run", "say hello", "--name", "cli-unknown", "--json"], {
+      const first = await runCli(["run", "say hello", "--name", "cli-unknown", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });

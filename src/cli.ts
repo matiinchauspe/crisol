@@ -77,7 +77,6 @@ interface ParsedRunArgs {
   maxIterations?: number;
   timeoutMinutes?: number;
   network: NetworkMode;
-  /** Absent when `--adapter` was never typed — the only way `main` can tell that from an explicit `--adapter fake`. */
   adapterName?: AdapterName;
 }
 
@@ -507,7 +506,7 @@ function describeInit(report: InitReport): string[] {
 }
 
 async function runInitCommand(rest: string[]): Promise<number> {
-  let adapterName: AdapterName = "fake";
+  let adapterName: AdapterName = "claude-code";
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] !== "--adapter") {
       process.stderr.write(`Unexpected argument: ${rest[i]}\n${INIT_USAGE}\n`);
@@ -642,7 +641,7 @@ async function main(argv: string[]): Promise<number> {
         ? createAdapter(args.adapterName)
         : args.continue !== undefined
           ? undefined
-          : createAdapter("fake"),
+          : createAdapter("claude-code"),
     adapterByName: createAdapter,
   };
 
