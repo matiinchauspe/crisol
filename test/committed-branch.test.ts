@@ -142,6 +142,56 @@ describe("Gates judge the branch Fetch-back returns, never the working tree", ()
   );
 
   test(
+    "a Run with no Gates resumes an agent that left its change uncommitted, and ends unverified once it commits",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const { adapter, feedbacks } = recordingAdapter(new FakeAdapter(UNCOMMITTED_FIX, COMMIT_THE_FIX));
+
+        const result = await run({ task: "fix the gate", cwd: repo.path, home: home.path, adapter, gates: [] });
+
+        expect(result).toMatchObject({ status: "unverified", iterations: 2 });
+        expect(result.gates).toEqual([]);
+        expect(feedbacks).toHaveLength(1);
+        expect(feedbacks[0]).toContain("GATE_TARGET.txt");
+        expect(feedbacks[0]).toContain(result.branch);
+        expect(feedbacks[0]).not.toContain("Gates did not run");
+        expect(hostHasFile(repo.path, result.branch, "GATE_TARGET.txt")).toBe(true);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    90_000,
+  );
+
+  test(
+    "a Run with no Gates whose agent never commits ends not-converged at the ceiling, not unverified",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const result = await run({
+          task: "fix the gate",
+          cwd: repo.path,
+          home: home.path,
+          adapter: new FakeAdapter(UNCOMMITTED_FIX, UNCOMMITTED_FIX),
+          gates: [],
+          maxIterations: 2,
+        });
+
+        expect(result).toMatchObject({ status: "not-converged", reason: "ceiling", iterations: 2 });
+        expect(hostHasFile(repo.path, result.branch, "GATE_TARGET.txt")).toBe(false);
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    90_000,
+  );
+
+  test(
     "an agent that leaves HEAD off the Run's branch is told so before any Gate runs",
     async () => {
       const home = createTempHome();

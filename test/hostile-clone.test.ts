@@ -79,6 +79,9 @@ describe("host git never runs what an agent wrote into the Clone's .git", () => 
           cwd: repo.path,
           home: home.path,
           name: "feature/hostile",
+          // The script leaves HEAD off the branch and a Run with no Gates resumes on that; one
+          // iteration stops at the ceiling with HEAD still off for the Continuation.
+          maxIterations: 1,
           adapter: new FakeAdapter(plantingScript(markers.path), undefined, undefined, {}, { store: "/crisol-fake-sessions" }),
         });
         expect(first.fetchBack).toBe(true);
@@ -118,7 +121,7 @@ describe("host git never runs what an agent wrote into the Clone's .git", () => 
 
       let failure: unknown;
       try {
-        await run({ task: "x", cwd: repo.path, home: home.path, adapter: new FakeAdapter(repoint) });
+        await run({ task: "x", cwd: repo.path, home: home.path, maxIterations: 1, adapter: new FakeAdapter(repoint) });
       } catch (error) {
         failure = error;
       }
