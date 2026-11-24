@@ -335,8 +335,8 @@ function shellQuote(arg: string): string {
  * `HEALTHCHECK CMD <string>` form; there is no CLI flag for the exec/array form `HEALTHCHECK CMD
  * ["a", "b"]` bakes into an image. `CMD-SHELL`'s one argument already is that shell string and
  * passes through verbatim; `CMD`'s argv is quoted and joined, which runs the same program as the
- * exec form would have, as long as no argument depended on shell-less exec semantics (none of the
- * ones this ticket's services need — `pg_isready`, `redis-cli ping` — do). `NONE` disables it.
+ * exec form would have, as long as no argument depended on shell-less exec semantics (`pg_isready`
+ * and `redis-cli ping` do not). `NONE` disables it.
  */
 function buildHealthShellCommand(test: readonly string[]): string | undefined {
   const [kind, ...rest] = test;
@@ -436,24 +436,30 @@ const HEALTH_WAIT_CEILING_MS = 10 * 60 * 1000;
 
 export interface ServiceRuntime {
   names: readonly string[];
-  /** Throws naming the first gated service to exit, vanish or turn `unhealthy`, or at the backstop ceiling. */
-  waitHealthy(): Promise<void>;
+  /**
+   * Throws naming the first gated service to exit, vanish or turn `unhealthy`, or at the backstop
+   * ceiling. `checkpoint` runs on every poll; whatever it throws ends the wait with that error.
+   */
+  waitHealthy(checkpoint?: () => void): Promise<void>;
   /** Never throws; the caller reports a failed teardown. */
   teardown(): Promise<StopResult>;
 }
 
 /**
  * All or nothing: on a throw it has already removed what it started, so a caller never tracks a
- * service container it got no handle to.
+ * service container it got no handle to. `checkpoint` runs before each container, never during one:
+ * a `docker run` abandoned mid-create can leave a container behind that nobody removes.
  */
 export async function startServices(
   id: string,
   network: string,
   services: readonly ServiceSpec[],
+  checkpoint: () => void = () => {},
 ): Promise<ServiceRuntime> {
   const started: string[] = [];
   try {
     for (const service of services) {
+      checkpoint();
       started.push(await startServiceContainer(id, network, service));
     }
   } catch (error) {
@@ -463,11 +469,12 @@ export async function startServices(
 
   return {
     names: started,
-    async waitHealthy(): Promise<void> {
+    async waitHealthy(checkpoint: () => void = () => {}): Promise<void> {
       const gated = services.filter((service) => service.healthcheck !== undefined && service.healthcheck.test[0] !== "NONE");
       const pending = new Set(gated.map((service) => service.name));
       const deadline = Date.now() + HEALTH_WAIT_CEILING_MS;
       while (pending.size > 0) {
+        checkpoint();
         for (const service of gated) {
           if (!pending.has(service.name)) continue;
           const container = serviceContainerName(id, service.name);

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createTempHome } from "./support/crisolHome";
-import { createFixtureRepo } from "./support/fixtureRepo";
+import { HANGING_INSTALL, commitFiles, createFixtureRepo } from "./support/fixtureRepo";
 import { startCli, waitFor } from "./support/liveCli";
 import {
   cloneSha,
@@ -174,6 +174,82 @@ describe("Ctrl+C again while the Run is already stopping", () => {
     } finally {
       if (id) removeRunContainers(id);
       tools.cleanup();
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+});
+
+/**
+ * `start_period` keeps a failing healthcheck at `starting` rather than `unhealthy` — checked live:
+ * `--health-cmd false --health-start-period 1h` still reads `starting` after five 1s intervals —
+ * so the health wait would sit out its whole 10-minute backstop.
+ */
+const NEVER_HEALTHY_SERVICE = [
+  "services:",
+  "  db:",
+  "    image: postgres:16-alpine",
+  '    command: ["sleep", "3600"]',
+  "    healthcheck:",
+  '      test: ["CMD-SHELL", "false"]',
+  "      interval: 1s",
+  "      start_period: 1h",
+  "",
+].join("\n");
+
+describe("a signal before the agent's first turn", () => {
+  test("Ctrl+C during the health wait removes the Services at once and leaves the branch at its base", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    commitFiles(repo.path, { ".crisol/services.yml": NEVER_HEALTHY_SERVICE }, "chore: declare a never-healthy service");
+    let id: string | undefined;
+    try {
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      await waitFor(() => runIds(home.path).length === 1);
+      id = runIds(home.path)[0]!;
+      await waitFor(() => readLog(id!, home.path).includes("services up on"));
+
+      process.kill(-cli.proc.pid, "SIGINT");
+      const done = await cli.finished();
+
+      expect(done.exitCode).not.toBe(0);
+      expect(refSha(repo.path, `crisol/${id}`)).toBe(mainSha(repo.path));
+      expect(runContainers(id)).toEqual([]);
+      const log = readLog(id, home.path);
+      expect(log).toContain("received SIGINT");
+      expect(log).not.toContain("services healthy");
+      expect(log).not.toContain(" started from ");
+      expect(readResult(id, home.path)).toMatchObject({ reason: "interrupted: SIGINT", iterations: 0, fetchBack: true });
+    } finally {
+      if (id) removeRunContainers(id);
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+
+  test("SIGTERM during a dependency install that never returns removes the Sandbox and leaves the branch at its base", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    commitFiles(repo.path, HANGING_INSTALL, "chore: add a package whose install hangs");
+    let id: string | undefined;
+    try {
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      await waitFor(() => runIds(home.path).length === 1);
+      id = runIds(home.path)[0]!;
+      await waitFor(() => readLog(id!, home.path).includes("installing dependencies with bun"));
+
+      process.kill(cli.proc.pid, "SIGTERM");
+      const done = await cli.finished();
+
+      expect(done.exitCode).not.toBe(0);
+      expect(refSha(repo.path, `crisol/${id}`)).toBe(mainSha(repo.path));
+      expect(runContainers(id)).toEqual([]);
+      const log = readLog(id, home.path);
+      expect(log).toContain("received SIGTERM");
+      expect(log).not.toContain("dependencies installed");
+      expect(readResult(id, home.path)).toMatchObject({ reason: "interrupted: SIGTERM", iterations: 0, fetchBack: true });
+    } finally {
+      if (id) removeRunContainers(id);
       home.cleanup();
       repo.cleanup();
     }

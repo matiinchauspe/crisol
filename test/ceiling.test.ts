@@ -8,7 +8,7 @@ import { resolveCeiling, run } from "../src/run";
 import type { RunOptions } from "../src/run";
 import { DarwinFlockSlotLock } from "../src/slots";
 import { createTempHome } from "./support/crisolHome";
-import { createFixtureRepo } from "./support/fixtureRepo";
+import { HANGING_INSTALL, commitFiles, createFixtureRepo } from "./support/fixtureRepo";
 import { onlyRunId, readLog, readResult, removeRunContainers, runContainers } from "./support/runState";
 
 describe("parseGlobalConfig (~/.crisol/config's max_iterations / timeout_minutes)", () => {
@@ -161,5 +161,45 @@ describe("the wall-clock ceiling ends a Run whatever it is doing", () => {
     "a Gate that never exits ends at the budget",
     () => runUntilCeiling({ adapter: new FakeAdapter(DEFAULT_SCRIPT), gates: [NEVER_EXITS] }),
     60_000,
+  );
+});
+
+describe("the wall-clock ceiling covers the steps before the first turn", () => {
+  // Long enough for the wall and the Sandbox to come up first, so the budget runs out mid-install.
+  const INSTALL_BUDGET_MS = 10_000;
+
+  test(
+    "a dependency install that never returns ends at the budget, before any turn",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      commitFiles(repo.path, HANGING_INSTALL, "chore: add a package whose install hangs");
+      let id: string | undefined;
+      try {
+        const startedAt = Date.now();
+        const result = await run({
+          task: "hang in install",
+          cwd: repo.path,
+          home: home.path,
+          adapter: new FakeAdapter(DEFAULT_SCRIPT),
+          ceilingMs: INSTALL_BUDGET_MS,
+        });
+        const elapsedMs = Date.now() - startedAt;
+        id = onlyRunId(home.path);
+
+        expect(result).toMatchObject({ status: "not-converged", reason: "ceiling", iterations: 0, fetchBack: true });
+        expect(elapsedMs).toBeLessThan(INSTALL_BUDGET_MS + 30_000);
+        const log = readLog(id, home.path);
+        expect(log).toContain("installing dependencies with bun");
+        expect(log).not.toContain("dependencies installed");
+        expect(log).toContain(`ceiling reached: ${INSTALL_BUDGET_MS}ms`);
+        expect(runContainers(id)).toEqual([]);
+      } finally {
+        if (id !== undefined) removeRunContainers(id);
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    90_000,
   );
 });

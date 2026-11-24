@@ -1140,6 +1140,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     interruption.throwIfInterrupted();
     clock.throwIfReached();
   };
+  const untilStopped = <T>(step: Promise<T>, clock: WallClock): Promise<T> =>
+    Promise.race([step, interruption.rejected, clock.reached]);
 
   // Cleared before the await: a throw here leaves no message, not the prior turn's.
   const runTurn = async (turn: Promise<string | void>, clock: WallClock): Promise<void> => {
@@ -1218,6 +1220,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     }
   };
 
+  // Armed before setup, so a hung install or a never-healthy Service spends the same budget as a turn.
+  const clock = armWallClock(ceilingMs);
   try {
     try {
       if (continued !== undefined) {
@@ -1259,7 +1263,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         appendLog(logPath, "network open: no wall, the Sandbox is on Docker's default network");
       }
       await letSignalsLand();
-      interruption.throwIfInterrupted();
+      throwIfStopped(clock);
 
       // Services, like the wall, go up before the Sandbox exists: the agent starts only once every
       // healthcheck passes, so a never-healthy service fails the Run before any iteration is spent.
@@ -1271,15 +1275,15 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
           servicesNetwork = await createInternalNetwork(id);
           bareServicesNetwork = servicesNetwork;
         }
-        serviceRuntime = await startServices(id, servicesNetwork, services);
+        serviceRuntime = await startServices(id, servicesNetwork, services, () => throwIfStopped(clock));
         appendLog(logPath, `services up on ${servicesNetwork}: ${services.map((service) => service.name).join(", ")}`);
         await letSignalsLand();
-        interruption.throwIfInterrupted();
-        await serviceRuntime.waitHealthy();
+        throwIfStopped(clock);
+        await serviceRuntime.waitHealthy(() => throwIfStopped(clock));
         appendLog(logPath, "services healthy");
       }
       await letSignalsLand();
-      interruption.throwIfInterrupted();
+      throwIfStopped(clock);
 
       const sessionMounts: MountSpec[] = [];
       if (adapter.sessionStore !== undefined) {
@@ -1340,7 +1344,8 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
 
       // Before the agent launches, so a broken install fails the Run with `iterations: 0`.
       if (packageManager !== undefined) {
-        await installDependencies(sandbox, packageManager);
+        appendLog(logPath, `installing dependencies with ${packageManager}`);
+        await untilStopped(installDependencies(sandbox, packageManager), clock);
         appendLog(logPath, `dependencies installed with ${packageManager}`);
       }
       // A Continuation's Clone also holds what the last round left uncommitted, so only the first
@@ -1355,16 +1360,10 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         appendLog(logPath, `left dirty by the dependency install, not asked of the agent: ${installDirt.map((dirt) => dirt.path).join(", ")}`);
       }
       await letSignalsLand();
-      interruption.throwIfInterrupted();
+      throwIfStopped(clock);
 
-      // The clock starts before the first turn, so a turn that never returns still spends it.
-      const clock = armWallClock(ceilingMs);
       try {
-        await Promise.race([
-          converge({ sandbox, repoPath: clonePath, hostRepoPath, prompt, instructions }, clock),
-          interruption.rejected,
-          clock.reached,
-        ]);
+        await untilStopped(converge({ sandbox, repoPath: clonePath, hostRepoPath, prompt, instructions }, clock), clock);
       } catch (error) {
         if (!(error instanceof CeilingReached)) throw error;
         status = "not-converged";
@@ -1374,8 +1373,6 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         // in it would otherwise commit past the scan below.
         teardownWarning = await tearDown(sandbox, id, logPath);
         sandboxRemoved = true;
-      } finally {
-        clock.disarm();
       }
 
       // Best-effort: a failed scan must not turn a converged Run into a failed one.
@@ -1388,8 +1385,15 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         appendLog(logPath, `commit scan failed: ${errorMessage(error)}`);
       }
     } catch (error) {
-      primaryError = error;
-      appendLog(logPath, `primary error: ${errorMessage(error)}`);
+      if (error instanceof CeilingReached) {
+        // Before the first turn: nothing ran in the Sandbox to scan, so the usual teardown below is enough.
+        status = "not-converged";
+        reason = "ceiling";
+        appendLog(logPath, `${error.message} before the first turn; tearing the Run down`);
+      } else {
+        primaryError = error;
+        appendLog(logPath, `primary error: ${errorMessage(error)}`);
+      }
       if (error instanceof ProviderFailureError) options.onProviderFailure?.(`provider: ${error.category}`);
     }
 
@@ -1520,6 +1524,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     if (resultError !== undefined) throw resultError;
     return result;
   } finally {
+    clock.disarm();
     interruption.disarm();
     lock.release();
     slot.release();
