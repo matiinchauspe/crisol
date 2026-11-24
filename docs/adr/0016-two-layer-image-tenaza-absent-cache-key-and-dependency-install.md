@@ -130,6 +130,23 @@ before every install, whatever user that Sandbox itself runs as. This is NOT exp
 (`src/docker.ts`) is a separate, narrower export `run.ts`'s own infra code calls directly, never
 handed to an Adapter.
 
+### Amended 2026-11-24: Yarn's cache moves to the environment, and `bun.lockb` selects bun
+
+`yarn install --cache-folder` is a Yarn 1 flag: Yarn 2+ exits 1 on it (`YN0050: The
+cache-folder option has been deprecated; use rc settings instead`, read live with Yarn 4.5.3), so
+every Yarn 2+ repo failed at `iterations: 0`. The install now runs `env
+YARN_CACHE_FOLDER=<volume>/yarn YARN_GLOBAL_FOLDER=<volume>/yarn/berry yarn install`. Both Yarn
+lines read `YARN_CACHE_FOLDER`, but Yarn 4 caches in its global folder by default and ignores the
+cache folder there, so the global folder moves into the volume too. Read live in
+`node:22-bookworm-slim` with Yarn 1.22.22, 3.8.7 and 4.5.3 (the last two through Corepack): all
+three install, and every cache file lands under the volume path, none under `~/.yarn`. `env` is
+POSIX, so this needs nothing an image would lack. A Yarn 2+ repo that commits its own cache
+(zero-installs) has its `cacheFolder` overridden by the variable, since Yarn 2+ ranks the
+environment over `.yarnrc.yml`; that case was not run live.
+
+`bun.lockb`, Bun's binary lockfile before 1.2, now selects bun after `bun.lock`. Bun 1.3.14
+installs from a `bun.lockb` written by Bun 1.1.38 and leaves it binary (read live).
+
 ## Deliberately not built: a `phase` field on `blocked`
 
 Crisol ADR 0012 named "dependency installs, before the agent starts" as the phase ticket 12 would
