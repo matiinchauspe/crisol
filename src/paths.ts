@@ -99,6 +99,15 @@ export function runSessionStorePath(id: string, home: string = crisolHome()): st
   return path.join(runDir(id, home), "sessions");
 }
 
+/** Mounted over the Adapter's `eventSink`; the host reads it only through the sink's own relay. */
+export function runTenazaSinkPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "tenaza-sessions");
+}
+
+export function runTenazaRecordPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "tenaza-relayed");
+}
+
 export function runSessionIdPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "session-id");
 }

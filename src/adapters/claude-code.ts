@@ -2,7 +2,15 @@ import { ProviderFailureError, type Adapter, type AdapterContext, type PreStartD
 import { existsSync } from "node:fs";
 import { assertInstallableBase, contentHash, ensureImageFromDockerfile, installPackagesStep, type ExecResult } from "../docker";
 import { CLAUDE_TOKEN_SECRET_NAME } from "../secret-store";
-import { TENAZA_RELEASE, hostTenazaHome, tenazaLayerSteps, tenazaMounts, type TenazaRelease } from "../tenaza";
+import {
+  TENAZA_RELEASE,
+  hostTenazaHome,
+  startTenazaRelay,
+  tenazaLayerSteps,
+  tenazaMounts,
+  tenazaSessionsDir,
+  type TenazaRelease,
+} from "../tenaza";
 
 const VERSION_PATTERN = /^(\d+\.\d+\.\d+)/;
 const PLAIN_VERSION = /^\d+\.\d+\.\d+$/;
@@ -277,7 +285,14 @@ export class ClaudeCodeAdapter implements Adapter {
       mounts: this.tenaza ? tenazaMounts(this.tenazaHome, AGENT_TENAZA_HOME) : [],
       ensureImage: () =>
         ensureImageFromDockerfile(tag, dockerfile, { beforeBuild: () => assertInstallableBase(projectImage) }),
-      ...(this.tenaza ? {} : { unguarded: `no Tenaza home at ${this.tenazaHome}` }),
+      ...(this.tenaza
+        ? {
+            eventSink: {
+              containerPath: tenazaSessionsDir(AGENT_TENAZA_HOME),
+              start: (paths, onRefused) => startTenazaRelay({ ...paths, hostHome: this.tenazaHome, onRefused }),
+            },
+          }
+        : { unguarded: `no Tenaza home at ${this.tenazaHome}` }),
     };
   }
 

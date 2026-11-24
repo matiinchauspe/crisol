@@ -2,7 +2,16 @@ import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, writeFileSync
 import path from "node:path";
 import type { GlobalConfig } from "./config";
 import { branchSha, cloneBranchSha, isReachableFromBranchOrTag } from "./git";
-import { runDir, runLockPath, runNetworkDir, runRepoPath, runSessionStorePath, runsRoot, runsSizeTrackerPath } from "./paths";
+import {
+  runDir,
+  runLockPath,
+  runNetworkDir,
+  runRepoPath,
+  runSessionStorePath,
+  runsRoot,
+  runsSizeTrackerPath,
+  runTenazaSinkPath,
+} from "./paths";
 import { readRunLockRecord } from "./recover";
 import { readResult } from "./runs";
 import { probeRunLock } from "./slots";
@@ -63,7 +72,8 @@ export function runDirSizeBytes(id: string, home: string): number {
   return (
     dirSizeBytes(runRepoPath(id, home)) +
     dirSizeBytes(runNetworkDir(id, home)) +
-    dirSizeBytes(runSessionStorePath(id, home))
+    dirSizeBytes(runSessionStorePath(id, home)) +
+    dirSizeBytes(runTenazaSinkPath(id, home))
   );
 }
 
@@ -234,4 +244,5 @@ export function collectRun(id: string, home: string): void {
   rmSync(runRepoPath(id, home), { recursive: true, force: true });
   rmSync(runNetworkDir(id, home), { recursive: true, force: true });
   rmSync(runSessionStorePath(id, home), { recursive: true, force: true });
+  rmSync(runTenazaSinkPath(id, home), { recursive: true, force: true });
 }

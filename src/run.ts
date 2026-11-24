@@ -61,6 +61,8 @@ import {
   runSessionIdPath,
   runSessionStorePath,
   runsRoot,
+  runTenazaRecordPath,
+  runTenazaSinkPath,
 } from "./paths";
 import { readResult, runsNamingBranch } from "./runs";
 import type { BranchClaim } from "./runs";
@@ -1109,6 +1111,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
   let fetchedBack = false;
   let sandbox: Sandbox | undefined;
   let sandboxRemoved = false;
+  let eventRelay: { stop(): void } | undefined;
   let teardownWarning: string | undefined;
   let wall: NetworkWall | undefined;
   let serviceRuntime: ServiceRuntime | undefined;
@@ -1283,6 +1286,10 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         mkdirSync(runSessionStorePath(id, home), { recursive: true });
         sessionMounts.push({ hostPath: runSessionStorePath(id, home), containerPath: adapter.sessionStore, mode: "rw" });
       }
+      if (preStart.eventSink !== undefined) {
+        mkdirSync(runTenazaSinkPath(id, home), { recursive: true });
+        sessionMounts.push({ hostPath: runTenazaSinkPath(id, home), containerPath: preStart.eventSink.containerPath, mode: "rw" });
+      }
 
       sandbox = await startSandbox({
         image,
@@ -1312,6 +1319,16 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         `sandbox ${sandbox.containerId} started from ${image}, mounts=${sandbox.mounts.join(",")}`,
       );
       appendLog(logPath, `sandbox capacity: cpus=${cpus}, memory=${memory}`);
+      eventRelay = preStart.eventSink?.start(
+        { sinkDir: runTenazaSinkPath(id, home), recordPath: runTenazaRecordPath(id, home), repoPath: clonePath },
+        ({ session, reason }) =>
+          appendLog(
+            logPath,
+            session === "*"
+              ? `Tenaza relay pass failed: ${reason}`
+              : `Tenaza: stopped relaying session ${session}: ${reason}`,
+          ),
+      );
 
       // Inside the Sandbox: a checkout runs the hooks, filters and fsmonitor the Clone's `.git` names.
       if (continued !== undefined) {
@@ -1388,6 +1405,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     }
 
     if (!sandboxRemoved) teardownWarning = await tearDown(sandbox, id, logPath);
+    eventRelay?.stop();
     if (teardownWarning !== undefined) {
       warnings.push(teardownWarning);
       options.onWarning?.(teardownWarning);

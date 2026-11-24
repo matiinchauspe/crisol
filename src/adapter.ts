@@ -9,6 +9,17 @@ export interface PreStartDeclaration {
   ensureImage?: () => Promise<string>;
   /** Why nothing in the Sandbox guards reserved actions. A scripted stand-in attempts none, so it leaves this unset. */
   unguarded?: string;
+  /**
+   * A dir inside the Sandbox the agent's tools write events into. Crisol mounts a dir of the Run's
+   * over it and calls `start` once the Sandbox runs; `stop` must carry the last writes before it returns.
+   */
+  eventSink?: {
+    containerPath: string;
+    start(
+      paths: { sinkDir: string; recordPath: string; repoPath: string },
+      onRefused: (refusal: { session: string; reason: string }) => void,
+    ): { stop(): void };
+  };
 }
 
 export interface AdapterContext {
