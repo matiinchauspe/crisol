@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { runLogPath, runRepoPath } from "../src/paths";
+import type { PreStartDeclaration } from "../src/adapter";
+import { ClaudeCodeAdapter } from "../src/adapters/claude-code";
+import { runLogPath, runRepoPath, runSessionIdPath } from "../src/paths";
+import { runFanOut } from "../src/run";
 import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
@@ -10,6 +13,32 @@ import { createFixtureRepo } from "./support/fixtureRepo";
 function git(repoPath: string, ...args: string[]): { exitCode: number; stdout: string } {
   const proc = Bun.spawnSync(["git", "-C", repoPath, ...args], { stdout: "pipe", stderr: "pipe" });
   return { exitCode: proc.exitCode, stdout: proc.stdout.toString("utf8").trim() };
+}
+
+/** Commits the session id each turn ran in, so the branch shows whose session a resume took. */
+const FAKE_CLAUDE = `#!/bin/sh
+cat > /dev/null
+if [ "$2" = "--resume" ]; then
+  echo "$3" > RESUMED_SESSION
+  echo ok > GATE_TARGET.txt
+  git add RESUMED_SESSION GATE_TARGET.txt
+  git commit --quiet -m "fix: make the Gate green"
+  printf '{"session_id":"%s","result":"resumed"}' "$3"
+else
+  session=$(cat /proc/sys/kernel/random/uuid)
+  echo "$session" > LAUNCHED_SESSION
+  echo oops > GATE_TARGET.txt
+  git add LAUNCHED_SESSION GATE_TARGET.txt
+  git commit --quiet -m "feat: attempt (Gate still red)"
+  printf '{"session_id":"%s","result":"launched"}' "$session"
+fi
+`;
+
+/** The real Adapter's session handling on the Project layer, so no Claude Code is installed. */
+class ScriptedClaudeCodeAdapter extends ClaudeCodeAdapter {
+  override declarePreStart(): PreStartDeclaration {
+    return { envNames: [], mounts: [] };
+  }
 }
 
 function logTime(log: string, marker: string): number {
@@ -96,6 +125,46 @@ describe('crisol run "a" "b" "c" — independent Runs from one base', () => {
       repo.cleanup();
     }
   }, 120_000);
+
+  test("each Run resumes its own agent session on a red Gate and keeps its own session id", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      writeFileSync(path.join(repo.path, "fake-claude"), FAKE_CLAUDE);
+      chmodSync(path.join(repo.path, "fake-claude"), 0o755);
+      git(repo.path, "add", "fake-claude");
+      git(repo.path, "commit", "--quiet", "-m", "test: add the fake agent CLI");
+
+      const settled = await runFanOut(["a", "b", "c"], {
+        cwd: repo.path,
+        home: home.path,
+        // The sleep holds every Run's first red Gate until all three have launched, so a session
+        // shared between them would be overwritten before any Run resumes.
+        gates: ["sleep 3 && grep -qx ok GATE_TARGET.txt"],
+        buildAdapter: () => new ScriptedClaudeCodeAdapter({ binary: "./fake-claude", hostVersion: () => "0.0.0" }),
+      });
+
+      const results = settled.map((outcome) => {
+        if (outcome.status === "rejected") throw outcome.reason;
+        return outcome.value;
+      });
+      expect(results.map((result) => [result.status, result.iterations])).toEqual([
+        ["verified", 2],
+        ["verified", 2],
+        ["verified", 2],
+      ]);
+      const launched = results.map((result) => {
+        const session = git(repo.path, "show", `${result.branch}:LAUNCHED_SESSION`).stdout;
+        expect(git(repo.path, "show", `${result.branch}:RESUMED_SESSION`).stdout).toBe(session);
+        expect(readFileSync(runSessionIdPath(result.run, home.path), "utf8")).toBe(session);
+        return session;
+      });
+      expect(new Set(launched).size).toBe(3);
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 180_000);
 
   test("--name with more than one Task is a usage error, before anything runs", async () => {
     const home = createTempHome();
