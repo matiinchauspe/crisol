@@ -242,12 +242,67 @@ function parseEnvironment(node: YamlNode, sourcePath: string, serviceName: strin
   return env;
 }
 
-/** A list is the exec-style argv; a single string is run through the image's shell, like compose does. */
+const USE_A_SHELL = `to run it through a shell, write the command as ["sh", "-c", "…"]`;
+
+/**
+ * Compose's own split: compose-go hands a string `command` to go-shellwords with every expansion off.
+ * Where compose would cut the command at a shell operator, or pass a command substitution through
+ * as literal text, this throws instead: either way the author meant a shell.
+ */
+export function splitCommandString(text: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let started = false;
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (escaped) {
+      word += ch === "n" ? "\n" : ch === "t" ? "\t" : ch;
+      started = true;
+      escaped = false;
+    } else if (quote === "'") {
+      if (ch === "'") quote = undefined;
+      else word += ch;
+    } else if (ch === "\\") {
+      escaped = true;
+    } else if (quote === '"') {
+      if (ch === '"') quote = undefined;
+      else word += ch;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      started = true;
+    } else if (" \t\r\n".includes(ch)) {
+      if (started) words.push(word);
+      word = "";
+      started = false;
+    } else if (";&|<>".includes(ch)) {
+      throw new Error(`has the shell operator "${ch}", which compose would cut the command at; ${USE_A_SHELL}.`);
+    } else if (ch === "`" || (ch === "$" && text[i + 1] === "(")) {
+      throw new Error(`has a command substitution, which compose never runs; ${USE_A_SHELL}.`);
+    } else if (ch === "(" || ch === ")") {
+      throw new Error(`has a bare "${ch}", which compose rejects too; quote it, or write the command as a list.`);
+    } else {
+      word += ch;
+      started = true;
+    }
+  }
+  if (quote !== undefined || escaped) {
+    throw new Error("has an unclosed quote or a trailing backslash; close it, or write the command as a list.");
+  }
+  if (started) words.push(word);
+  return words;
+}
+
 function parseCommand(node: YamlNode, sourcePath: string, serviceName: string): string[] {
   const context = `service "${serviceName}"'s "command"`;
   if (Array.isArray(node)) return asStringArray(node, context, sourcePath);
-  if (typeof node === "string") return ["sh", "-c", node];
-  throw new Error(`${sourcePath}: ${context} must be a list or a single string.`);
+  if (typeof node !== "string") throw new Error(`${sourcePath}: ${context} must be a list or a single string.`);
+  try {
+    return splitCommandString(node);
+  } catch (error) {
+    throw new Error(`${sourcePath}: ${context} ${(error as Error).message}`);
+  }
 }
 
 function parseHealthcheck(node: YamlNode, sourcePath: string, serviceName: string): HealthCheck {
@@ -258,7 +313,8 @@ function parseHealthcheck(node: YamlNode, sourcePath: string, serviceName: strin
       throw new Error(`${sourcePath}: ${context} has key "${key}", which is not one of ${ALLOWED_HEALTHCHECK_KEYS.join(", ")}.`);
     }
   }
-  const test = asStringArray(map.test, `${context}.test`, sourcePath);
+  // Compose reads a string `test` as `CMD-SHELL` followed by that string.
+  const test = typeof map.test === "string" ? ["CMD-SHELL", map.test] : asStringArray(map.test, `${context}.test`, sourcePath);
   const kind = test[0];
   if (kind === undefined) throw new Error(`${sourcePath}: ${context}.test must not be empty.`);
   if (kind !== "CMD" && kind !== "CMD-SHELL" && kind !== "NONE") {

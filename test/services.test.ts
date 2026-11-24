@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import path from "node:path";
 import { run } from "../src/run";
 import type { RunResult } from "../src/run";
-import { buildServiceRunArgs, parseServicesYaml, readRepoServices } from "../src/services";
+import { buildServiceRunArgs, parseServicesYaml, readRepoServices, splitCommandString, startServices } from "../src/services";
 import type { Adapter, AdapterContext } from "../src/adapter";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
@@ -86,9 +86,59 @@ describe("parseServicesYaml: a restricted compose subset, no Docker needed", () 
     expect(parseServicesYaml(yaml, "services.yml")[0]!.environment).toEqual({ FOO: "bar", BAZ: "1" });
   });
 
-  test("a scalar command is wrapped like compose's shell form", () => {
-    const yaml = ["services:", "  db:", "    image: x", "    command: echo hi", ""].join("\n");
-    expect(parseServicesYaml(yaml, "services.yml")[0]!.command).toEqual(["sh", "-c", "echo hi"]);
+  test("a string command is split into argv, never wrapped in a shell", () => {
+    const yaml = ["services:", "  db:", "    image: x", "    command: postgres -c fsync=off", ""].join("\n");
+    expect(parseServicesYaml(yaml, "services.yml")[0]!.command).toEqual(["postgres", "-c", "fsync=off"]);
+  });
+
+  // Each argv is what `docker compose config --format json` printed for the same string on
+  // Docker Compose v5.5.0 (compose-go v2.14.0, splitting with go-shellwords v1.0.14).
+  test.each([
+    ['postgres -c "log_line_prefix=%m [%p] "', ["postgres", "-c", "log_line_prefix=%m [%p] "]],
+    ["a 'b c' d", ["a", "b c", "d"]],
+    ["a\tb", ["a", "b"]],
+    ["a\\ b", ["a b"]],
+    ["a\\b", ["ab"]],
+    ['"a\\b"', ["ab"]],
+    ['"a\\\\b"', ["a\\b"]],
+    ['"a\\"b"', ['a"b']],
+    ["'a\\b'", ["a\\b"]],
+    ["'a\\nb'", ["a\\nb"]],
+    ["a\\nb", ["a\nb"]],
+    ["a\\tb", ["a\tb"]],
+    ["a\\'b", ["a'b"]],
+    ['a"b"c', ["abc"]],
+    ["'' \"\"", ["", ""]],
+    ['"a;b"', ["a;b"]],
+    ["a\\;b", ["a;b"]],
+    ['"a(b)"', ["a(b)"]],
+    ["a #b", ["a", "#b"]],
+    ["x=1 y", ["x=1", "y"]],
+    ["é ü", ["é", "ü"]],
+    ["   ", []],
+  ])("%p splits like compose", (text, argv) => {
+    expect(splitCommandString(text)).toEqual(argv);
+  });
+
+  // The same compose run rejected each of these as "invalid command line string".
+  test.each(["a\\", "a 'b", 'a "b', "a(b)", "a)"])("%p is rejected, as compose rejects it", (text) => {
+    expect(() => splitCommandString(text)).toThrow(/unclosed quote|trailing backslash|bare/);
+  });
+
+  // Compose stops at an unquoted `;`, `&`, `|`, `<` or `>` and drops the rest (`a;b` → ["a"]), and
+  // passes `$(…)` and backticks through as literal text; either way the author meant a shell.
+  test.each(["a;b", "a && b", "a | b", "a > out", "a $(b)", "a `b`"])("%p is rejected as shell syntax", (text) => {
+    expect(() => splitCommandString(text)).toThrow(/\["sh", "-c", /);
+  });
+
+  test("a rejected string command names its service and file", () => {
+    const yaml = ["services:", "  db:", "    image: x", "    command: a && b", ""].join("\n");
+    expect(() => parseServicesYaml(yaml, "services.yml")).toThrow(/^services\.yml: service "db"'s "command"/);
+  });
+
+  test("a string healthcheck test means CMD-SHELL with that string", () => {
+    const yaml = ["services:", "  db:", "    image: x", "    healthcheck:", "      test: pg_isready -U postgres", ""].join("\n");
+    expect(parseServicesYaml(yaml, "services.yml")[0]!.healthcheck!.test).toEqual(["CMD-SHELL", "pg_isready -U postgres"]);
   });
 
   test("a list command is read as exec-form argv", () => {
@@ -198,6 +248,48 @@ describe("buildServiceRunArgs: the docker run shape, no Docker needed", () => {
 });
 
 describe("Services end to end, against a real Docker engine", () => {
+  // The image's docker-entrypoint.sh dispatches on `$1`: given `sh` it skips initdb and the drop to
+  // the postgres user, and Postgres refuses to run as root (seen live: exit 1, "must be started
+  // under an unprivileged user ID").
+  test(
+    "postgres given compose's string command and string healthcheck starts healthy with that flag",
+    async () => {
+      const [service] = parseServicesYaml(
+        [
+          "services:",
+          "  db:",
+          "    image: postgres:16-alpine",
+          "    environment:",
+          "      POSTGRES_PASSWORD: crisol",
+          "    command: postgres -c fsync=off",
+          "    healthcheck:",
+          // Over TCP: the entrypoint's init-time server listens on no address, only the real one does.
+          "      test: pg_isready -h 127.0.0.1 -U postgres",
+          "      interval: 1s",
+          "      retries: 30",
+          "",
+        ].join("\n"),
+        "services.yml",
+      );
+      const id = `strcmd-${crypto.randomUUID().slice(0, 8)}`;
+      const network = `crisol-test-net-${id}`;
+      expect(Bun.spawnSync(["docker", "network", "create", network]).exitCode).toBe(0);
+      try {
+        const services = await startServices(id, network, [service!]);
+        try {
+          await services.waitHealthy();
+          const show = Bun.spawnSync(["docker", "exec", services.names[0]!, "psql", "-U", "postgres", "-tAc", "show fsync"]);
+          expect(show.stdout.toString("utf8").trim()).toBe("off");
+        } finally {
+          await services.teardown();
+        }
+      } finally {
+        Bun.spawnSync(["docker", "network", "rm", network]);
+      }
+    },
+    90_000,
+  );
+
   test(
     "a Gate that connects to db:5432 passes inside the Run",
     async () => {
