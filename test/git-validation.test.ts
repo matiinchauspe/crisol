@@ -107,7 +107,7 @@ describe("fetchBack resolves the branch ref even when a same-named tag exists (C
         .stdout.toString("utf8")
         .trim();
 
-      fetchBack(repo.path, clonePath, "dup");
+      fetchBack(repo.path, clonePath, "dup", null);
 
       const hostBranchSha = Bun.spawnSync(
         ["git", "-C", repo.path, "rev-parse", "refs/heads/dup"],

@@ -273,12 +273,38 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
   );
 
   test(
+    "a round whose agent amends the branch is fetched back, replacing the commit the round started from",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "amend", adapter: fakeAgent() });
+        const roundStart = refSha(repo.path, "amend")!;
+        const amending = fakeAgent({ continueScript: ["git commit --quiet --amend --allow-empty -m 'fix: amended in round two'"] });
+
+        const second = await run({ task: "fix it", cwd: repo.path, home: home.path, continue: "amend", adapter: amending });
+
+        expect(second).toMatchObject({ run: first.run, fetchBack: true });
+        const amended = refSha(repo.path, "amend")!;
+        expect(amended).toBe(cloneSha(first.run, home.path, "amend")!);
+        expect(isAncestor(repo.path, roundStart, amended)).toBe(false);
+        expect(commitSubjects(repo.path, "amend")[0]).toBe("fix: amended in round two");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    120_000,
+  );
+
+  test(
     "a host branch that moves during the round, after pre-flight already passed, is still refused at Fetch-back, never forced",
     async () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
         const first = await run({ task: "one", cwd: repo.path, home: home.path, name: "race", adapter: fakeAgent() });
+        const roundStart = refSha(repo.path, "race")!;
 
         let hostCommit = "";
         const adapter = hostMovesDuringContinuation(fakeAgent({ continue: "round two" }), () => {
@@ -294,7 +320,8 @@ describe("ticket 21: a Continuation takes a Run up again by its branch", () => {
           failure = error;
         }
 
-        expect(String((failure as Error | undefined)?.message)).toMatch(/non-fast-forward|rejected/);
+        expect(String((failure as Error | undefined)?.message)).toContain(hostCommit);
+        expect(String((failure as Error | undefined)?.message)).toContain(roundStart);
         expect(refSha(repo.path, "race")).toBe(hostCommit);
         const result = (failure as { result?: RunResult }).result;
         expect(result).toMatchObject({ run: first.run, fetchBack: false });

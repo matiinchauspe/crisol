@@ -39,6 +39,7 @@ export function readRunLockRecord(id: string, home: string): RunLockRecord | und
       ...(typeof record.base === "string" ? { base: record.base } : {}),
       ...(typeof record.network === "string" ? { network: record.network } : {}),
       ...(typeof record.adapter === "string" ? { adapter: record.adapter } : {}),
+      ...(typeof record.roundStart === "string" || record.roundStart === null ? { roundStart: record.roundStart } : {}),
     };
   } catch {
     return undefined;
@@ -161,7 +162,7 @@ async function recoverDeadRun(
     return { run: id, kind: "up-to-date" };
   }
   try {
-    fetchBack(record.host, clonePath, record.branch);
+    fetchBack(record.host, clonePath, record.branch, record.roundStart);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendLog(id, home, `fetch-back failed: ${message}`);
@@ -175,8 +176,8 @@ async function recoverDeadRun(
 /**
  * Performs the Fetch-back every dead Run is missing. A Run is dead when its Run lock can be
  * taken and no current result records a Fetch-back; the lock is held while recover works, so a
- * second recover never races the first. Fetch-back only fast-forwards, so a host branch that
- * has moved on is reported, never overwritten.
+ * second recover never races the first. A host branch that moved since the dead round began, to
+ * something the Run's work does not contain, is reported, never overwritten.
  */
 export async function recover(home: string): Promise<RecoverReport> {
   const ids = existsSync(runsRoot(home)) ? readdirSync(runsRoot(home)).sort() : [];

@@ -170,6 +170,11 @@ export interface RunLockRecord {
   base?: string;
   network?: NetworkMode;
   adapter?: string;
+  /**
+   * The host branch's sha when the round began, `null` if it did not exist. Fetch-back overwrites
+   * only a branch still at it, or fast-forwards. Absent in a lock record that predates the field.
+   */
+  roundStart?: string | null;
 }
 
 type RoundRecord = Omit<RunLockRecord, "host" | "branch">;
@@ -545,6 +550,7 @@ interface ContinuedRun {
   /** Absent for a Run that predates `gates.json`. */
   gates?: readonly string[];
   adapterName?: string;
+  roundStart: string | null;
 }
 
 function readKeptGates(id: string, home: string): readonly string[] | undefined {
@@ -579,7 +585,7 @@ function readKeptSessionId(id: string, home: string): string | undefined {
  * run on top of it, so a Continuation checks for them before any Sandbox starts rather than only
  * at Fetch-back.
  */
-function assertBranchContinuable(hostRepoPath: string, clonePath: string, branch: string): void {
+function assertBranchContinuable(hostRepoPath: string, clonePath: string, branch: string): string | null {
   const worktree = checkedOutWorktree(hostRepoPath, branch);
   if (worktree !== undefined) {
     throw new Error(
@@ -596,6 +602,7 @@ function assertBranchContinuable(hostRepoPath: string, clonePath: string, branch
         `started; which side to bring forward is yours to decide.`,
     );
   }
+  return hostSha ?? null;
 }
 
 /**
@@ -631,7 +638,7 @@ function findContinuedRun(hostRepoPath: string, home: string, branch: string): C
   if (!existsSync(clonePath)) {
     throw new Error(`Run ${id}'s Clone is gone (\`crisol gc\` collected it), so branch "${branch}" cannot be continued.`);
   }
-  assertBranchContinuable(hostRepoPath, clonePath, branch);
+  const roundStart = assertBranchContinuable(hostRepoPath, clonePath, branch);
   const sessionId = readKeptSessionId(id, home);
   if (sessionId === undefined) {
     throw new Error(`Run ${id} kept no agent session, so branch "${branch}" cannot be continued.`);
@@ -647,6 +654,7 @@ function findContinuedRun(hostRepoPath: string, home: string, branch: string): C
     sessionId,
     gates: readKeptGates(id, home),
     adapterName: ownerResult.adapter,
+    roundStart,
   };
 }
 
@@ -818,6 +826,7 @@ function roundRecord(prepared: PreparedRun, options: RunOptions): RoundRecord {
     base: `${prepared.baseRef}@${prepared.baseSha}`,
     network: options.network ?? "allowlist",
     ...(prepared.adapter.name !== undefined ? { adapter: prepared.adapter.name } : {}),
+    roundStart: prepared.continued?.roundStart ?? null,
   };
 }
 
@@ -1461,7 +1470,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     }
 
     try {
-      fetchBack(hostRepoPath, clonePath, branch, (signal) =>
+      fetchBack(hostRepoPath, clonePath, branch, continued?.roundStart ?? null, (signal) =>
         appendLog(logPath, `fetch-back killed by ${signal}; retrying`),
       );
       fetchedBack = true;

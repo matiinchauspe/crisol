@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { planGc } from "../src/gc";
 import { shortSha } from "../src/git";
-import { runRepoPath, runResultPath } from "../src/paths";
+import { runLockPath, runRepoPath, runResultPath } from "../src/paths";
 import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
@@ -154,6 +154,63 @@ describe("crisol recover", () => {
       expect(recovered.exitCode).toBe(0);
       expect(recovered.stdout.trim()).toBe("Nothing to recover.");
       expect(readLog(id, home.path)).not.toContain("recover:");
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+});
+
+/**
+ * A Continuation round that died after its agent amended the branch: the lock record is what
+ * `reserveContinuation` writes for that round, its `roundStart` the host sha pre-flight proved.
+ */
+function amendInDeadContinuation(id: string, home: string, host: string, branch: string): string {
+  const record = JSON.parse(readFileSync(runLockPath(id, home), "utf8")) as Record<string, unknown>;
+  writeFileSync(runLockPath(id, home), JSON.stringify({ ...record, roundStart: refSha(host, branch) }));
+  markFetchBackFailed(id, home);
+  git(runRepoPath(id, home), ["commit", "--quiet", "--amend", "--allow-empty", "-m", "fix: amended by the next round"]);
+  return cloneSha(id, home, branch)!;
+}
+
+describe("recover after the agent rewrote its branch", () => {
+  test("brings back a branch amended in a round that died, from where that round began", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      const result = JSON.parse(done.stdout) as RunResult;
+      const amended = amendInDeadContinuation(result.run, home.path, repo.path, result.branch);
+
+      const recovered = await runCli(["recover"], { cwd: repo.path, home: home.path });
+
+      expect(recovered.exitCode).toBe(0);
+      expect(recovered.stdout).toContain(`Run ${result.run}: recovered ${result.branch}`);
+      expect(refSha(repo.path, result.branch)).toBe(amended);
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+
+  test("refuses a host branch that moved since that round began, naming both shas, and leaves it", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const done = await runCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      const result = JSON.parse(done.stdout) as RunResult;
+      const roundStart = refSha(repo.path, result.branch)!;
+      amendInDeadContinuation(result.run, home.path, repo.path, result.branch);
+      const hostCommit = git(repo.path, ["commit-tree", `${result.branch}^{tree}`, "-p", result.branch, "-m", "user's own follow-up"]);
+      git(repo.path, ["update-ref", `refs/heads/${result.branch}`, hostCommit]);
+
+      const recovered = await runCli(["recover"], { cwd: repo.path, home: home.path });
+
+      expect(recovered.exitCode).toBe(1);
+      expect(recovered.stderr).toContain(`Run ${result.run}: FAILED`);
+      expect(recovered.stderr).toContain(roundStart);
+      expect(recovered.stderr).toContain(hostCommit);
+      expect(refSha(repo.path, result.branch)).toBe(hostCommit);
     } finally {
       home.cleanup();
       repo.cleanup();

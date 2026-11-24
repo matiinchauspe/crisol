@@ -197,23 +197,54 @@ export function assertFetchedBack(ref: string, hostSha: string, cloneSha: string
 
 const FETCH_BACK_ATTEMPTS = 3;
 
+function isAncestor(repoPath: string, ancestor: string, descendant: string): boolean {
+  return run(["git", "-C", repoPath, "merge-base", "--is-ancestor", ancestor, descendant]).exitCode === 0;
+}
+
+function branchMovedError(
+  hostRepoPath: string,
+  name: string,
+  roundStart: string | null | undefined,
+  hostSha: string | undefined,
+  cloneSha: string,
+): Error {
+  const host = hostSha ?? "no such branch";
+  const moved =
+    roundStart === undefined
+      ? `is at ${host} in ${hostRepoPath}, which the Run's Clone does not hold`
+      : `was at ${roundStart ?? "no such branch"} in ${hostRepoPath} when this round began and is at ${host} now`;
+  return new Error(
+    `Branch "${name}" ${moved}, so Fetch-back left it alone rather than overwrite it. The Run's work is at ` +
+      `${cloneSha}; \`git -C ${hostRepoPath} branch ${name}-run ${cloneSha}\` keeps it beside yours.`,
+  );
+}
+
 /**
- * The refspec is qualified on both sides: unqualified, git looks up tags before heads and
- * would silently fetch a same-named tag instead of the Run's branch. No leading `+`, so a host
- * branch that moved since the Clone last saw it is refused, never overwritten. No `--quiet`, so git's
- * own reason reaches the error. `--no-tags`, so a tag the agent made never lands in the host. A
- * `git fetch` killed by a signal was stopped, not refused, and fetching again is safe, so it is
- * retried.
+ * `git fetch` has no compare-and-swap, so it only brings the objects and `update-ref` moves the
+ * branch from a sha the host still holds. `update-ref` also moves a checked-out branch, hence the
+ * guard. A fast-forward drops nothing, so it needs no `roundStart`. The ref is qualified: unqualified,
+ * git looks up tags before heads and would fetch a same-named tag.
  */
 export function fetchBack(
   hostRepoPath: string,
   clonePath: string,
   name: string,
+  roundStart: string | null | undefined,
   onKilled?: (signal: string) => void,
 ): void {
   assertCloneGitDir(clonePath);
   const ref = `refs/heads/${name}`;
-  const args = ["git", "-C", hostRepoPath, "fetch", "--no-tags", clonePath, `${ref}:${ref}`];
+  const worktree = checkedOutWorktree(hostRepoPath, name);
+  if (worktree !== undefined) {
+    throw new Error(
+      `Branch "${name}" is checked out at ${worktree}; Fetch-back cannot move a branch git has checked out. ` +
+        "Check out something else there, then run `crisol recover`.",
+    );
+  }
+  const cloneSha = cloneBranchSha(clonePath, name);
+  if (cloneSha === undefined) throw new Error(`The Clone at ${clonePath} has no branch "${name}".`);
+  // A tag the agent made must never land in the host; a fetch killed by a signal is safe to retry.
+  const args = ["git", "-C", hostRepoPath, "fetch", "--no-tags", "--no-write-fetch-head", clonePath, ref];
   for (let attempt = 1; ; attempt++) {
     const result = run(args);
     if (result.exitCode === 0) break;
@@ -225,9 +256,22 @@ export function fetchBack(
       `\`${args.join(" ")}\` failed: ${result.stderr.trim() || result.stdout.trim() || `killed by ${result.signal}`}`,
     );
   }
-  const cloneSha = cloneBranchSha(clonePath, name) ?? "no such branch";
-  const hostSha = runOrThrow(["git", "-C", hostRepoPath, "rev-parse", ref]);
-  assertFetchedBack(ref, hostSha, cloneSha);
+
+  const hostSha = branchSha(hostRepoPath, name);
+  if (hostSha !== cloneSha) {
+    let expected: string;
+    if (roundStart !== undefined && hostSha === (roundStart ?? undefined)) expected = roundStart ?? "";
+    else if (hostSha !== undefined && isAncestor(hostRepoPath, hostSha, cloneSha)) expected = hostSha;
+    else if (roundStart === undefined && hostSha === undefined) expected = "";
+    else throw branchMovedError(hostRepoPath, name, roundStart, hostSha, cloneSha);
+    const moved = run(["git", "-C", hostRepoPath, "update-ref", "-m", "crisol: fetch-back", ref, cloneSha, expected]);
+    if (moved.exitCode !== 0) {
+      const now = branchSha(hostRepoPath, name);
+      if (now !== hostSha) throw branchMovedError(hostRepoPath, name, roundStart, now, cloneSha);
+      throw new Error(`Fetch-back could not move branch "${name}" in ${hostRepoPath}: ${moved.stderr.trim()}`);
+    }
+  }
+  assertFetchedBack(ref, runOrThrow(["git", "-C", hostRepoPath, "rev-parse", ref]), cloneSha);
 }
 
 /** `false`, never a throw, for a sha the repo does not hold at all. */

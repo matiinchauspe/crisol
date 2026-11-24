@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { Adapter } from "../src/adapter";
+import { checkoutNewBranch, cloneLocal, fetchBack } from "../src/git";
 import { run } from "../src/run";
 import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
+import type { FixtureRepo } from "./support/fixtureRepo";
 import { startCli, waitFor } from "./support/liveCli";
 import { cloneSha, onlyRunId, readLog, readResult, refSha, removeRunContainers, runContainers } from "./support/runState";
 import { wrapTools } from "./support/wrappedTools";
@@ -165,4 +170,94 @@ describe("a Sandbox that fails to stop", () => {
       repo.cleanup();
     }
   }, 60_000);
+});
+
+function git(repoPath: string, args: string[]): string {
+  const proc = Bun.spawnSync(["git", "-C", repoPath, ...args], { stdout: "pipe", stderr: "pipe" });
+  if (proc.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${proc.stderr.toString("utf8")}`);
+  return proc.stdout.toString("utf8").trim();
+}
+
+function fetchedBackRound(): { host: FixtureRepo; clonePath: string; roundStart: string; cleanup(): void } {
+  const host = createFixtureRepo();
+  const clonePath = mkdtempSync(path.join(tmpdir(), "crisol-fetch-back-clone-"));
+  rmSync(clonePath, { recursive: true, force: true });
+  cloneLocal(host.path, clonePath);
+  checkoutNewBranch(clonePath, "work", git(host.path, ["rev-parse", "HEAD"]));
+  git(clonePath, ["commit", "--quiet", "--allow-empty", "-m", "feat: first round"]);
+  fetchBack(host.path, clonePath, "work", null);
+  return {
+    host,
+    clonePath,
+    roundStart: git(host.path, ["rev-parse", "refs/heads/work"]),
+    cleanup() {
+      rmSync(clonePath, { recursive: true, force: true });
+      host.cleanup();
+    },
+  };
+}
+
+describe("Fetch-back after the agent rewrote its branch", () => {
+  test("an amended branch replaces the host branch the round started from", () => {
+    const round = fetchedBackRound();
+    try {
+      git(round.clonePath, ["commit", "--quiet", "--amend", "--allow-empty", "-m", "feat: first round, amended"]);
+      const amended = git(round.clonePath, ["rev-parse", "refs/heads/work"]);
+
+      fetchBack(round.host.path, round.clonePath, "work", round.roundStart);
+
+      expect(git(round.host.path, ["rev-parse", "refs/heads/work"])).toBe(amended);
+    } finally {
+      round.cleanup();
+    }
+  });
+
+  test("a host branch that moved since the round started is refused, naming both shas, and left where it is", () => {
+    const round = fetchedBackRound();
+    try {
+      git(round.clonePath, ["commit", "--quiet", "--amend", "--allow-empty", "-m", "feat: first round, amended"]);
+      const amended = git(round.clonePath, ["rev-parse", "refs/heads/work"]);
+      const hostCommit = git(round.host.path, ["commit-tree", "work^{tree}", "-p", "work", "-m", "chore: a host-side commit"]);
+      git(round.host.path, ["update-ref", "refs/heads/work", hostCommit]);
+
+      let message = "";
+      try {
+        fetchBack(round.host.path, round.clonePath, "work", round.roundStart);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+
+      expect(message).toContain(round.roundStart);
+      expect(message).toContain(hostCommit);
+      expect(message).toContain(amended);
+      expect(git(round.host.path, ["rev-parse", "refs/heads/work"])).toBe(hostCommit);
+    } finally {
+      round.cleanup();
+    }
+  });
+
+  test("the command the refusal offers keeps the Run's work beside the host's", () => {
+    const round = fetchedBackRound();
+    try {
+      git(round.clonePath, ["commit", "--quiet", "--amend", "--allow-empty", "-m", "feat: first round, amended"]);
+      const amended = git(round.clonePath, ["rev-parse", "refs/heads/work"]);
+      git(round.host.path, ["update-ref", "refs/heads/work", git(round.host.path, ["commit-tree", "work^{tree}", "-p", "work", "-m", "host"])]);
+
+      let message = "";
+      try {
+        fetchBack(round.host.path, round.clonePath, "work", round.roundStart);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      const offered = message.match(/`(git -C [^`]+)`/)?.[1];
+      expect(offered).toBeDefined();
+      expect(Bun.spawnSync(offered!.split(" ")).exitCode).toBe(0);
+
+      const holding = git(round.host.path, ["for-each-ref", "--format=%(refname:short)", "--points-at", amended, "refs/heads/"]);
+      expect(holding).not.toBe("");
+      expect(holding.split("\n")).not.toContain("work");
+    } finally {
+      round.cleanup();
+    }
+  });
 });
