@@ -73,6 +73,38 @@ first and the real init (and therefore `pg_isready` passing) only begins after i
 The agent's very first action is a raw TCP probe of `db:5432`; it only sees `connected` if Crisol
 genuinely waited past the delay, not merely if it got lucky on timing.
 
+## Amendment 2026-11-24: a string `command` and a string `healthcheck.test` read like compose
+
+The parser wrapped a string `command` in `sh -c`, so the common test-database line
+`command: postgres -c fsync=off` became `docker run postgres:16-alpine sh -c "…"`. The image's
+`docker-entrypoint.sh` dispatches on `$1`: given `sh`, it skips initdb and the drop to the postgres
+user, and Postgres exits 1 ("must be started under an unprivileged user ID"), confirmed live. A
+string `healthcheck.test` was refused outright.
+
+Compose splits a string `command` into argv with no shell: compose-go v2.14.0
+(`types/command.go`, `ShellCommand.DecodeMapstructure`) calls `shellwords.Parse` from
+go-shellwords v1.0.14 with its defaults, so environment expansion, backtick parsing and comments
+are all off. Docker Compose v5.5.0 vendors exactly those versions (the module versions embedded
+in its plugin binary), and `docker compose config --format json` against it printed the argv every test case in
+`test/services.test.ts` expects. Crisol now splits the same way: whitespace separates words,
+single quotes are literal, a backslash outside them escapes the next character (`\n` and `\t`
+become a newline and a tab), adjacent pieces join, and an unclosed quote, a trailing backslash or a
+bare `(`/`)` is an error, as in compose.
+
+It departs from compose in two places, both refusals of input compose accepts. An unquoted `;`,
+`&`, `|`, `<` or `>` makes go-shellwords stop and compose keep only the words before it
+(`a;b` became `["a"]`, live), and a backtick or `$(…)` reaches the container as literal text. In
+both cases the author meant a shell and would get a different program without noticing, so Crisol
+refuses the file, naming the service and pointing at `["sh", "-c", "…"]`. Compose's `$VAR`
+interpolation is not part of this: Crisol interpolates nothing in `services.yml`.
+
+Docker's compose reference says the same in words: `command` "doesn't automatically run within the
+context of the `SHELL` instruction defined in the image"
+(https://docs.docker.com/reference/compose-file/container-spec/#command), and of a healthcheck
+`test`, "If it's a string, it's equivalent to specifying `CMD-SHELL` followed by that string"
+(https://docs.docker.com/reference/compose-file/workload-spec/#healthcheck). A string
+`healthcheck.test` now means `["CMD-SHELL", <string>]`.
+
 ## Rejected
 
 - **A YAML library dependency** — see above; the restricted grammar is narrow enough that a
