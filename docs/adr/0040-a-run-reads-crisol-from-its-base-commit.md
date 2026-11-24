@@ -48,7 +48,7 @@ Rejected:
 ## Amendment 2026-11-24: a branch that changes `.crisol/` is flagged
 
 Reading from the base commit means `crisol run --base <agent branch>` takes the agent's
-declarations as its own. A `secrets = ["GITHUB_TOKEN"]` committed to `.crisol/config.toml` injects
+declarations as its own. An `env = ["GITHUB_TOKEN"]` committed to `.crisol/config.toml` injects
 the host's `GITHUB_TOKEN` into the next Run's Sandbox, a Dockerfile the agent wrote is built on the
 host, and Services it wrote are started there. Nothing told the user before they passed that
 branch as `--base`.

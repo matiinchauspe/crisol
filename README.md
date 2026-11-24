@@ -409,7 +409,7 @@ review the way you would read a dependency bump.
 
 The same holds for `.crisol/config.toml`, `.crisol/Dockerfile` and `.crisol/services.yml`. A Run
 reads them from its base commit, so `crisol run --base <agent branch>` takes the agent's
-declarations as its own: a `secrets` entry copies a variable from your environment into the
+declarations as its own: an `env` entry copies a variable from your environment into the
 Sandbox, a Dockerfile is built on your machine and Services are started there. A branch that
 changes any of the three carries a `warnings` entry naming the file; read the diff before you pass
 that branch as `--base`.
