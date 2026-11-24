@@ -44,8 +44,8 @@ _Avoid_: Worktree, workspace, checkout (a worktree shares the host's `.git` and 
 exactly that reason — see docs/adr)
 
 **Fetch-back**:
-The host-side `git fetch` that brings the Run's branch from the Clone into the host repo. Never
-skipped.
+The host-side step that brings the Run's branch from the Clone into the host repo: it fetches the
+commits, then moves the branch only from where the round began. Never skipped.
 _Avoid_: Sync, merge, pull (Fetch-back never merges a working tree — it only moves a ref)
 
 **Gate**:

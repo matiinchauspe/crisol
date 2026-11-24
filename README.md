@@ -41,7 +41,8 @@ Crisol keeps a Run apart from your host in three ways:
 - **Its own Sandbox.** The agent runs in a container, and the only part of your machine it can see
   is that Clone.
 - **One way back.** The only thing that returns to your repo is a branch, brought back by
-  **Fetch-back**. Fetch-back runs `git fetch`; it never merges and never touches a working tree.
+  **Fetch-back**. Fetch-back fetches the branch's commits and moves the branch only from where the
+  Run's round found it; it never merges and never touches a working tree.
 
 ## How a Run works
 
@@ -319,7 +320,10 @@ A **Continuation** sends a new request to the agent of a finished Run, with its 
 branch. Crisol finds the Run whose own Clone still holds the branch, re-takes its Run lock and a
 Slot, starts a new Sandbox over that same Clone, and resumes the agent's own session with the
 request. The Gates run as in any Run — `--gate` when given, else the ones the Run had — and a Stop
-line ends it the same way. Fetch-back then moves the existing branch forward.
+line ends it the same way. Fetch-back then moves the existing branch to the Clone's tip, even when
+the agent amended or rebased it, but only while your branch still sits where the round began: one
+you moved meanwhile is reported, never overwritten
+([ADR 0039](docs/adr/0039-fetch-back-moves-the-branch-only-from-where-the-round-began.md)).
 
 `result.json` is rewritten with this round's `status`, `finalMessage` and a new `finishedAt`; the
 `log` keeps every round. A branch no Run's Clone holds — nobody ever named it, its Run ended before
@@ -570,8 +574,8 @@ to merge, delete or move on, and recover never re-creates or reports it. For a d
 removes the Run's container, so the agent cannot keep writing to the Clone. Then it fetches the
 branch into the repo the Run came from, at the Clone's last commit, and settles its Run result: a
 Run killed before it wrote one gets a `not-converged`, `interrupted: …` result, so `status`,
-`crisol gc` and `--continue` treat it like any finished Run. Fetch-back only fast-forwards: a branch
-you have since moved is reported and left alone, and recover never deletes a branch. It prints one
+`crisol gc` and `--continue` treat it like any finished Run. Fetch-back moves the branch only from
+where the dead round began: a branch you have since moved is reported and left alone, and recover never deletes a branch. It prints one
 line per Run it acted on or left alone, or `Nothing to recover.`
 
 ### Garbage collection
@@ -789,6 +793,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0036](docs/adr/0036-crisol-is-its-own-homebrew-tap.md): Crisol is its own Homebrew tap, `Formula/crisol.rb` in this repo, installed by full name (`brew install matiinchauspe/crisol/crisol`) rather than through a separate `matiinchauspe/tap` as the spec had it; the release workflow fills the formula on `main` once the release publishes, and builds with the Bun pinned in `.bun-version`
 - [0037](docs/adr/0037-the-sandbox-writes-tenaza-sessions-only-through-a-per-run-sink-the-host-relays.md): Tenaza's `state/` is mounted read-only and only `state/relay-requested/` writable; the Sandbox's session logs go to a per-Run sink mounted over `state/sessions`, which the host relays line for line, refusing a session the host already holds and any line that names another session, carries a host-only event, starts outside the Clone or claims a parent the Run did not start; `tenaza run` refusing host-side execution under `~/.crisol/runs/` is owed to the tenaza repo (amends 0028)
 - [0038](docs/adr/0038-the-ceiling-and-a-signal-reach-every-step-before-the-first-turn.md): the wall clock starts once the Run holds its Slot, so the same budget bounds the Services' start, their health wait and the dependency install, which gets no limit of its own; the install races the interruption and the clock, the health wait checks both on every poll, and Service starts check between containers, never abandoning a `docker run` mid-create (amends 0030)
+- [0039](docs/adr/0039-fetch-back-moves-the-branch-only-from-where-the-round-began.md): Fetch-back fetches the Clone's objects, then moves the host branch with `git update-ref` against the sha the round began from, recorded in the Run lock as `roundStart` for `recover`, so an amended or rebased branch comes back and a host branch moved meanwhile is refused; a fast-forward is always taken, and a checked-out branch is still refused (amends 0020 and 0023)
 
 ## Development
 
