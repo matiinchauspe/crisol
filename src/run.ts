@@ -1513,11 +1513,12 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
  * call — never chained, never merged. Each settles on its own, so one failing Run never
  * hides the others' branches. `file` is excluded: a fan-out's Tasks are phrases, never one file
  * replayed under each of them (`resolveTask` also refuses the combination, for a caller that
- * bypasses this type).
+ * bypasses this type). `buildAdapter` takes the place of `adapter`: an Adapter keeps the session
+ * its last turn ran in, so one shared between Runs would resume a sibling's session.
  */
 export async function runFanOut(
   tasks: readonly string[],
-  options: Omit<RunOptions, "task" | "name" | "baseSha" | "file">,
+  options: Omit<RunOptions, "task" | "name" | "baseSha" | "file" | "adapter"> & { buildAdapter?: () => Adapter },
 ): Promise<PromiseSettledResult<RunResult>[]> {
   const hostRepoPath = discoverGitRoot(options.cwd);
   if (!hostRepoPath) {
@@ -1527,5 +1528,8 @@ export async function runFanOut(
   const base = options.base ?? currentRefName(hostRepoPath);
   const baseSha = resolveBaseSha(hostRepoPath, base);
   const sharedInputs = resolveSharedInputs(options, options.cwd, home, hostRepoPath);
-  return Promise.allSettled(tasks.map((task) => run({ ...options, task, base, baseSha }, sharedInputs)));
+  const { buildAdapter, ...runOptions } = options;
+  return Promise.allSettled(
+    tasks.map((task) => run({ ...runOptions, adapter: buildAdapter?.(), task, base, baseSha }, sharedInputs)),
+  );
 }

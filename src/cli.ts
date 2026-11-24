@@ -623,6 +623,8 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const handoff = takeDetachedHandoff();
+  // Deferred for --continue: run() resolves the Run's recorded Adapter once it knows which Run is named.
+  const adapterName = args.adapterName ?? (args.continue !== undefined ? undefined : "claude-code");
   const runOptions: Omit<RunOptions, "task"> = {
     cwd: process.cwd(),
     template: args.template,
@@ -635,13 +637,7 @@ async function main(argv: string[]): Promise<number> {
     maxIterations: args.maxIterations,
     ceilingMs: args.timeoutMinutes !== undefined ? args.timeoutMinutes * 60 * 1000 : undefined,
     network: args.network,
-    // Deferred for --continue: run() resolves the Run's recorded Adapter once it knows which Run is named.
-    adapter:
-      args.adapterName !== undefined
-        ? createAdapter(args.adapterName)
-        : args.continue !== undefined
-          ? undefined
-          : createAdapter("claude-code"),
+    adapter: adapterName !== undefined ? createAdapter(adapterName) : undefined,
     adapterByName: createAdapter,
   };
 
@@ -693,7 +689,10 @@ async function main(argv: string[]): Promise<number> {
     settled =
       args.tasks.length <= 1
         ? await Promise.allSettled([run({ ...options, task: args.tasks[0], file: args.file })])
-        : await runFanOut(args.tasks, options);
+        : await runFanOut(args.tasks, {
+            ...options,
+            buildAdapter: adapterName !== undefined ? () => createAdapter(adapterName) : undefined,
+          });
   } catch (error) {
     process.stderr.write(`${formatError(error)}\n`);
     return 1;
