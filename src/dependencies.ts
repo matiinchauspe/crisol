@@ -43,7 +43,15 @@ export function buildInstallArgs(manager: PackageManager): string[] {
     case "npm":
       return ["npm", "ci", "--cache", cacheDir(manager)];
     case "yarn":
-      return ["yarn", "install", "--cache-folder", cacheDir(manager)];
+      // Yarn 2+ rejects Yarn 1's `--cache-folder`, but both read `YARN_CACHE_FOLDER`; Yarn 4 caches
+      // in its global folder by default and ignores the cache folder there, so that moves too.
+      return [
+        "env",
+        `YARN_CACHE_FOLDER=${cacheDir(manager)}`,
+        `YARN_GLOBAL_FOLDER=${cacheDir(manager)}/berry`,
+        "yarn",
+        "install",
+      ];
   }
 }
 
