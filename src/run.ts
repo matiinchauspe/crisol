@@ -6,6 +6,7 @@ import { allowlistByLevel, readRepoLevelAtCommit, repoLevelChangeWarning } from 
 import type { AllowlistEntry } from "./allowlist";
 import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
+import { DECLARATION_EFFECTS, declarationChangeWarning } from "./declaration-warning";
 import { PACKAGE_CACHE_MOUNT, PACKAGE_CACHE_VOLUME, detectPackageManager, installDependencies } from "./dependencies";
 import type { PackageManager } from "./dependencies";
 import {
@@ -1392,6 +1393,9 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         warnings.push(...scanCommitsForWarnings(hostRepoPath, range, identity));
         const repoLevelChange = addedLines(hostRepoPath, range, REPO_ALLOWLIST_FILE);
         if (repoLevelChange !== undefined) warnings.push(repoLevelChangeWarning(repoLevelChange));
+        for (const { file, effect } of DECLARATION_EFFECTS) {
+          if (addedLines(hostRepoPath, range, file) !== undefined) warnings.push(declarationChangeWarning(file, effect));
+        }
       } catch (error) {
         appendLog(logPath, `commit scan failed: ${errorMessage(error)}`);
       }

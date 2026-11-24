@@ -125,12 +125,11 @@ export function hostsToLearn(reached: readonly Blocked[], baseline: readonly str
 }
 
 /**
- * The repo level is committed, so a branch can widen it, and the agent writes the branch: once
- * merged, every later Run in the repo reaches what it added. The lines are the agent's own text,
- * hence quoted and unvalidated.
+ * The repo level is committed and the agent writes the branch, so it can widen the Allowlist. The
+ * added lines are the agent's own text: quoted, not validated.
  */
 export function repoLevelChangeWarning(addedLines: readonly string[]): string {
   const hosts = addedLines.map(withoutComment).filter((line) => line.length > 0);
   const what = hosts.length > 0 ? `adds ${hosts.map((host) => JSON.stringify(host)).join(", ")} to` : "changes";
-  return `the branch ${what} ${REPO_ALLOWLIST_FILE}: once merged, every later Run in this repo reads it`;
+  return `the branch ${what} ${REPO_ALLOWLIST_FILE}: a Run cut from this branch, or the repo once it is merged, reads it`;
 }
