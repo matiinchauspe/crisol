@@ -85,3 +85,10 @@ the Agent layer installs, in Crisol's argv shape (`--session-id` at launch, the 
 
 So resume turns (`resumeWithFeedback`, `continueSession`) keep passing no instructions. A Run
 resumes inside the Sandbox, where the transcript lives under the Adapter's `sessionStore`.
+
+## Amendment 2026-11-24: the detached Run no longer re-resolves its Gates
+
+The "Not addressed" note on Gate drift no longer holds. Since ADR 0040, `detachRun` hands the child
+the `baseSha` the parent resolved (`DETACHED_ENV`, `src/detach.ts`), and the child reads
+`.crisol/config.toml` as that commit holds it. A change to the file between detach and pre-flight
+is not read, so the Preamble's Gates and the Gates the Run checks cannot differ.
