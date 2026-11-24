@@ -545,13 +545,13 @@ either image. The package manager is picked from whichever lockfile is committed
 
 | Lockfile | Installs with |
 |---|---|
-| `bun.lock` | `bun install` |
+| `bun.lock` or `bun.lockb` | `bun install` |
 | `pnpm-lock.yaml` | `pnpm install` |
 | `package-lock.json` | `npm ci` |
 | `yarn.lock` | `yarn install` |
 
-A repo with none of the four skips the install entirely. Whichever manager runs, its own cache
-(the pnpm store, bun's cache, npm's cache, yarn's cache) lands in one Docker volume shared across
+A repo with none of these lockfiles skips the install entirely. Whichever manager runs, its own cache
+(the pnpm store, bun's cache, npm's cache, yarn's cache for Yarn 1 and Yarn 2+ alike) lands in one Docker volume shared across
 every Run, so a later Run's install reuses what an earlier one already downloaded — only the
 installed `node_modules` itself is never shared. `pnpm`/`yarn` are not part of Crisol's own
 default Project layer; a repo whose lockfile needs one supplies it in its own `.crisol/Dockerfile`.

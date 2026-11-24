@@ -13,6 +13,7 @@ interface LockfileRule {
 /** First match wins; a repo should carry exactly one lockfile, but a mixed one still picks deterministically. */
 const LOCKFILE_RULES: readonly LockfileRule[] = [
   { file: "bun.lock", manager: "bun" },
+  { file: "bun.lockb", manager: "bun" },
   { file: "pnpm-lock.yaml", manager: "pnpm" },
   { file: "package-lock.json", manager: "npm" },
   { file: "yarn.lock", manager: "yarn" },
