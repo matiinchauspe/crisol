@@ -79,3 +79,10 @@ action, and every existing test asserting an empty stderr stays true.
 - **Tenaza v0.5.0's glibc builds with `gcompat`, a glibc loader or `patchelf`, building Tenaza from
   source in the layer, or a glibc Sandbox** — the first fails to load, the next two are fragile,
   and the last two contradict the pinned release or rewrite tickets 12 and 14.
+
+## 2026-11-24 — ADR 0037 amends the state mount
+
+`state/` is now mounted read-only. A read-write `state/` let the agent answer reserved actions held
+in other host sessions and rewrite the rows `tenaza run` executes on the host. The Sandbox's session
+logs reach the host through a per-Run sink the host relays, and only `state/relay-requested/`
+stays writable. See [ADR 0037](0037-the-sandbox-writes-tenaza-sessions-only-through-a-per-run-sink-the-host-relays.md).
