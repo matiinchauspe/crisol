@@ -1180,22 +1180,21 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         return;
       }
 
-      if (gates.length === 0) {
-        status = "unverified";
-        gateResults = [];
-        return;
-      }
-
       let feedback: string;
       let failure: string;
       let failureOutput: string;
-      const uncommitted = await checkCommitted(ctx.sandbox, branch, installDirt);
+      // Runs with no Gates too: fetch-back takes only the branch, and gc deletes a branch equal to the host's.
+      const uncommitted = await checkCommitted(ctx.sandbox, branch, installDirt, gates.length > 0);
       throwIfStopped(clock);
       if (uncommitted !== undefined) {
         feedback = uncommitted;
         failure = "the Clone is not committed on its branch";
         failureOutput = uncommitted;
-        appendLog(logPath, `iteration ${iterations}: ${failure}, no Gate runs`);
+        appendLog(logPath, `iteration ${iterations}: ${failure}${gates.length > 0 ? ", no Gate runs" : ""}`);
+      } else if (gates.length === 0) {
+        status = "unverified";
+        gateResults = [];
+        return;
       } else {
         const { results, firstFailure } = await runGates(ctx.sandbox, gates);
         throwIfStopped(clock);

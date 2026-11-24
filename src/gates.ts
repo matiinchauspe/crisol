@@ -97,6 +97,7 @@ export async function checkCommitted(
   sandbox: Sandbox,
   branch: string,
   installDirt: readonly InstallDirt[] = [],
+  gated = true,
 ): Promise<string | undefined> {
   const expected = `refs/heads/${branch}`;
   const head = await sandbox.exec(["git", "symbolic-ref", "--quiet", "HEAD"]);
@@ -127,7 +128,7 @@ export async function checkCommitted(
   if (problems.length === 0) return undefined;
 
   return [
-    `Gates did not run: only the commits on branch \`${branch}\` leave the Sandbox, and the Clone is not there yet.`,
+    `${gated ? "Gates did not run: only" : "Only"} the commits on branch \`${branch}\` leave the Sandbox, and the Clone is not there yet.`,
     ...problems,
     `Commit your work on \`${branch}\`, with HEAD on it, then finish your turn.`,
   ].join("\n\n");
