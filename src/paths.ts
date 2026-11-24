@@ -47,12 +47,17 @@ export function repoAllowlistPath(hostRepoPath: string): string {
   return path.join(hostRepoPath, REPO_ALLOWLIST_FILE);
 }
 
+/** Relative to the repo root, with git's own separators (they are passed to `git cat-file`). */
+export const REPO_CONFIG_FILE = ".crisol/config.toml";
+export const REPO_SERVICES_FILE = ".crisol/services.yml";
+export const REPO_DOCKERFILE_FILE = ".crisol/Dockerfile";
+
 export function userPromptPath(name: string, home: string = crisolHome()): string {
   return path.join(home, "prompts", `${name}.md`);
 }
 
-export function repoPromptPath(hostRepoPath: string, name: string): string {
-  return path.join(hostRepoPath, ".crisol", "prompts", `${name}.md`);
+export function repoPromptFile(name: string): string {
+  return `.crisol/prompts/${name}.md`;
 }
 
 export function runNetworkDir(id: string, home: string = crisolHome()): string {

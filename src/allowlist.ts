@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { BUILT_IN_ALLOWLIST, isInternalHostname, isPlainHostname } from "./network";
 import type { Blocked } from "./network";
+import { readTextAtCommit } from "./git";
 import { REPO_ALLOWLIST_FILE, repoAllowlistPath, userAllowlistPath } from "./paths";
 
 /**
@@ -45,6 +46,12 @@ function readLevel(file: string): string[] {
   return parseAllowlistFile(readFileSync(file, "utf8"), file);
 }
 
+/** As `baseSha` commits it: a host edit nobody committed never reaches a Run, whose Clone cannot hold it. */
+export function readRepoLevelAtCommit(hostRepoPath: string, baseSha: string): string[] {
+  const text = readTextAtCommit(hostRepoPath, baseSha, REPO_ALLOWLIST_FILE);
+  return text === undefined ? [] : parseAllowlistFile(text, `${REPO_ALLOWLIST_FILE} (as committed at ${baseSha})`);
+}
+
 export type AllowlistLevel = "built-in" | "user" | "repo";
 
 export interface AllowlistEntry {
@@ -53,19 +60,20 @@ export interface AllowlistEntry {
 }
 
 /** Throws on the first host a level cannot carry, so a Run fails before anything starts. */
-export function allowlistByLevel(home: string, hostRepoPath: string): AllowlistEntry[] {
+export function allowlistByLevel(home: string, repoLevel: readonly string[]): AllowlistEntry[] {
   const entries = new Map<string, AllowlistEntry>();
   const add = (hosts: readonly string[], level: AllowlistLevel) => {
     for (const host of hosts) if (!entries.has(host)) entries.set(host, { host, level });
   };
   add(BUILT_IN_ALLOWLIST, "built-in");
   add(readLevel(userAllowlistPath(home)), "user");
-  add(readLevel(repoAllowlistPath(hostRepoPath)), "repo");
+  add(repoLevel, "repo");
   return [...entries.values()];
 }
 
+/** The host's working tree, for advice about what to paste there; a Run reads `readRepoLevelAtCommit`. */
 export function mergedAllowlist(home: string, hostRepoPath: string): string[] {
-  return allowlistByLevel(home, hostRepoPath).map((entry) => entry.host);
+  return allowlistByLevel(home, readLevel(repoAllowlistPath(hostRepoPath))).map((entry) => entry.host);
 }
 
 /**

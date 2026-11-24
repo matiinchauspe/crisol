@@ -1,21 +1,17 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { readTextAtCommit } from "./git";
+import { REPO_CONFIG_FILE } from "./paths";
 
-/**
- * Read from the host repo's working tree: the Clone does not exist yet. An unconfigured repo is
- * the ladder's "none" rung, not an error.
- */
-export function readRepoGates(hostRepoPath: string): string[] {
-  const configPath = path.join(hostRepoPath, ".crisol", "config.toml");
-  if (!existsSync(configPath)) return [];
-  return parseGatesArray(readFileSync(configPath, "utf8"));
+export function readRepoGates(hostRepoPath: string, baseSha: string): string[] {
+  const text = readTextAtCommit(hostRepoPath, baseSha, REPO_CONFIG_FILE);
+  return text === undefined ? [] : parseGatesArray(text);
 }
 
 /** Names only, never values: each is read from the host's own environment at launch. */
-export function readRepoSecretNames(hostRepoPath: string): string[] {
-  const configPath = path.join(hostRepoPath, ".crisol", "config.toml");
-  if (!existsSync(configPath)) return [];
-  return parseSecretNamesArray(readFileSync(configPath, "utf8"));
+export function readRepoSecretNames(hostRepoPath: string, baseSha: string): string[] {
+  const text = readTextAtCommit(hostRepoPath, baseSha, REPO_CONFIG_FILE);
+  return text === undefined ? [] : parseSecretNamesArray(text);
 }
 
 const QUOTED_STRING = /"((?:[^"\\]|\\.)*)"/g;

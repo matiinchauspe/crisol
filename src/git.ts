@@ -58,6 +58,37 @@ export function shortSha(repoPath: string, ref: string): string {
   return runOrThrow(["git", "-C", repoPath, "rev-parse", "--short", ref]);
 }
 
+/** Bytes, not text, so a caller can refuse non-UTF-8 (task.ts does, with a fatal decoder). `undefined` when `sha` has no such file. */
+export function readFileAtCommit(repoPath: string, sha: string, file: string): Uint8Array | undefined {
+  const proc = Bun.spawnSync(["git", "-C", repoPath, "cat-file", "blob", `${sha}:${file}`], {
+    env: process.env,
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: true,
+  });
+  return proc.exitCode === 0 ? new Uint8Array(proc.stdout) : undefined;
+}
+
+/** Files with uncommitted changes (untracked included) under `dir`, relative to the repo root. */
+export function uncommittedFilesUnder(repoPath: string, dir: string): string[] {
+  const result = run(["git", "-C", repoPath, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", dir]);
+  if (result.exitCode !== 0) return [];
+  const entries = result.stdout.split("\0").filter((entry) => entry.length > 0);
+  const files: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const status = entries[i]!.slice(0, 2);
+    files.push(entries[i]!.slice(3));
+    // A rename or copy is followed by its origin as an entry of its own.
+    if (/[RC]/.test(status)) i++;
+  }
+  return files;
+}
+
+export function readTextAtCommit(repoPath: string, sha: string, file: string): string | undefined {
+  const bytes = readFileAtCommit(repoPath, sha, file);
+  return bytes === undefined ? undefined : new TextDecoder().decode(bytes);
+}
+
 /** The only way the agent's commits carry the human's name: no `~/.gitconfig` is mounted. */
 export function readIdentity(repoPath: string): GitIdentity {
   const name = run(["git", "-C", repoPath, "config", "user.name"]);

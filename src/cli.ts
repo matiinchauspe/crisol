@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import packageJson from "../package.json";
 import type { Adapter } from "./adapter";
 import { ClaudeCodeAdapter } from "./adapters/claude-code";
@@ -6,8 +8,8 @@ import { DEFAULT_SCRIPT, FakeAdapter } from "./adapters/fake";
 import { addToRepoAllowlist, addToUserAllowlist, hostsToLearn, learnBaseline, mergedAllowlist } from "./allowlist";
 import type { AllowOutcome } from "./allowlist";
 import { runAuth } from "./auth";
-import { parsePositiveInteger, readGlobalConfig } from "./config";
-import { discoverGitRoot } from "./git";
+import { parseGatesArray, parsePositiveInteger, readGlobalConfig } from "./config";
+import { discoverGitRoot, uncommittedFilesUnder } from "./git";
 import { collectRun, formatGb, formatSizeWarning, planGc, reconcileTrackedSize, resolveGcWarnBytes, trackedRunsSizeBytes } from "./gc";
 import type { GcSkip } from "./gc";
 import { initRepo, LEARN_TASK, REPO_CONFIG_FILE, SANDBOX_HEADING, writeLearnedHosts } from "./init";
@@ -296,7 +298,7 @@ function runAllowCommand(rest: string[]): number {
     if (!hostRepoPath) throw new Error(`Not inside a git repo: ${process.cwd()}. --repo edits the repo you run it in.`);
     const added = addToRepoAllowlist(hostRepoPath, host);
     const file = repoAllowlistPath(hostRepoPath);
-    console.log(describeAllow(added, "repo", file) + (added.outcome === "added" ? " Commit it to share it." : ""));
+    console.log(describeAllow(added, "repo", file) + (added.outcome === "added" ? ` ${TAKES_EFFECT_ONCE_COMMITTED}` : ""));
     return 0;
   } catch (error) {
     process.stderr.write(`${formatError(error)}\n`);
@@ -505,6 +507,18 @@ function describeInit(report: InitReport): string[] {
   return lines;
 }
 
+const TAKES_EFFECT_ONCE_COMMITTED =
+  "The next Run reads .crisol/ from the commit it is cut from, so this takes effect once it is committed.";
+const COMMIT_CRISOL_DIR = `${TAKES_EFFECT_ONCE_COMMITTED} Commit .crisol/ to use it and to share it.`;
+
+export function uncommittedCrisolWarning(files: readonly string[]): string | undefined {
+  if (files.length === 0) return undefined;
+  return (
+    `Uncommitted changes in ${files.join(", ")}. This Run reads .crisol/ as its base commit holds it, ` +
+    "which with --base may be another branch than the one checked out, so these edits do not apply to it."
+  );
+}
+
 async function runInitCommand(rest: string[]): Promise<number> {
   let adapterName: AdapterName = "claude-code";
   for (let i = 0; i < rest.length; i++) {
@@ -535,7 +549,7 @@ async function runInitCommand(rest: string[]): Promise<number> {
 
   process.stdout.write("Start a first learn Run now, to collect the hosts this repo reaches? [y/N] ");
   if (!(await readConfirmation())) {
-    console.log("No learn Run. `crisol run --network learn` starts one later. Commit .crisol/ to share it.");
+    console.log(`No learn Run. \`crisol run --network learn\` starts one later. ${COMMIT_CRISOL_DIR}`);
     return 0;
   }
 
@@ -544,9 +558,13 @@ async function runInitCommand(rest: string[]): Promise<number> {
   let result: RunResult | undefined;
   let failure: unknown;
   try {
+    // `init` just wrote `.crisol/config.toml` and nothing has committed it, so the Run's base lacks it.
+    const configPath = path.join(hostRepoPath, REPO_CONFIG_FILE);
+    const gates = existsSync(configPath) ? parseGatesArray(readFileSync(configPath, "utf8")) : [];
     result = await run({
       cwd: hostRepoPath,
       task: LEARN_TASK,
+      ...(gates.length > 0 ? { gates } : {}),
       network: "learn",
       // One pass: a red Gate still shows its hosts, and resuming the agent would learn nothing new.
       maxIterations: 1,
@@ -574,7 +592,7 @@ async function runInitCommand(rest: string[]): Promise<number> {
       ? "The learn Run reached no host beyond the built-in Allowlist and this repo's level."
       : added.map((host) => `Added ${host} to the repo Allowlist (${REPO_ALLOWLIST_FILE}).`).join("\n"),
   );
-  console.log("Commit .crisol/ to share it.");
+  console.log(COMMIT_CRISOL_DIR);
   return failure === undefined ? 0 : 1;
 }
 
@@ -623,6 +641,10 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const handoff = takeDetachedHandoff();
+  // Once, here: a fan-out shares it, and a detached child is the same Run its parent already warned for.
+  const runRoot = handoff === undefined ? discoverGitRoot(process.cwd()) : undefined;
+  const staleWarning = runRoot ? uncommittedCrisolWarning(uncommittedFilesUnder(runRoot, ".crisol")) : undefined;
+  if (staleWarning !== undefined) process.stderr.write(`Warning: ${staleWarning}\n`);
   // Deferred for --continue: run() resolves the Run's recorded Adapter once it knows which Run is named.
   const adapterName = args.adapterName ?? (args.continue !== undefined ? undefined : "claude-code");
   const runOptions: Omit<RunOptions, "task"> = {

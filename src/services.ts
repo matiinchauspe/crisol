@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
 import { removeContainerByName, runDocker } from "./docker";
 import type { StopResult } from "./docker";
+import { readTextAtCommit } from "./git";
+import { REPO_SERVICES_FILE } from "./paths";
 
 export interface HealthCheck {
   /** `["CMD", ...]` (exec form), `["CMD-SHELL", "<cmd>"]` (shell form), or `["NONE"]` (disabled). */
@@ -369,13 +369,9 @@ export function parseServicesYaml(text: string, sourcePath: string): ServiceSpec
   });
 }
 
-const SERVICES_FILE = path.join(".crisol", "services.yml");
-
-/** Read from the host repo's working tree, like `readRepoGates`: the Clone doesn't exist yet. */
-export function readRepoServices(hostRepoPath: string): ServiceSpec[] {
-  const servicesPath = path.join(hostRepoPath, SERVICES_FILE);
-  if (!existsSync(servicesPath)) return [];
-  return parseServicesYaml(readFileSync(servicesPath, "utf8"), servicesPath);
+export function readRepoServices(hostRepoPath: string, baseSha: string): ServiceSpec[] {
+  const text = readTextAtCommit(hostRepoPath, baseSha, REPO_SERVICES_FILE);
+  return text === undefined ? [] : parseServicesYaml(text, `${REPO_SERVICES_FILE} (as committed at ${baseSha})`);
 }
 
 function serviceContainerName(id: string, name: string): string {

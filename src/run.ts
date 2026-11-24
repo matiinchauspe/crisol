@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, 
 import { ProviderFailureError } from "./adapter";
 import type { Adapter, AdapterContext, PreStartDeclaration } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
-import { allowlistByLevel, repoLevelChangeWarning } from "./allowlist";
+import { allowlistByLevel, readRepoLevelAtCommit, repoLevelChangeWarning } from "./allowlist";
 import type { AllowlistEntry } from "./allowlist";
 import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
@@ -725,8 +725,6 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
   // Every validation below runs BEFORE any side effect — no mkdir, no clone, no docker run.
   const identity = readIdentity(hostRepoPath);
   const instructions = readInstructions(home);
-  const resolved =
-    savedPrompt === undefined ? resolveTask(options, options.cwd, home, hostRepoPath, sharedInputs) : undefined;
 
   const continued = options.continue !== undefined ? findContinuedRun(hostRepoPath, home, options.continue) : undefined;
   let baseRef: string;
@@ -744,7 +742,10 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
     }
   }
 
-  const gates = resolveGates(options.gates, continued?.gates ?? readRepoGates(hostRepoPath));
+  const resolved =
+    savedPrompt === undefined ? resolveTask(options, options.cwd, home, hostRepoPath, baseSha, sharedInputs) : undefined;
+
+  const gates = resolveGates(options.gates, continued?.gates ?? readRepoGates(hostRepoPath, baseSha));
   const globalConfig = readGlobalConfig(home);
   const maxParallel = resolveMaxParallel(globalConfig);
   const { maxIterations, ceilingMs } = resolveCeiling(
@@ -754,18 +755,18 @@ async function prepareRun(options: RunOptions, savedPrompt?: string, sharedInput
   );
   const { cpus, memory } = resolveCapacityLimits(globalConfig);
 
-  const repoSecretNames = readRepoSecretNames(hostRepoPath);
+  const repoSecretNames = readRepoSecretNames(hostRepoPath, baseSha);
   assertDeclaredSecretsPresent(repoSecretNames);
 
   // Only a wall enforces the levels, so only an allowlist Run reads them: a bad line in one fails
   // that Run now, and never breaks the learn or open escape hatches.
-  const allowlist = (options.network ?? "allowlist") === "allowlist" ? allowlistByLevel(home, hostRepoPath) : [];
+  const allowlist = (options.network ?? "allowlist") === "allowlist" ? allowlistByLevel(home, readRepoLevelAtCommit(hostRepoPath, baseSha)) : [];
 
   // Validated before any side effect, like every other `.crisol/` declaration: a bad compose key
   // fails the Run here, before a Clone or a branch exists.
-  const services = readRepoServices(hostRepoPath);
+  const services = readRepoServices(hostRepoPath, baseSha);
 
-  const projectLayer = resolveProjectLayer(readProjectDockerfile(hostRepoPath));
+  const projectLayer = resolveProjectLayer(readProjectDockerfile(hostRepoPath, baseSha));
 
   assertDockerReachable();
 
@@ -1560,7 +1561,7 @@ export async function runFanOut(
   const home = options.home ?? crisolHome();
   const base = options.base ?? currentRefName(hostRepoPath);
   const baseSha = resolveBaseSha(hostRepoPath, base);
-  const sharedInputs = resolveSharedInputs(options, options.cwd, home, hostRepoPath);
+  const sharedInputs = resolveSharedInputs(options, options.cwd, home, hostRepoPath, baseSha);
   const { buildAdapter, ...runOptions } = options;
   return Promise.allSettled(
     tasks.map((task) => run({ ...runOptions, adapter: buildAdapter?.(), task, base, baseSha }, sharedInputs)),

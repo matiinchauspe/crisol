@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { repoPromptPath, userPromptPath } from "./paths";
+import { readFileAtCommit } from "./git";
+import { repoPromptFile, userPromptPath } from "./paths";
 import { stopLine } from "./stop-line";
 
 const TASK_VARIABLE = "{{task}}";
@@ -59,6 +60,10 @@ function readText(file: string, cwd: string, what: string): string {
   } catch (error) {
     throw new Error(`Cannot read ${what}: ${error instanceof Error ? error.message : String(error)}`);
   }
+  return decodeText(bytes, what);
+}
+
+function decodeText(bytes: Uint8Array, what: string): string {
   if (bytes.includes(0)) throw new Error(`${what} holds a NUL byte; only UTF-8 text can reach the agent.`);
   let text: string;
   try {
@@ -70,18 +75,20 @@ function readText(file: string, cwd: string, what: string): string {
   return text;
 }
 
-/** Repo level beats user level beats built-in. The repo level is read from the host's working tree. */
-export function resolveTemplate(name: string, home: string, hostRepoPath: string): Template {
+/** Repo level beats user level beats built-in. */
+export function resolveTemplate(name: string, home: string, hostRepoPath: string, baseSha: string): Template {
   if (!TEMPLATE_NAME.test(name)) {
     throw new Error(
       `--prompt "${name}" is not a template name: start with a letter or digit, then letters, digits, "-" and "_".`,
     );
   }
-  const repoFile = repoPromptPath(hostRepoPath, name);
+  const repoFile = `${repoPromptFile(name)} as committed at ${baseSha}`;
   const userFile = userPromptPath(name, home);
-  for (const file of [repoFile, userFile]) {
-    if (existsSync(file)) return { text: readText(file, "/", `--prompt ${name} (${file})`), source: file };
+  const repoBytes = readFileAtCommit(hostRepoPath, baseSha, repoPromptFile(name));
+  if (repoBytes !== undefined) {
+    return { text: decodeText(repoBytes, `--prompt ${name} (${repoFile})`), source: repoFile };
   }
+  if (existsSync(userFile)) return { text: readText(userFile, "/", `--prompt ${name} (${userFile})`), source: userFile };
   const builtIn = BUILT_IN_TEMPLATES.get(name);
   if (builtIn !== undefined) return { text: builtIn, source: "built-in" };
   throw new Error(
@@ -114,8 +121,10 @@ export function resolveSharedInputs(
   cwd: string,
   home: string,
   hostRepoPath: string,
+  baseSha: string,
 ): ResolvedInputs {
-  const template = input.template !== undefined ? resolveTemplate(input.template, home, hostRepoPath) : undefined;
+  const template =
+    input.template !== undefined ? resolveTemplate(input.template, home, hostRepoPath, baseSha) : undefined;
   const context = (input.context ?? []).map((file) => ({ path: file, content: readText(file, cwd, `--context ${file}`) }));
   return { template, context };
 }
@@ -129,6 +138,7 @@ export function resolveTask(
   cwd: string,
   home: string,
   hostRepoPath: string,
+  baseSha: string,
   shared?: ResolvedInputs,
 ): ResolvedTask {
   if (input.file !== undefined && input.task !== undefined) {
@@ -139,7 +149,7 @@ export function resolveTask(
   if (raw.trim() === "") throw new Error("Task phrase is empty.");
   const template =
     shared?.template ??
-    (input.template !== undefined ? resolveTemplate(input.template, home, hostRepoPath) : undefined);
+    (input.template !== undefined ? resolveTemplate(input.template, home, hostRepoPath, baseSha) : undefined);
   const task = template !== undefined ? applyTemplate(template, raw) : raw;
   const context =
     shared?.context ?? (input.context ?? []).map((file) => ({ path: file, content: readText(file, cwd, `--context ${file}`) }));

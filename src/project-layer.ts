@@ -1,14 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
 import { DEFAULT_PROJECT_DOCKERFILE, DEFAULT_PROJECT_IMAGE_TAG, contentHash } from "./docker";
+import { readTextAtCommit } from "./git";
+import { REPO_DOCKERFILE_FILE } from "./paths";
 
-const PROJECT_DOCKERFILE_FILE = path.join(".crisol", "Dockerfile");
-
-/** Read from the host repo's working tree: the Clone doesn't exist yet. */
-export function readProjectDockerfile(hostRepoPath: string): string | undefined {
-  const dockerfilePath = path.join(hostRepoPath, PROJECT_DOCKERFILE_FILE);
-  if (!existsSync(dockerfilePath)) return undefined;
-  return readFileSync(dockerfilePath, "utf8");
+export function readProjectDockerfile(hostRepoPath: string, baseSha: string): string | undefined {
+  return readTextAtCommit(hostRepoPath, baseSha, REPO_DOCKERFILE_FILE);
 }
 
 export interface ProjectLayer {

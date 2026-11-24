@@ -2,10 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { addToRepoAllowlist, hostsToLearn, learnBaseline } from "./allowlist";
 import { detectPackageManager } from "./dependencies";
-import { repoAllowlistPath } from "./paths";
+import { REPO_CONFIG_FILE, repoAllowlistPath } from "./paths";
 import type { RunResult } from "./run";
 
-export const REPO_CONFIG_FILE = ".crisol/config.toml";
+export { REPO_CONFIG_FILE };
 
 /** Cheapest first, so a red Gate fails before the slow ones run. */
 const GATE_SCRIPTS = ["typecheck", "lint", "test"] as const;
