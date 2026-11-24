@@ -69,3 +69,19 @@ less than Crisol will check.
 - A detached Run re-resolves its Gates from the repo's `.crisol/config.toml`. If that file
   changes between detach and pre-flight, the Gates can drift from the ones the saved Preamble
   names.
+
+## 2026-11-24 — a resumed session keeps the instructions it launched with
+
+Review round 1 over 0.1.0 asked whether `instructions` reach a resumed turn, since only launch
+passes `--append-system-prompt`. Checked live against Claude Code 2.1.331 on the host, the version
+the Agent layer installs, in Crisol's argv shape (`--session-id` at launch, the message over stdin,
+`--output-format json`):
+
+- Launch appended a rule that names a marker only when the user says `ping`, so the marker never
+  enters the reply. The launch reply did not name it.
+- `claude -p --resume <id>` with `ping` and no `--append-system-prompt` replied with the marker.
+- A fresh `claude -p` with `ping` and no appended rule did not.
+- The session transcript holds the appended text, which is what `--resume` loads back.
+
+So resume turns (`resumeWithFeedback`, `continueSession`) keep passing no instructions. A Run
+resumes inside the Sandbox, where the transcript lives under the Adapter's `sessionStore`.
