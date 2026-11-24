@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { FakeAdapter } from "../src/adapters/fake";
-import { declarationChangeWarning } from "../src/declaration-warning";
+import { DECLARATION_EFFECTS, declarationChangeWarning } from "../src/declaration-warning";
 import { run } from "../src/run";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
@@ -23,7 +23,7 @@ describe("declarationChangeWarning names the file and who reads it", () => {
 
 describe("a branch that changes a .crisol/ declaration is flagged", () => {
   const cases = [
-    { file: ".crisol/config.toml", content: 'secrets = ["GITHUB_TOKEN"]' },
+    { file: ".crisol/config.toml", content: 'env = ["GITHUB_TOKEN"]' },
     { file: ".crisol/Dockerfile", content: "FROM scratch" },
     { file: ".crisol/services.yml", content: "services: {}" },
   ];
@@ -61,4 +61,12 @@ describe("a branch that changes a .crisol/ declaration is flagged", () => {
       repo.cleanup();
     }
   }, 60_000);
+});
+
+describe("the config.toml effect names the key Crisol reads", () => {
+  test("it says `env` copies variables from the host environment, since parseSecretNamesArray reads that key", () => {
+    const config = DECLARATION_EFFECTS.find((entry) => entry.file === ".crisol/config.toml");
+    expect(config?.effect).toContain("`env`");
+    expect(config?.effect).not.toContain("secrets");
+  });
 });
