@@ -294,7 +294,7 @@ describe("repoLevelChangeWarning names what a branch adds to .crisol/network", (
     const warning = repoLevelChangeWarning(["evil.example.com # needed", "", "# note", "a$(id)b.com"]);
     expect(warning).toContain(".crisol/network");
     expect(warning).toContain('"evil.example.com", "a$(id)b.com"');
-    expect(warning).toContain("every later Run");
+    expect(warning).toContain("a Run cut from this branch");
   });
 
   test("a change that adds no host still warns", () => {
