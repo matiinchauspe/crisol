@@ -69,3 +69,17 @@ Rejected:
   untracked `node_modules`.
 - **Snapshotting before and after every round's install**: in a Continuation, the install's dirt
   from the first round is already present before the second install, so it would never be excused.
+
+## Amendment 2026-11-24: a Run with no Gates is checked too
+
+"A Run with no Gates is not checked" was wrong about what `unverified` costs. The commit scan and
+Fetch-back describe what was committed, but they cannot tell a Run that committed nothing from one
+that left its work in the Clone: both bring back a branch equal to `base`, with no warning, and `gc`
+deletes it 7 days later because it matches the host. Uncommitted work is lost silently, in exactly
+the repos `crisol init` writes with no Gates.
+
+`converge` now asks `checkCommitted` before the `unverified` verdict as well. A dirty Clone or a
+`HEAD` off the branch resumes the agent with the same feedback and spends an iteration, so the
+ceiling still bounds it; a Run that never commits ends `not-converged` with `reason: "ceiling"`
+instead of `unverified`. The feedback's lead line drops "Gates did not run" when there are none to
+run. A Stop line still ends the Run before any check, as it does for a Gated one.
