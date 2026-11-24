@@ -18,7 +18,11 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
+
+      # setup-bun only warns when it cannot read the file, then installs the latest Bun.
+      - name: Check the Bun version matches .bun-version
+        run: test "$(bun --version)" = "$(tr -d '[:space:]' < .bun-version)"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -40,9 +44,12 @@ jobs:
       - name: Compile
         run: bun run build:release
 
-      # The runner is Apple silicon, so only the arm64 binary can run here.
       - name: Smoke-test the arm64 binary
         run: test "$(dist/crisol-darwin-arm64 --version)" = "${GITHUB_REF_NAME#v}"
+
+      # The runner is Apple silicon; its image installs Rosetta 2, which runs the x64 binary.
+      - name: Smoke-test the x64 binary under Rosetta
+        run: test "$(arch -x86_64 dist/crisol-darwin-x64 --version)" = "${GITHUB_REF_NAME#v}"
 
       - name: Compute checksums
         run: |
@@ -59,3 +66,30 @@ jobs:
             dist/crisol-darwin-x64
             dist/checksums.txt
           generate_release_notes: true
+
+      # The tagged commit predates its own checksums, so the formula is filled on main instead.
+      - name: Fill the formula on main
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin main
+          git switch --detach FETCH_HEAD
+          bun scripts/formula.ts fill Formula/crisol.rb "${GITHUB_REF_NAME#v}" dist/checksums.txt
+          if git diff --quiet -- Formula/crisol.rb; then
+            echo "Formula/crisol.rb on main already holds ${GITHUB_REF_NAME}'s values."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(release): fill the formula for ${GITHUB_REF_NAME}" -- Formula/crisol.rb
+          if ! git push origin HEAD:main; then
+            echo "The release is published, but pushing the filled formula to main failed, so main still holds the previous values." >&2
+            echo "On an up-to-date main, run: bun scripts/formula.ts fill Formula/crisol.rb ${GITHUB_REF_NAME#v} checksums.txt (checksums.txt from this release), then commit and push." >&2
+            exit 1
+          fi
+
+      - name: Check the formula on main holds no placeholder
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin main
+          git show FETCH_HEAD:Formula/crisol.rb > "${RUNNER_TEMP}/crisol.rb"
+          bun scripts/formula.ts check "${RUNNER_TEMP}/crisol.rb"
