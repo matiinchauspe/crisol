@@ -6,7 +6,7 @@ import { parseSecretNamesArray } from "../src/config";
 import { run } from "../src/run";
 import type { SecretStore } from "../src/secret-store";
 import { createTempHome } from "./support/crisolHome";
-import { createFixtureRepo } from "./support/fixtureRepo";
+import { commitFiles, createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
 
 describe("parseSecretNamesArray (ticket 08, .crisol/config.toml's env key)", () => {
@@ -59,8 +59,7 @@ describe("least privilege: only the Adapter-declared and repo-declared names eve
   test("a repo-declared secret (host env) and an Adapter-declared secret (SecretStore) both land correctly; an undeclared host env var never does", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
-    mkdirSync(path.join(repo.path, ".crisol"));
-    writeFileSync(path.join(repo.path, ".crisol", "config.toml"), 'env = ["REPO_SECRET"]\n');
+    commitFiles(repo.path, { ".crisol/config.toml": 'env = ["REPO_SECRET"]\n' }, "chore: declare a secret");
     process.env.REPO_SECRET = "repo-secret-value";
     process.env.CRISOL_TEST_UNRELATED = "should-never-leak";
     try {
@@ -116,8 +115,7 @@ describe("a repo-declared secret missing from the host env (failure path)", () =
   test("fails before any side effect, naming it", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
-    mkdirSync(path.join(repo.path, ".crisol"));
-    writeFileSync(path.join(repo.path, ".crisol", "config.toml"), 'env = ["CRISOL_TEST_MISSING"]\n');
+    commitFiles(repo.path, { ".crisol/config.toml": 'env = ["CRISOL_TEST_MISSING"]\n' }, "chore: declare a secret");
     delete process.env.CRISOL_TEST_MISSING;
     try {
       const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {

@@ -8,7 +8,7 @@ import type { RunOptions } from "../src/run";
 import { resolveTask, resolveTemplate } from "../src/task";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
-import { createFixtureRepo } from "./support/fixtureRepo";
+import { commitFiles, createFixtureRepo, headSha } from "./support/fixtureRepo";
 import { waitFor } from "./support/liveCli";
 import { onlyRunId, readResult, runIds, stopRuns } from "./support/runState";
 
@@ -281,11 +281,12 @@ describe("--prompt templates (ticket 10)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      expect(resolveTemplate("fix-bug", home.path, repo.path).source).toBe("built-in");
+      const base = headSha(repo.path);
+      expect(resolveTemplate("fix-bug", home.path, repo.path, base).source).toBe("built-in");
       writeTemplate(path.join(home.path, "prompts"), "fix-bug", "USER LEVEL: {{task}}");
-      expect(resolveTemplate("fix-bug", home.path, repo.path).text).toBe("USER LEVEL: {{task}}");
-      writeTemplate(path.join(repo.path, ".crisol", "prompts"), "fix-bug", "REPO LEVEL: {{task}}");
-      expect(resolveTemplate("fix-bug", home.path, repo.path).text).toBe("REPO LEVEL: {{task}}");
+      expect(resolveTemplate("fix-bug", home.path, repo.path, base).text).toBe("USER LEVEL: {{task}}");
+      commitFiles(repo.path, { ".crisol/prompts/fix-bug.md": "REPO LEVEL: {{task}}" }, "chore: a repo template");
+      expect(resolveTemplate("fix-bug", home.path, repo.path, headSha(repo.path)).text).toBe("REPO LEVEL: {{task}}");
     } finally {
       home.cleanup();
       repo.cleanup();
@@ -327,9 +328,11 @@ describe("--prompt templates (ticket 10)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const prompts = path.join(repo.path, ".crisol", "prompts");
-      writeTemplate(prompts, "ticket", "Ticket {{ticket}}: {{task}}");
-      writeTemplate(prompts, "spaced", "{{ task }}");
+      commitFiles(
+        repo.path,
+        { ".crisol/prompts/ticket.md": "Ticket {{ticket}}: {{task}}", ".crisol/prompts/spaced.md": "{{ task }}" },
+        "chore: repo templates",
+      );
 
       const result = await runCli(["run", "x", "--prompt", "ticket", "--adapter", "fake"], { cwd: repo.path, home: home.path });
       const spaced = await runCli(["run", "x", "--prompt", "spaced", "--adapter", "fake"], { cwd: repo.path, home: home.path });
@@ -349,9 +352,8 @@ describe("--prompt templates (ticket 10)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const prompts = path.join(repo.path, ".crisol", "prompts");
-      writeTemplate(prompts, "static", "Do something else.");
-      mkdirSync(path.join(prompts, "folder.md"));
+      commitFiles(repo.path, { ".crisol/prompts/static.md": "Do something else." }, "chore: a repo template");
+      mkdirSync(path.join(home.path, "prompts", "folder.md"), { recursive: true });
       writeFileSync(path.join(repo.path, "escape.md"), "{{task}}");
       const cli = (...args: string[]) => runCli(["run", "x", ...args, "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
@@ -380,8 +382,7 @@ describe("the Preamble (ticket 10)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      mkdirSync(path.join(repo.path, ".crisol"));
-      writeFileSync(path.join(repo.path, ".crisol", "config.toml"), 'gates = ["test -f README.md"]\n');
+      commitFiles(repo.path, { ".crisol/config.toml": 'gates = ["test -f README.md"]\n' }, "chore: declare a Gate");
 
       const repoGates = await promptFor({ task: "do it", cwd: repo.path, home: home.path });
       const cliGates = await promptFor({ task: "do it", gates: ["true", "test -d ."], cwd: repo.path, home: home.path });
@@ -452,7 +453,7 @@ describe("the Preamble (ticket 10)", () => {
 
 describe("fan-out shares its inputs safely (ticket 10, round 2)", () => {
   test("resolveTask refuses file and a Task phrase together, even below the CLI", () => {
-    expect(() => resolveTask({ file: "ticket.md", task: "a phrase" }, "/", "/home", "/repo")).toThrow(
+    expect(() => resolveTask({ file: "ticket.md", task: "a phrase" }, "/", "/home", "/repo", "0000000")).toThrow(
       "cannot be combined with a Task phrase",
     );
   });
@@ -490,7 +491,8 @@ describe("fan-out shares its inputs safely (ticket 10, round 2)", () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
     try {
-      const promptsDir = path.join(repo.path, ".crisol", "prompts");
+      // A FIFO cannot be committed, so the one-shot template is a user-level file.
+      const promptsDir = path.join(home.path, "prompts");
       mkdirSync(promptsDir, { recursive: true });
       const templateFifo = path.join(promptsDir, "once.md");
       const mkfifo = Bun.spawnSync(["mkfifo", templateFifo]);

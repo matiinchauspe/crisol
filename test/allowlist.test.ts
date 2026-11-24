@@ -276,7 +276,7 @@ describe("allowlistByLevel says which level brought each host", () => {
     try {
       writeFileSync(path.join(home.path, "network"), "api.stripe.com\n");
       writeRepoLevel(repo.path, "api.stripe.com\nsentry.io\ngithub.com\n");
-      const entries = allowlistByLevel(home.path, repo.path);
+      const entries = allowlistByLevel(home.path, parseAllowlistFile(readFileSync(repoLevel(repo.path), "utf8"), "network"));
       expect(entries.filter((entry) => entry.level !== "built-in")).toEqual([
         { host: "api.stripe.com", level: "user" },
         { host: "sentry.io", level: "repo" },

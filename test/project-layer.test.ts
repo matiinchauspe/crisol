@@ -1,28 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { DEFAULT_PROJECT_DOCKERFILE, DEFAULT_PROJECT_IMAGE_TAG } from "../src/docker";
 import { readProjectDockerfile, resolveProjectLayer } from "../src/project-layer";
+import { commitFiles, createFixtureRepo, headSha } from "./support/fixtureRepo";
 
 describe("readProjectDockerfile (ticket 12)", () => {
-  test("reads .crisol/Dockerfile from the repo's working tree when present", () => {
-    const repo = mkdtempSync(path.join(tmpdir(), "crisol-project-layer-"));
+  test("reads .crisol/Dockerfile as the commit commits it, when present", () => {
+    const repo = createFixtureRepo();
     try {
-      mkdirSync(path.join(repo, ".crisol"));
-      writeFileSync(path.join(repo, ".crisol", "Dockerfile"), "FROM alpine:3.20\n");
-      expect(readProjectDockerfile(repo)).toBe("FROM alpine:3.20\n");
+      commitFiles(repo.path, { ".crisol/Dockerfile": "FROM alpine:3.20\n" }, "chore: declare a Project layer");
+      expect(readProjectDockerfile(repo.path, headSha(repo.path))).toBe("FROM alpine:3.20\n");
     } finally {
-      rmSync(repo, { recursive: true, force: true });
+      repo.cleanup();
     }
   });
 
-  test("returns undefined when the repo carries no .crisol/Dockerfile", () => {
-    const repo = mkdtempSync(path.join(tmpdir(), "crisol-project-layer-"));
+  test("returns undefined when the commit carries no .crisol/Dockerfile", () => {
+    const repo = createFixtureRepo();
     try {
-      expect(readProjectDockerfile(repo)).toBeUndefined();
+      expect(readProjectDockerfile(repo.path, headSha(repo.path))).toBeUndefined();
     } finally {
-      rmSync(repo, { recursive: true, force: true });
+      repo.cleanup();
     }
   });
 });

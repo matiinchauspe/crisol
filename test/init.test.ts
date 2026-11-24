@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
-import { readRepoGates } from "../src/config";
+import { parseGatesArray } from "../src/config";
 import { detectGates, SANDBOX_BLOCK } from "../src/init";
 import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
@@ -70,11 +70,12 @@ describe("crisol init", () => {
       const result = await runCli(["init"], { cwd: repo.path, home: home.path });
 
       expect(result.exitCode).toBe(0);
-      expect(readRepoGates(repo.path)).toEqual(["bun run typecheck", "bun run test"]);
+      expect(parseGatesArray(readFileSync(path.join(repo.path, ".crisol", "config.toml"), "utf8"))).toEqual(["bun run typecheck", "bun run test"]);
       expect(readFileSync(path.join(repo.path, ".crisol", "network"), "utf8")).toBe("");
       expect(existsSync(path.join(repo.path, ".crisol", "services.yml"))).toBe(false);
       expect(result.stdout).toContain("Gates: bun run typecheck, bun run test");
       expect(result.stdout).toContain("No learn Run.");
+      expect(result.stdout).toContain("reads .crisol/ from the commit it is cut from");
     } finally {
       home.cleanup();
       repo.cleanup();
@@ -92,7 +93,7 @@ describe("crisol init", () => {
       const again = await runCli(["init"], { cwd: repo.path, home: home.path });
 
       expect(again.exitCode).toBe(0);
-      expect(readRepoGates(repo.path)).toEqual(["make check"]);
+      expect(parseGatesArray(readFileSync(path.join(repo.path, ".crisol", "config.toml"), "utf8"))).toEqual(["make check"]);
       expect(readFileSync(path.join(repo.path, ".crisol", "network"), "utf8")).toBe("api.stripe.com\n");
     } finally {
       home.cleanup();
@@ -182,6 +183,8 @@ describe("crisol init", () => {
 
         expect(result.stdout).toMatch(/Run \w+: branch crisol\/\w+, status verified\./);
         expect(result.stdout).toContain("Added example.com to the repo Allowlist (.crisol/network).");
+        expect(result.stdout).toContain("takes effect once it is committed");
+        expect(result.stderr).not.toContain("Uncommitted changes");
         expect(readFileSync(path.join(repo.path, ".crisol", "network"), "utf8")).toBe("example.com\n");
         expect(result.exitCode).toBe(0);
       } finally {

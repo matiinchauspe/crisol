@@ -32,6 +32,12 @@ export function createFixtureRepo(): FixtureRepo {
   };
 }
 
+export function headSha(repoPath: string): string {
+  const proc = Bun.spawnSync(["git", "-C", repoPath, "rev-parse", "--short", "HEAD"], { stdout: "pipe", stderr: "pipe" });
+  if (proc.exitCode !== 0) throw new Error(`rev-parse HEAD failed in ${repoPath}: ${proc.stderr.toString("utf8")}`);
+  return proc.stdout.toString("utf8").trim();
+}
+
 export function commitFiles(repoPath: string, files: Record<string, string>, subject: string): void {
   for (const [file, content] of Object.entries(files)) {
     mkdirSync(path.dirname(path.join(repoPath, file)), { recursive: true });

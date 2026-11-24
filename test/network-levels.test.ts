@@ -6,7 +6,7 @@ import { run } from "../src/run";
 import type { RunResult } from "../src/run";
 import { runCli } from "./support/cli";
 import { createTempHome } from "./support/crisolHome";
-import { createFixtureRepo } from "./support/fixtureRepo";
+import { commitFiles, createFixtureRepo } from "./support/fixtureRepo";
 import { readLog } from "./support/runState";
 
 const REACH_EXAMPLE_GATE = "curl -fsS --max-time 20 -o /dev/null https://example.com/";
@@ -50,6 +50,7 @@ describe("crisol allow edits one Allowlist level", () => {
     try {
       const allow = await runCli(["allow", "api.stripe.com", "--repo"], { cwd: repo.path, home: home.path });
       expect(allow.exitCode).toBe(0);
+      expect(allow.stdout).toContain("takes effect once it is committed");
       expect(readFileSync(repoLevel(repo.path), "utf8")).toBe("api.stripe.com\n");
       expect(existsSync(path.join(home.path, "network"))).toBe(false);
     } finally {
@@ -344,8 +345,7 @@ describe("--network learn and --network open", () => {
     const repo = createFixtureRepo();
     try {
       writeFileSync(path.join(home.path, "network"), "not a host\n");
-      mkdirSync(path.join(repo.path, ".crisol"), { recursive: true });
-      writeFileSync(repoLevel(repo.path), "a$(id)b.com\n");
+      commitFiles(repo.path, { ".crisol/network": "a$(id)b.com\n" }, "chore: a bad repo level");
       const cli = await runCli(["run", "x", "--json", "--network", "open", "--gate", REACH_EXAMPLE_GATE, "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
@@ -409,8 +409,7 @@ describe("the repo level is made visible", () => {
     const repo = createFixtureRepo();
     try {
       writeFileSync(path.join(home.path, "network"), "api.stripe.com\n");
-      mkdirSync(path.join(repo.path, ".crisol"), { recursive: true });
-      writeFileSync(repoLevel(repo.path), "sentry.io # errors\n");
+      commitFiles(repo.path, { ".crisol/network": "sentry.io # errors\n" }, "chore: a repo level");
       const result = await run({ task: "x", cwd: repo.path, home: home.path });
       const log = readLog(result.run, home.path);
       expect(log).toContain("user: api.stripe.com");

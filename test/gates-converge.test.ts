@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Adapter, AdapterContext } from "../src/adapter";
 import { DEFAULT_SCRIPT, FakeAdapter, GATE_FAILING_SCRIPT, GATE_FIXING_SCRIPT } from "../src/adapters/fake";
@@ -7,7 +7,7 @@ import { GATE_FEEDBACK_LIMIT } from "../src/gates";
 import { run } from "../src/run";
 import type { RunFailure, RunResult } from "../src/run";
 import { createTempHome } from "./support/crisolHome";
-import { createFixtureRepo } from "./support/fixtureRepo";
+import { commitFiles, createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
 import { onlyRunId, readLog, readResult } from "./support/runState";
 
@@ -204,11 +204,7 @@ describe("ticket 02: Gates and converge", () => {
       const repo = createFixtureRepo();
       try {
         // The repo declares a Gate that would fail if it were ever run.
-        mkdirSync(path.join(repo.path, ".crisol"));
-        writeFileSync(
-          path.join(repo.path, ".crisol", "config.toml"),
-          'gates = ["exit 1"]\n',
-        );
+        commitFiles(repo.path, { ".crisol/config.toml": 'gates = ["exit 1"]\n' }, "chore: declare a Gate");
 
         const result = await runCli(
           ["run", "say hello", "--json", "--gate", "test -f CRISOL_RUN.md", "--adapter", "fake"],
@@ -291,11 +287,7 @@ describe("ticket 02: Gates and converge", () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
-        mkdirSync(path.join(repo.path, ".crisol"));
-        writeFileSync(
-          path.join(repo.path, ".crisol", "config.toml"),
-          'gates = ["test -f CRISOL_RUN.md"]\n',
-        );
+        commitFiles(repo.path, { ".crisol/config.toml": 'gates = ["test -f CRISOL_RUN.md"]\n' }, "chore: declare a Gate");
 
         const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
           cwd: repo.path,

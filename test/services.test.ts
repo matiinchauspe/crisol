@@ -6,12 +6,11 @@ import type { RunResult } from "../src/run";
 import { buildServiceRunArgs, parseServicesYaml, readRepoServices, splitCommandString, startServices } from "../src/services";
 import type { Adapter, AdapterContext } from "../src/adapter";
 import { createTempHome } from "./support/crisolHome";
-import { createFixtureRepo } from "./support/fixtureRepo";
+import { commitFiles, createFixtureRepo, headSha } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
 
 function writeServicesYaml(repoPath: string, yaml: string): void {
-  mkdirSync(path.join(repoPath, ".crisol"), { recursive: true });
-  writeFileSync(path.join(repoPath, ".crisol", "services.yml"), yaml);
+  commitFiles(repoPath, { ".crisol/services.yml": yaml }, "chore: declare Services");
 }
 
 function dockerInspect(name: string): string | undefined {
@@ -149,7 +148,7 @@ describe("parseServicesYaml: a restricted compose subset, no Docker needed", () 
   test("no services.yml at all: readRepoServices returns no services, no error", () => {
     const repo = createFixtureRepo();
     try {
-      expect(readRepoServices(repo.path)).toEqual([]);
+      expect(readRepoServices(repo.path, headSha(repo.path))).toEqual([]);
     } finally {
       repo.cleanup();
     }
