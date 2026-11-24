@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ExecResult, Sandbox, StopResult } from "../src/docker";
-import { checkCommitted, formatGateFeedback, resolveGates, runGates, snapshotInstallDirt } from "../src/gates";
+import { checkCommitted, formatGateFeedback, GATE_FEEDBACK_LIMIT, resolveGates, runGates, snapshotInstallDirt } from "../src/gates";
 import type { InstallDirt } from "../src/gates";
 import { parseGatesArray } from "../src/config";
 
@@ -129,11 +129,40 @@ describe("runGates (ticket 02)", () => {
   });
 });
 
-describe("formatGateFeedback (ticket 02: the resume message carries the failing command and output)", () => {
+describe("formatGateFeedback: the resume message carries the failing command and a bounded tail of its output", () => {
   test("the message contains both the cmd and the output", () => {
-    const message = formatGateFeedback({ cmd: "bun test", output: "1 test failed" });
+    const message = formatGateFeedback({ cmd: "bun test", output: "1 test failed" }, "9f496a56");
     expect(message).toContain("bun test");
     expect(message).toContain("1 test failed");
+  });
+
+  test("an output within the bound is carried whole, with no cut line", () => {
+    const output = "x".repeat(GATE_FEEDBACK_LIMIT);
+    const message = formatGateFeedback({ cmd: "bun test", output }, "9f496a56");
+    expect(message).toContain(output);
+    expect(message).not.toContain("cut");
+  });
+
+  test("an oversized output is cut to its tail, says so, and points at the Run's log", () => {
+    const lines = Array.from({ length: 100_000 }, (_, i) => `error ${i + 1}`);
+    const output = lines.join("\n");
+    const message = formatGateFeedback({ cmd: "bun run typecheck", output }, "9f496a56");
+
+    expect(output.length).toBeGreaterThan(GATE_FEEDBACK_LIMIT * 10);
+    expect(message.length).toBeLessThan(GATE_FEEDBACK_LIMIT + 1_000);
+    expect(message).toContain("bun run typecheck");
+    expect(message).toContain("error 100000");
+    expect(message).not.toContain("error 1\n");
+    expect(message).toContain("cut");
+    expect(message).toContain("crisol logs 9f496a56");
+  });
+
+  test("the cut tail starts on a line boundary", () => {
+    const output = Array.from({ length: 10_000 }, (_, i) => `line ${i + 1}`).join("\n");
+    const message = formatGateFeedback({ cmd: "cmd", output }, "9f496a56");
+    const tail = message.slice(message.lastIndexOf("\n\n") + 2);
+    expect(tail).toMatch(/^line \d+\n/);
+    expect(output.endsWith(tail)).toBe(true);
   });
 });
 

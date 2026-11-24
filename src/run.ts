@@ -1202,7 +1202,7 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
           status = "verified";
           return;
         }
-        feedback = formatGateFeedback(firstFailure);
+        feedback = formatGateFeedback(firstFailure, id);
         failure = `failing Gate "${firstFailure.cmd}"`;
         failureOutput = firstFailure.output;
       }
@@ -1214,7 +1214,9 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
         return;
       }
 
-      appendLog(logPath, `resuming with feedback for ${failure}`);
+      // The feedback may be cut to a tail; the cut notice points the agent here, so the log must
+      // hold the whole output.
+      appendLog(logPath, `resuming with feedback for ${failure}: ${failureOutput}`);
       await runTurn(adapter.resumeWithFeedback(ctx, feedback), clock);
       iterations += 1;
     }

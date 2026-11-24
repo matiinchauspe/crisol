@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Adapter, AdapterContext } from "../src/adapter";
 import { DEFAULT_SCRIPT, FakeAdapter, GATE_FAILING_SCRIPT, GATE_FIXING_SCRIPT } from "../src/adapters/fake";
+import { GATE_FEEDBACK_LIMIT } from "../src/gates";
 import { run } from "../src/run";
 import type { RunFailure, RunResult } from "../src/run";
 import { createTempHome } from "./support/crisolHome";
@@ -83,6 +84,47 @@ describe("ticket 02: Gates and converge", () => {
         expect(feedbacks).toHaveLength(1);
         expect(feedbacks[0]).toContain(GATE_CMD);
         expect(feedbacks[0]).toContain("content=oops");
+      } finally {
+        home.cleanup();
+        repo.cleanup();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "an oversized red Gate resumes with a bounded tail of its output, and the Run's log keeps all of it",
+    async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      try {
+        const { adapter, feedbacks } = recordingAdapter(
+          new FakeAdapter(GATE_FAILING_SCRIPT, GATE_FIXING_SCRIPT),
+        );
+        // `printf` is a builtin and brace expansion is bash's own, so the Gate needs no tool the
+        // Sandbox image may lack.
+        const loudGate = `printf 'error %d\\n' {1..20000} && ${GATE_CMD}`;
+
+        const result = await run({
+          task: "fix the gate",
+          cwd: repo.path,
+          home: home.path,
+          adapter,
+          gates: [loudGate],
+        });
+
+        const id = onlyRunId(home.path);
+        expect(result.status).toBe("verified");
+        expect(feedbacks).toHaveLength(1);
+        expect(feedbacks[0]!.length).toBeLessThan(GATE_FEEDBACK_LIMIT + 1_000);
+        expect(feedbacks[0]).toContain("content=oops");
+        expect(feedbacks[0]).not.toContain("error 1\n");
+        expect(feedbacks[0]).toContain(`crisol logs ${id}`);
+
+        const log = readLog(id, home.path);
+        expect(log).toContain("error 1\n");
+        expect(log).toContain("error 20000\n");
+        expect(log).toContain("content=oops");
       } finally {
         home.cleanup();
         repo.cleanup();

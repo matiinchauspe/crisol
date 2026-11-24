@@ -65,7 +65,8 @@ flowchart LR
 3. **Sandbox.** The Clone is bind-mounted into a container at the same absolute path. The Adapter
    does the work and commits there.
 4. **Converge.** Crisol — never the agent — decides done. It runs every declared Gate; any red one
-   resumes the same session with the failing command and its output, up to a ceiling (5 iterations
+   resumes the same session with the failing command and its output (its last 16,000 characters
+   when longer; the Run's log keeps all of it), up to a ceiling (5 iterations
    or 60 minutes). The Gates judge only what Fetch-back will bring back: while the Clone has
    uncommitted changes or `HEAD` is off the Run's branch, no Gate runs and the agent is told to
    commit, which spends an iteration like a red Gate. What the dependency install itself left dirty,
@@ -670,7 +671,8 @@ Continuation matches it.
 `reason: "ceiling"`) if it never gets there within the ceiling (5 iterations or 60 minutes by
 default — see [The ceiling](#the-ceiling)), and `unverified` when no Gate is declared anywhere —
 the CLI's `--gate`, else the repo's own `.crisol/config.toml`.
-A red Gate resumes the same agent session with its failing command and output; `iterations`
+A red Gate resumes the same agent session with its failing command and output — cut to its last
+16,000 characters when longer, with a line saying so; `crisol logs <run>` shows the whole of it. `iterations`
 counts how many attempts that took. A Run stopped by a signal or an error is `not-converged` too,
 with `reason` set to `interrupted: SIGINT` (or the signal it got) or `error: <message>`. The CLI
 reports either as an error (exit code 1, the message on stderr), and `--json` still prints the Run

@@ -5,7 +5,6 @@ export interface Gate {
   ok: boolean;
 }
 
-/** What `converge`'s resume message is built from. */
 export interface GateFailure {
   cmd: string;
   output: string;
@@ -134,9 +133,28 @@ export async function checkCommitted(
   ].join("\n\n");
 }
 
-/** Exported so a test can assert on the exact shape without re-deriving it. */
-export function formatGateFeedback(failure: GateFailure): string {
-  return `Gate failed: ${failure.cmd}\n\n${failure.output}`;
+/**
+ * In characters. A `tsc` or test runner can print megabytes, past the model's context, and a turn
+ * that fails on its prompt ends the Run instead of iterating on a fixable Gate. The tail is kept
+ * because that is where a compiler or test runner puts its summary.
+ */
+export const GATE_FEEDBACK_LIMIT = 16_000;
+
+export function formatGateFeedback(failure: GateFailure, runId: string): string {
+  const header = `Gate failed: ${failure.cmd}`;
+  if (failure.output.length <= GATE_FEEDBACK_LIMIT) return `${header}\n\n${failure.output}`;
+
+  const start = failure.output.length - GATE_FEEDBACK_LIMIT;
+  let tail = failure.output.slice(start);
+  const lineStart = tail.indexOf("\n");
+  if (failure.output[start - 1] !== "\n" && lineStart !== -1 && lineStart < tail.length - 1) {
+    tail = tail.slice(lineStart + 1);
+  }
+  const cut =
+    `[Output cut to its last ${tail.length} of ${failure.output.length} characters. ` +
+    `The full output is in this Run's log (\`crisol logs ${runId}\` on the host); ` +
+    `running the Gate again in the Clone prints it too.]`;
+  return `${header}\n\n${cut}\n\n${tail}`;
 }
 
 /**
