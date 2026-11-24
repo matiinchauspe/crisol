@@ -779,6 +779,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0033](docs/adr/0033-gates-run-only-on-a-clean-clone-with-head-on-the-branch.md): before every round of Gates, the Clone must be clean (untracked files included) with `HEAD` on `refs/heads/<branch>`, checked inside the Sandbox and raced against the wall clock; otherwise no Gate runs and the agent is resumed with that as feedback, spending an iteration; a Run with no Gates is not checked; paths the Run's first dependency install left dirty are excused while their content is unchanged, from a snapshot kept in the Run dir so a Continuation never excuses its previous round's uncommitted work
 - [0034](docs/adr/0034-service-names-bypass-the-proxy-and-a-service-that-exits-fails-the-run-at-once.md): every declared Service name joins `NO_PROXY`, so a proxy-honouring tool reaches it instead of being refused by tinyproxy (amends 0012); Service containers run without `--rm`, and the health wait reads `State.Status` first, so a Service that exits fails the Run at once with its exit code and last 20 log lines (amends 0015)
 - [0035](docs/adr/0035-the-agent-layer-builds-on-alpine-debian-or-ubuntu-and-takes-uid-1000.md): the Agent layer installs with `apk` or `apt-get`, picked at build time, and an image with neither is refused before `docker build` by a probe of the Project layer image; an account already holding uid 1000 is removed before `agent` is created; the layer opens with `USER root`; Tenaza's asset is picked by libc as well as arch (amends 0008 and 0028)
+- [0036](docs/adr/0036-crisol-is-its-own-homebrew-tap.md): Crisol is its own Homebrew tap, `Formula/crisol.rb` in this repo, installed by full name (`brew install matiinchauspe/crisol/crisol`) rather than through a separate `matiinchauspe/tap` as the spec had it; the release workflow fills the formula on `main` once the release publishes, and builds with the Bun pinned in `.bun-version`
 
 ## Development
 
@@ -801,9 +802,12 @@ The suite names `--adapter fake`, the scripted stand-in, on every Run it starts 
 Pushing a `v*` tag runs `.github/workflows/release.yml`: it checks the tag against
 `package.json`'s `version`, compiles both macOS binaries and publishes them with a
 `checksums.txt` as a GitHub Release. It does not run `bun test`, since hosted runners have no
-Docker engine, so run the suite on the commit before tagging it. This repo is its own Homebrew
-tap: once the release is out, set `version` and the two `sha256` values in `Formula/crisol.rb`
-from `checksums.txt` and push that to `main`.
+Docker engine, so run the suite on the commit before tagging it. It builds with the Bun version
+in `.bun-version` and smoke-tests both binaries, the x64 one under Rosetta. This repo is its own
+Homebrew tap ([ADR 0036](docs/adr/0036-crisol-is-its-own-homebrew-tap.md)): once the release is
+out, the workflow writes `version` and the two `sha256` values from `checksums.txt` into
+`Formula/crisol.rb` and pushes that to `main`, then fails if the formula there still holds a
+placeholder.
 
 ## License
 
