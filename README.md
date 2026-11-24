@@ -74,8 +74,9 @@ flowchart LR
    anywhere is `unverified`; hitting the ceiling is `not-converged`.
 5. **Teardown and Fetch-back.** The container is removed, and the branch is fetched back into
    your repo. If the Run fails, Fetch-back still runs, so no work is lost. If it fails too, you
-   see both errors. Ctrl+C, `kill` and closing the terminal stop a Run the same way: the
-   container is removed and the branch still comes back with the commits made so far. Only
+   see both errors. Ctrl+C, `kill` and closing the terminal stop a Run the same way, in any
+   step from the Services' start to the last Gate: the container is removed and the branch still
+   comes back with the commits made so far. Only
    `kill -9` skips this, and `crisol recover` brings that branch back.
 
 ## Requirements
@@ -636,9 +637,10 @@ timeout_minutes = 90
 An invalid value (anything other than a positive integer) in either the flag or the config file
 fails the Run before anything happens, naming the flag — or the config file's path — and the key.
 
-The wall clock starts before the agent's first turn and ends the Run on time whatever is running —
-a turn that never returns, a Gate that never exits, a Run with no Gates at all: the Sandbox is
-removed, which ends what ran in it, and the Run is `not-converged` with `reason: "ceiling"`.
+The wall clock starts once the Run holds its Slot, so setup spends it too, and ends the Run on time
+whatever is running — a dependency install or a Service healthcheck that never finishes, a turn
+that never returns, a Gate that never exits, a Run with no Gates at all: the Sandbox is removed,
+which ends what ran in it, and the Run is `not-converged` with `reason: "ceiling"`.
 
 ### The Run result
 
@@ -784,6 +786,7 @@ Crisol uses a small, strict vocabulary: **Run**, **Task**, **Sandbox**, **Clone*
 - [0035](docs/adr/0035-the-agent-layer-builds-on-alpine-debian-or-ubuntu-and-takes-uid-1000.md): the Agent layer installs with `apk` or `apt-get`, picked at build time, and an image with neither is refused before `docker build` by a probe of the Project layer image; an account already holding uid 1000 is removed before `agent` is created; the layer opens with `USER root`; Tenaza's asset is picked by libc as well as arch (amends 0008 and 0028)
 - [0036](docs/adr/0036-crisol-is-its-own-homebrew-tap.md): Crisol is its own Homebrew tap, `Formula/crisol.rb` in this repo, installed by full name (`brew install matiinchauspe/crisol/crisol`) rather than through a separate `matiinchauspe/tap` as the spec had it; the release workflow fills the formula on `main` once the release publishes, and builds with the Bun pinned in `.bun-version`
 - [0037](docs/adr/0037-the-sandbox-writes-tenaza-sessions-only-through-a-per-run-sink-the-host-relays.md): Tenaza's `state/` is mounted read-only and only `state/relay-requested/` writable; the Sandbox's session logs go to a per-Run sink mounted over `state/sessions`, which the host relays line for line, refusing a session the host already holds and any line that names another session, carries a host-only event, starts outside the Clone or claims a parent the Run did not start; `tenaza run` refusing host-side execution under `~/.crisol/runs/` is owed to the tenaza repo (amends 0028)
+- [0038](docs/adr/0038-the-ceiling-and-a-signal-reach-every-step-before-the-first-turn.md): the wall clock starts once the Run holds its Slot, so the same budget bounds the Services' start, their health wait and the dependency install, which gets no limit of its own; the install races the interruption and the clock, the health wait checks both on every poll, and Service starts check between containers, never abandoning a `docker run` mid-create (amends 0030)
 
 ## Development
 
