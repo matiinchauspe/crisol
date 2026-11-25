@@ -5,17 +5,17 @@
 class Crisol < Formula
   desc "Run one Task in a container, unattended, and get back exactly one branch"
   homepage "https://github.com/matiinchauspe/crisol"
-  version "0.2.0"
+  version "0.2.1"
   license "MIT"
 
   depends_on :macos
 
   if Hardware::CPU.arm?
     url "https://github.com/matiinchauspe/crisol/releases/download/v#{version}/crisol-darwin-arm64"
-    sha256 "2336d3ee437357597bc1b1b1c2d8962a9c6fb73cefdf146e4fc1674d82567ae9"
+    sha256 "a23c7db2643cd68f3d058f8f199743221086ac7a1111fd0e851e89852b5b21f0"
   else
     url "https://github.com/matiinchauspe/crisol/releases/download/v#{version}/crisol-darwin-x64"
-    sha256 "1c4f8a4697f2234a9e77bb7aef7956bbbf1fecc20f4d0c2e900e0246d8b3f3a0"
+    sha256 "7b7665aa631b0317cc0a95bd96aba93d7a2ab365eddf17c1e8ad11b556a5dd2b"
   end
 
   def install
