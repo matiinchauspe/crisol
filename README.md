@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.1.0-2dd4bf" alt="version 0.1.0">
+  <img src="https://img.shields.io/badge/version-0.2.0-2dd4bf" alt="version 0.2.0">
   <img src="https://img.shields.io/badge/platform-macOS-8b93a0" alt="platform macOS">
   <img src="https://img.shields.io/badge/runtime-Bun-f9f1e1" alt="runtime Bun">
   <img src="https://img.shields.io/badge/license-MIT-34d399" alt="license MIT">
