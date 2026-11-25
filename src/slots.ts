@@ -20,11 +20,14 @@ export interface SlotLock {
   tryLock(path: string, options?: { create?: boolean }): HeldLock | undefined;
 }
 
-// Darwin's <sys/fcntl.h> and <sys/errno.h>, checked against the SDK headers.
+// Darwin's <sys/fcntl.h> and <sys/errno.h>, checked against the SDK headers; Linux's
+// <sys/file.h> flock constants are the same, only EWOULDBLOCK differs (SPIKE: Linux values
+// from <asm-generic/errno-base.h>, not yet run on Linux).
 const LOCK_EX = 0x02;
 const LOCK_NB = 0x04;
 const EINTR = 4;
-const EWOULDBLOCK = 35;
+const IS_LINUX = process.platform === "linux";
+const EWOULDBLOCK = IS_LINUX ? 11 : 35;
 
 type Libc = {
   flock(fd: number, operation: number): number;
@@ -37,8 +40,20 @@ let libc: Libc | undefined;
 // libSystem only exists on macOS.
 function loadLibc(): Libc {
   if (libc) return libc;
+  const flockSymbol = { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } as const;
+  if (IS_LINUX) {
+    const { symbols } = dlopen("libc.so.6", {
+      flock: flockSymbol,
+      __errno_location: { args: [], returns: FFIType.ptr },
+    });
+    libc = {
+      flock: (fd, operation) => symbols.flock(fd, operation),
+      errno: () => read.i32(symbols.__errno_location()!, 0),
+    };
+    return libc;
+  }
   const { symbols } = dlopen("/usr/lib/libSystem.B.dylib", {
-    flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    flock: flockSymbol,
     __error: { args: [], returns: FFIType.ptr },
   });
   libc = {

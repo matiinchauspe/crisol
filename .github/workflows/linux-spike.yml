@@ -1,0 +1,82 @@
+# THROWAWAY SPIKE: does Crisol's Sandbox work on a native-Linux Docker runner? Fake adapter only.
+name: Linux spike
+
+on:
+  push:
+    branches: [linux-ci-spike]
+  workflow_dispatch:
+
+jobs:
+  spike:
+    name: fake Run on ubuntu-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CRISOL_HOME: ${{ runner.temp }}/crisol-home
+      SCRATCH: ${{ runner.temp }}/scratch-repo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - run: bun install --frozen-lockfile
+
+      - name: Diagnostics
+        run: |
+          uname -a
+          id
+          docker version
+          docker info
+
+      - name: Scratch repo
+        run: |
+          set -euo pipefail
+          git init -b main "$SCRATCH"
+          cd "$SCRATCH"
+          git config user.name "spike"
+          git config user.email "spike@example.com"
+          echo hello > README.md
+          git add README.md
+          git commit -m "chore: initial commit"
+
+      - name: Run 1 (fake, allowlist, no Gate) expects unverified
+        run: |
+          set -uo pipefail
+          cd "$SCRATCH"
+          bun run "$GITHUB_WORKSPACE/src/cli.ts" run --adapter fake --network allowlist "x" --json > "$RUNNER_TEMP/run1.json"
+          echo "exit code: $?"
+          cat "$RUNNER_TEMP/run1.json"
+          test "$(jq -r .status "$RUNNER_TEMP/run1.json")" = "unverified"
+
+      - name: Run 2 (fake, allowlist, Gate "true") expects verified
+        run: |
+          set -uo pipefail
+          cd "$SCRATCH"
+          bun run "$GITHUB_WORKSPACE/src/cli.ts" run --adapter fake --network allowlist --gate "true" "x" --json > "$RUNNER_TEMP/run2.json"
+          echo "exit code: $?"
+          cat "$RUNNER_TEMP/run2.json"
+          test "$(jq -r .status "$RUNNER_TEMP/run2.json")" = "verified"
+
+      - name: Evidence (always)
+        if: always()
+        run: |
+          echo "== uid/ownership of Run dirs =="
+          id -u
+          ls -lnR "$CRISOL_HOME/runs" 2>&1 | head -80 || true
+          for f in "$CRISOL_HOME"/runs/*/result.json "$CRISOL_HOME"/runs/*/log; do
+            [ -e "$f" ] || continue
+            echo "=== $f ==="
+            cat "$f"
+          done
+          echo "== docker ps -a =="
+          docker ps -a
+          echo "== docker network ls =="
+          docker network ls
+          echo "== crisol/* branches in scratch repo =="
+          git -C "$SCRATCH" branch --list 'crisol/*' -v || true
+
+      - name: Full bun test suite (extra signal only)
+        continue-on-error: true
+        run: bun test

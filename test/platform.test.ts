@@ -13,7 +13,7 @@ describe("non-macOS platform (ticket 01)", () => {
       const result = await runCli(["run", "do nothing", "--json"], {
         cwd: repo.path,
         home: home.path,
-        env: { CRISOL_PLATFORM: "linux" },
+        env: { CRISOL_PLATFORM: "win32" },
       });
 
       expect(result.exitCode).toBe(1);
@@ -50,9 +50,9 @@ describe("CRISOL_PLATFORM can only force a failure (theoretical)", () => {
 
   test("a non-darwin CRISOL_PLATFORM override is still honoured (the test seam itself)", () => {
     const originalEnv = process.env.CRISOL_PLATFORM;
-    process.env.CRISOL_PLATFORM = "linux";
+    process.env.CRISOL_PLATFORM = "win32";
     try {
-      expect(currentPlatform()).toBe("linux");
+      expect(currentPlatform()).toBe("win32");
     } finally {
       if (originalEnv === undefined) {
         delete process.env.CRISOL_PLATFORM;
