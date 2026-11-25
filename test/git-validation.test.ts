@@ -16,11 +16,8 @@ import {
 import { createFixtureRepo } from "./support/fixtureRepo";
 
 /**
- * W3 (branch collision) + W5 (identity validated with a plain message) at
- * the git.ts layer, directly — these are pure, fast checks against a real
- * repo, with no Docker involved, so they get their own tight loop before
- * the slower end-to-end `run()`/CLI tests exercise them through the whole
- * Run.
+ * Pure, fast checks against a real repo, with no Docker involved, so they get their
+ * own tight loop before the slower end-to-end `run()`/CLI tests exercise them.
  */
 describe("git branch-name validation (W3)", () => {
   test("isValidBranchName rejects a syntactically invalid branch name", () => {
@@ -43,9 +40,8 @@ describe("git branch-name validation (W3)", () => {
 describe("readIdentity (W5: a plain message when identity is missing)", () => {
   test("a repo with no configured user.name/user.email throws a plain, readable message", () => {
     const repo = createFixtureRepo();
-    // Unsetting the LOCAL config alone isn't enough on a dev machine — git
-    // falls back to the ambient global `~/.gitconfig`. Isolate from it too,
-    // so this reproduces a genuinely unconfigured identity.
+    // Unsetting the LOCAL config isn't enough on a dev machine — git falls back to the
+    // ambient global `~/.gitconfig`. Isolate from that too.
     const originalGlobal = process.env.GIT_CONFIG_GLOBAL;
     const originalSystem = process.env.GIT_CONFIG_SYSTEM;
     try {
@@ -80,22 +76,16 @@ describe("readIdentity (W5: a plain message when identity is missing)", () => {
 });
 
 /**
- * CRITICAL (round 2 review, confirmed by reproduction): `git fetch <clone>
- * name:name` is unqualified, and git's own ref-lookup order checks
- * `refs/tags/` BEFORE `refs/heads/` for a short, ambiguous name. Reproduced
- * in scratchpad: with a tag AND a branch both named "dup" in the Clone, the
- * old refspec fetched the TAG's (old) object and wrote it into the host's
- * `refs/heads/dup` — exit 0, Run's work silently lost. Qualifying BOTH
- * sides as `refs/heads/<name>` pins the fetch to the branch regardless of
- * what else shares that name.
+ * Reproduced in scratchpad: with a tag AND a branch both named "dup", the old
+ * unqualified refspec fetched the TAG's object into the host's `refs/heads/dup` —
+ * exit 0, Run's work silently lost.
  */
 describe("fetchBack resolves the branch ref even when a same-named tag exists (CRITICAL finding 1)", () => {
   test("the host ends up with the Clone's branch sha, never the tag's", () => {
     const repo = createFixtureRepo(); // acts as the host
     const clonePath = mkdtempSync(path.join(tmpdir(), "crisol-fetchback-clone-"));
     try {
-      // A tag "dup" on host HEAD — exactly the ambiguity that made the old
-      // unqualified refspec resolve to the wrong object.
+      // A tag "dup" on host HEAD — exactly the ambiguity that broke the old unqualified refspec.
       Bun.spawnSync(["git", "-C", repo.path, "tag", "dup"]);
 
       const baseSha = Bun.spawnSync(["git", "-C", repo.path, "rev-parse", "HEAD"], {
@@ -117,7 +107,7 @@ describe("fetchBack resolves the branch ref even when a same-named tag exists (C
         .stdout.toString("utf8")
         .trim();
 
-      fetchBack(repo.path, clonePath, "dup");
+      fetchBack(repo.path, clonePath, "dup", null);
 
       const hostBranchSha = Bun.spawnSync(
         ["git", "-C", repo.path, "rev-parse", "refs/heads/dup"],
@@ -134,13 +124,7 @@ describe("fetchBack resolves the branch ref even when a same-named tag exists (C
 
 });
 
-/**
- * finding 1c: Fetch-back must verify, after the fetch, that the host ended
- * up at the Clone's own sha — and fail loudly otherwise, rather than ever
- * reporting success on a lie. `assertFetchedBack` is the guard `fetchBack`
- * runs after every real fetch; tested directly here since forcing git's
- * OWN fetch to misreport success is not something a test can stage.
- */
+/** Tested directly here, since forcing git's own `fetch` to misreport success isn't something a test can stage. */
 describe("assertFetchedBack (finding 1c: loud failure on a sha mismatch)", () => {
   test("throws naming both shas when they differ", () => {
     expect(() => assertFetchedBack("refs/heads/x", "aaa111", "bbb222")).toThrow(/aaa111/);
@@ -165,14 +149,7 @@ describe("tagExists (finding 1: pre-check against tag ambiguity)", () => {
   });
 });
 
-/**
- * WARNING (round 2, confirmed): `--name crisol` while `crisol/<id>` exists
- * (or the reverse) is a git ref directory/file collision, only caught by
- * git itself at Fetch-back time (`cannot lock ref 'refs/heads/crisol':
- * 'refs/heads/crisol/existing' exists`) — by which point the whole Run
- * (Clone, Sandbox, Adapter) has already run for nothing. `hasPrefixCollision`
- * catches it before any side effect.
- */
+/** A git ref directory/file collision, only caught by git itself at Fetch-back time otherwise — by which point the whole Run has already run for nothing. */
 describe("hasPrefixCollision (finding 2: D/F ref collision caught pre-side-effect)", () => {
   test("true when the candidate name is an existing branch's directory prefix", () => {
     const repo = createFixtureRepo();

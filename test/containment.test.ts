@@ -4,19 +4,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { run } from "../src/run";
 import { FakeAdapter } from "../src/adapters/fake";
-import { ensureBaseImage, startSandbox } from "../src/docker";
+import { ensureDefaultProjectImage, startSandbox } from "../src/docker";
 import { createTempHome } from "./support/crisolHome";
 import { createFixtureRepo } from "./support/fixtureRepo";
 import { runCli } from "./support/cli";
 
 /**
- * W7: containment tests must prove reality, not trust Crisol's own
- * bookkeeping.
- * (a) from INSIDE the Sandbox, the host fixture repo's own path must not
- *     exist, and no host path besides the Clone (plus whatever the Adapter
- *     declared) is ever mounted.
- * (b) a before/after snapshot of the host's `git for-each-ref` must show
- *     the ONLY difference is the added `refs/heads/<name>`.
+ * Containment tests must prove reality, not trust Crisol's own bookkeeping.
+ * (a) from INSIDE the Sandbox, the host fixture repo's own path must not exist.
+ * (b) a before/after snapshot of the host's refs must show the ONLY difference is
+ *     the added branch.
  */
 describe("Sandbox containment proven from the inside (W7a)", () => {
   test("the host repo's own absolute path is not visible inside the Sandbox", async () => {
@@ -61,7 +58,7 @@ describe("Host ref snapshot before/after a Run (W7b)", () => {
         .split("\n")
         .sort();
 
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -87,17 +84,14 @@ describe("Host ref snapshot before/after a Run (W7b)", () => {
 });
 
 /**
- * finding 3 (round-2 review): the existing containment probes above are
- * VACUOUS against a real leak — adding, say, `-v $HOME:$HOME` to `docker
- * run` would still pass both of them (neither probe checks the actual
- * mount SET, only whether one specific unrelated host path happens to be
- * invisible, or whether host refs changed). This asserts the exact mount
- * set docker itself reports via `docker inspect`, compared to exactly what
- * was declared — nothing more, nothing less.
+ * The containment probes above are VACUOUS against a real leak — adding, say,
+ * `-v $HOME:$HOME` to `docker run` would still pass both of them, since neither checks
+ * the actual mount SET. This asserts the exact mount set docker itself reports, compared
+ * to exactly what was declared.
  */
 describe("Sandbox mounts are exactly what was declared, nothing extra (finding 3)", () => {
   test("docker inspect's own Mounts contain exactly the Clone's bind mount, no more", async () => {
-    const image = await ensureBaseImage();
+    const image = await ensureDefaultProjectImage();
     const id = `mounts-exact-${Date.now()}`;
     const mountPath = mkdtempSync(path.join(tmpdir(), "crisol-mount-probe-"));
     const sandbox = await startSandbox({ image, mountPath, env: {}, id });

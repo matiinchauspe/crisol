@@ -27,7 +27,7 @@ describe("--base <annotated tag> resolves and checks out the TARGET commit (tag)
       // An annotated tag's OWN object sha differs from the commit it targets.
       expect(tagSha).not.toBe(commitSha);
 
-      const result = await runCli(["run", "say hello", "--json", "--base", "v1.0"], {
+      const result = await runCli(["run", "say hello", "--json", "--base", "v1.0", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -52,13 +52,9 @@ describe("--base <annotated tag> resolves and checks out the TARGET commit (tag)
 });
 
 /**
- * Round-4 review, finding C1 (the reverse case): the old `isReachableFromAnyRef`
- * only matched refs under `refs/` — a brand-new commit made on a DETACHED
- * HEAD has no branch or tag naming it yet, so that check wrongly refused the
- * default base (`HEAD`) with the "may have been force-deleted or rewritten"
- * message, even though `cloneLocal`'s clone actually DOES carry it: HEAD
- * itself (detached or not) is one of the refs git's own clone negotiation
- * walks. Fixed by also checking ancestry against HEAD directly.
+ * A commit on a DETACHED HEAD has no branch or tag naming it yet, so the old
+ * reachability check wrongly refused the default base even though the Clone actually
+ * carries it via HEAD. Regression test for checking ancestry against HEAD directly.
  */
 describe("detached HEAD with a new commit, no --base (round-4 finding C1)", () => {
   test("the default base (HEAD) is accepted end to end — the Clone carries it via HEAD even detached", async () => {
@@ -75,7 +71,7 @@ describe("detached HEAD with a new commit, no --base (round-4 finding C1)", () =
         .stdout.toString("utf8")
         .trim();
 
-      const result = await runCli(["run", "say hello", "--json"], {
+      const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
         cwd: repo.path,
         home: home.path,
       });
@@ -85,9 +81,8 @@ describe("detached HEAD with a new commit, no --base (round-4 finding C1)", () =
       const payload = JSON.parse(result.stdout);
       expect(payload.base).toBe(`HEAD@${detachedSha}`);
 
-      // The branch's parent is exactly the detached commit the host was
-      // at — proving the Clone actually carried it via HEAD, not merely
-      // that the pre-check let it through.
+      // Proves the Clone actually carried the commit via HEAD, not merely that the
+      // pre-check let it through.
       const parentSha = Bun.spawnSync(
         ["git", "-C", repo.path, "log", "--format=%h", "-1", `${payload.branch}~1`],
         { stdout: "pipe" },

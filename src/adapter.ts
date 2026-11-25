@@ -1,49 +1,85 @@
 import type { MountSpec, Sandbox } from "./docker";
 
-/**
- * Everything the Sandbox needs BEFORE it starts — consumed ONCE by
- * `startSandbox`, never by `exec` after the container is already running.
- * Reshaped from the original post-start `authenticate`/`wireHooks` calls
- * (see docs/adr/0001, superseded in part by docs/adr/0005) because the
- * token needs to be Sandbox env at `docker run` time (ticket 08), Tenaza's
- * mounts need to exist at `docker run` time (ticket 15), and (a later
- * ticket) the Agent layer image will need to be chosen at `docker run`
- * time too (tickets 12/14) — none of that can be bolted on after the
- * container is already running. This declaration has no `image` field YET
- * (round-2 review, cheap extra): until ticket 12's two-layer build exists
- * to define one, `run.ts` always runs Crisol's own base image.
- *
- * The spec's five Adapter points stay identifiable even though two of them
- * no longer run against a live Sandbox: `authenticate` and `wireHooks`
- * CONTRIBUTE to this declaration's fields instead.
- */
+/** Consumed at `docker run`: a running container cannot gain env or bind mounts. */
 export interface PreStartDeclaration {
-  /** authenticate (spec q5 / ticket 08): secret env var NAMES the agent needs — e.g. `CLAUDE_CODE_OAUTH_TOKEN` for the real Adapter, none for the fake one. NEVER values: `startSandbox` passes these as a bare `-e NAME` and reads the value from the spawned docker process's own env, so a secret's value never lands on the docker argv. */
+  /** Names only: a bare `-e NAME` takes the value from docker's own env, so it never lands on the argv. */
   envNames: readonly string[];
-  /** wireHooks (spec "Tenaza inside" / ticket 15): the mounts that wire the agent's hooks to Tenaza (`~/.tenaza/config:ro`, `~/.tenaza/state:rw`) — empty until Tenaza rides inside. */
   mounts: readonly MountSpec[];
-  // No `image` field here (round-2 review, cheap extra): the Agent layer
-  // image an Adapter would contribute (tickets 12/14/17) is deferred until
-  // ticket 12's two-layer build exists to define it. `run.ts` always uses
-  // `ensureBaseImage()` until then.
+  /** A closure because the build is async and `declarePreStart` is not. Absent, the Run uses the Project layer directly. */
+  ensureImage?: () => Promise<string>;
+  /** Why nothing in the Sandbox guards reserved actions. A scripted stand-in attempts none, so it leaves this unset. */
+  unguarded?: string;
+  /**
+   * A dir inside the Sandbox the agent's tools write events into. Crisol mounts a dir of the Run's
+   * over it and calls `start` once the Sandbox runs; `stop` must carry the last writes before it returns.
+   */
+  eventSink?: {
+    containerPath: string;
+    start(
+      paths: { sinkDir: string; recordPath: string; repoPath: string },
+      onRefused: (refusal: { session: string; reason: string }) => void,
+    ): { stop(): void };
+  };
 }
 
 export interface AdapterContext {
-  /** The Run's Sandbox — already started, the Clone already bind-mounted at `repoPath`, and everything the Adapter declared pre-start already wired in. */
   sandbox: Sandbox;
-  /** The Clone's absolute path, identical inside and outside the Sandbox (spec q6). */
+  /** Identical path inside and outside the Sandbox. */
   repoPath: string;
-  /** The Task text. Preamble prepending (spec, "Input and output" q9) is a later ticket. */
-  task: string;
+  /** The host repo's git root, which the Clone was cut from. */
+  hostRepoPath: string;
+  /** The full prompt — Preamble, Task and Context — to send the agent over stdin, never argv. */
+  prompt: string;
+  /** `~/.crisol/instructions.md`, when present; the global `~/.claude/CLAUDE.md` never reaches a Run. */
+  instructions?: string;
 }
 
 export interface Adapter {
-  /** Declares env names and mounts — read by `startSandbox` BEFORE `docker run` ever executes. */
-  declarePreStart(): PreStartDeclaration;
-  /** Launches the agent unattended inside the already-started Sandbox and lets it work (and, for a real Adapter, commit). */
-  launch(ctx: AdapterContext): Promise<void>;
-  /** True once the agent has finished its turn. */
+  /**
+   * Identity recorded on the Run result and matched on a Continuation; a Run refuses an Adapter
+   * that implements `continueSession` without one.
+   */
+  readonly name?: string;
+  /** `projectImage` is the resolved Project layer's tag; the Agent layer, if any, builds `FROM` it. */
+  declarePreStart(projectImage: string): PreStartDeclaration;
+  /** Replaces Crisol's default wording. It must name every Gate it is given, or the Run fails before launch. */
+  preamble?(gates: readonly string[]): string;
+  /**
+   * Unattended: no human is in the loop to answer a prompt. Resolves with the agent's last message
+   * of the turn, verbatim, or with nothing when the Adapter cannot read one.
+   */
+  launch(ctx: AdapterContext): Promise<string | void>;
   reportCompletion(ctx: AdapterContext): Promise<boolean>;
-  /** Continues the SAME agent session with feedback (a failing Gate's output) — not exercised until Gates exist (ticket 01 has none). */
-  resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<void>;
+  /** Continues the SAME agent session — never a fresh one. Resolves as `launch` does. */
+  resumeWithFeedback(ctx: AdapterContext, feedback: string): Promise<string | void>;
+  /**
+   * Where inside the Sandbox the agent keeps its sessions. Crisol mounts a dir of the Run's over
+   * it, so the session outlives the Sandbox and a Continuation finds it again.
+   */
+  readonly sessionStore?: string;
+  /** The session the last turn ran in, which Crisol keeps in the Run dir for a Continuation. */
+  sessionId?(): string | undefined;
+  /**
+   * A Continuation's first turn: resumes `sessionId`, kept from an earlier Sandbox, with a new
+   * request, then resumes it on a red Gate as usual. An Adapter without it cannot continue a Run.
+   * Resolves as `launch` does.
+   */
+  continueSession?(ctx: AdapterContext, sessionId: string, request: string): Promise<string | void>;
+}
+
+/**
+ * Thrown from any turn (`launch`, `resumeWithFeedback`, `continueSession`) when the agent CLI itself
+ * refuses to proceed — a rate limit, an exhausted quota, or a failed authentication — never a red
+ * Gate. Only the Adapter
+ * can tell the two apart, so classifying one is its job: `category` becomes the Run result's
+ * `reason: "provider: <category>"`, and the Run stops without spending another iteration on it.
+ */
+export class ProviderFailureError extends Error {
+  constructor(
+    readonly category: string,
+    message: string = category,
+  ) {
+    super(message);
+    this.name = "ProviderFailureError";
+  }
 }

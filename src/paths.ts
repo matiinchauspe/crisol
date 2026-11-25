@@ -2,16 +2,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 /**
- * Every path Crisol reads or writes resolves from here — the ONE place
- * CRISOL_HOME is read, so every caller agrees on where Run state lives
- * (spec, "State and cleanup" q13: `~/.crisol/runs/<id>/{repo/, log,
- * result.json}`).
- *
- * An empty-string `CRISOL_HOME` (the test CLI helper's own default when no
- * home is given) is treated the same as unset, never as "resolve everything
- * relative to cwd" — and whatever IS configured is `path.resolve`d, so a
- * relative value never silently scatters Run state under whatever directory
- * happened to be the current one.
+ * The only place CRISOL_HOME is read, so every caller agrees where Run state lives. An empty one
+ * counts as unset, and a relative one is resolved, so state never scatters under the cwd.
  */
 export function crisolHome(): string {
   const configured = process.env.CRISOL_HOME;
@@ -25,20 +17,111 @@ export function runDir(id: string, home: string = crisolHome()): string {
   return path.join(home, "runs", id);
 }
 
-/** The parent of every Run dir — created once (not per-id) before a run id is reserved (spec, "State and cleanup" q13; ticket 01 fix W2). */
+/** Created once, not per-id — must exist before a run id is reserved. */
 export function runsRoot(home: string = crisolHome()): string {
   return path.join(home, "runs");
 }
 
-/** The Clone's own location — bind-mounted into the Sandbox at this SAME absolute path (spec q6). */
+/** A running total, sibling to `runs/` so nothing mistakes it for a run id. */
+export function runsSizeTrackerPath(home: string = crisolHome()): string {
+  return path.join(home, "runs-size");
+}
+
+/** Bind-mounted into the Sandbox at this same absolute path. */
 export function runRepoPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "repo");
+}
+
+export function slotsDir(home: string = crisolHome()): string {
+  return path.join(home, "slots");
+}
+
+export function userAllowlistPath(home: string = crisolHome()): string {
+  return path.join(home, "network");
+}
+
+/** Relative to the repo root, where git names it in a diff. */
+export const REPO_ALLOWLIST_FILE = ".crisol/network";
+
+export function repoAllowlistPath(hostRepoPath: string): string {
+  return path.join(hostRepoPath, REPO_ALLOWLIST_FILE);
+}
+
+/** Relative to the repo root, with git's own separators (they are passed to `git cat-file`). */
+export const REPO_CONFIG_FILE = ".crisol/config.toml";
+export const REPO_SERVICES_FILE = ".crisol/services.yml";
+export const REPO_DOCKERFILE_FILE = ".crisol/Dockerfile";
+
+export function userPromptPath(name: string, home: string = crisolHome()): string {
+  return path.join(home, "prompts", `${name}.md`);
+}
+
+export function repoPromptFile(name: string): string {
+  return `.crisol/prompts/${name}.md`;
+}
+
+export function runNetworkDir(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "network");
+}
+
+export function runProxyConfPath(id: string, home: string = crisolHome()): string {
+  return path.join(runNetworkDir(id, home), "tinyproxy.conf");
+}
+
+export function runProxyFilterPath(id: string, home: string = crisolHome()): string {
+  return path.join(runNetworkDir(id, home), "filter");
+}
+
+export function slotPath(index: number, home: string = crisolHome()): string {
+  return path.join(slotsDir(home), `${index}.lock`);
 }
 
 export function runLogPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "log");
 }
 
+/** Held by a live Run for its whole life; `crisol recover` reads a Run it can lock as dead. */
+export function runLockPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "lock");
+}
+
+/** The pid of the process that owns the Run, so a detached Run can be stopped with `kill`. */
+export function runPidPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "pid");
+}
+
+/** What the agent received, written before the Run starts; a detached Run's process reads it from here. */
+export function runPromptPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "prompt");
+}
+
 export function runResultPath(id: string, home: string = crisolHome()): string {
   return path.join(runDir(id, home), "result.json");
+}
+
+/** Mounted over the Adapter's `sessionStore`, so the agent's session outlives its Sandbox. */
+export function runSessionStorePath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "sessions");
+}
+
+/** Mounted over the Adapter's `eventSink`; the host reads it only through the sink's own relay. */
+export function runTenazaSinkPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "tenaza-sessions");
+}
+
+export function runTenazaRecordPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "tenaza-relayed");
+}
+
+export function runSessionIdPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "session-id");
+}
+
+export function runInstallDirtPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "install-dirt.json");
+}
+
+/** So a Continuation given no `--gate` verifies against the Gates its Run had. */
+export function runGatesPath(id: string, home: string = crisolHome()): string {
+  return path.join(runDir(id, home), "gates.json");
 }

@@ -7,7 +7,7 @@ export interface TempHome {
   cleanup(): void;
 }
 
-/** Each test gets its OWN `CRISOL_HOME` (spec, Testing Decisions) — never the real `~/.crisol`. */
+/** Each test gets its OWN `CRISOL_HOME` — never the real `~/.crisol`. */
 export function createTempHome(): TempHome {
   const home = mkdtempSync(path.join(tmpdir(), "crisol-home-"));
   return {

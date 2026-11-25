@@ -19,8 +19,7 @@ describe("non-macOS platform (ticket 01)", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain(UNSUPPORTED_PLATFORM_MESSAGE);
       expect(result.stdout).toBe("");
-      // The platform check runs before any side effect — nothing was ever
-      // created under CRISOL_HOME, not even the `runs/` directory.
+      // The platform check runs before any side effect — nothing was created under CRISOL_HOME.
       expect(readdirSync(home.path)).toHaveLength(0);
     } finally {
       home.cleanup();
@@ -36,9 +35,8 @@ describe("CRISOL_PLATFORM can only force a failure (theoretical)", () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     process.env.CRISOL_PLATFORM = "darwin";
     try {
-      // A "darwin" override is ignored: only a NON-darwin override is ever
-      // honoured (to simulate an unsupported host in tests), so the real,
-      // unsupported platform still decides.
+      // A "darwin" override is ignored — only a NON-darwin override is ever honoured,
+      // so the real, unsupported platform still decides.
       expect(currentPlatform()).toBe("linux");
     } finally {
       Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });

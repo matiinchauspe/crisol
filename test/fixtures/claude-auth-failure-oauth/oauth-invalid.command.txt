@@ -1,0 +1,1 @@
+env -u ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-invalid-for-capture claude -p hi --output-format json  # an INVALID token, not an expired one

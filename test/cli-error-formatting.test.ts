@@ -2,14 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { formatError } from "../src/cli";
 
 /**
- * finding 7 (round-2 review): the CLI dropped BOTH causes of an
- * `AggregateError` — printing only its own outer message ("Run failed and
- * Fetch-back also failed") with no indication of what either underlying
- * failure actually was. `formatError` is exported so this can be tested
- * directly; importing `cli.ts` is only safe because of the
- * `import.meta.main` guard around its top-level `main()`/`process.exit`
- * call (otherwise importing it would run the CLI with this test runner's
- * own argv and exit the whole test process).
+ * The CLI used to drop BOTH causes of an `AggregateError`, printing only its own outer
+ * message. Importing `cli.ts` here is safe only because of the `import.meta.main` guard
+ * around its top-level `main()` call.
  */
 describe("formatError prints every AggregateError cause (finding 7)", () => {
   test("an AggregateError's message AND both underlying causes are included", () => {

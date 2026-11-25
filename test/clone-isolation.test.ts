@@ -5,19 +5,10 @@ import { run } from "../src/run";
 import { FakeAdapter } from "../src/adapters/fake";
 
 /**
- * C1 (CRITICAL, decided by Matías): the Clone must not share object inodes
- * with the host. Originally fixed with `git clone --local --no-hardlinks`
- * (that flag forced a real copy instead of a hardlink); superseded by
- * `--no-local file://` (see docs/adr/0004's second amendment, finding 9),
- * which removes the filesystem fast-path entirely — the Clone's objects
- * always arrive via git's normal pack-transfer negotiation, never sharing
- * an inode with the host's regardless of `--no-hardlinks`. This test still
- * proves the underlying property: an object a Sandbox corrupts in the
- * Clone must never corrupt the host. Since `--no-local` delivers objects
- * packed (even a one-commit repo clones into a single `.pack`, never loose
- * files), the script first forces the target object OUT of its pack and
- * into a loose file — the only form a single `chmod`+overwrite can
- * meaningfully corrupt — before corrupting it.
+ * Proves the Clone's objects never share an inode with the host's, regardless of how
+ * they got there: an object a Sandbox corrupts in the Clone must never corrupt the host.
+ * Since `--no-local` delivers objects packed, a single `chmod`+overwrite can't meaningfully
+ * corrupt one — the script first forces the target object out of its pack into a loose file.
  */
 describe("Clone object-store isolation from the host (C1)", () => {
   test("overwriting an object file inside the Sandbox's Clone never corrupts the host repo", async () => {
@@ -32,11 +23,8 @@ describe("Clone object-store isolation from the host (C1)", () => {
       expect(blobSha).toHaveLength(40);
       const objectRelPath = `.git/objects/${blobSha.slice(0, 2)}/${blobSha.slice(2)}`;
 
-      // A fake-Adapter script run INSIDE the Sandbox that first forces the
-      // README blob out of the Clone's pack (unpack-objects skips writing a
-      // loose copy of an object it can already satisfy from a pack, so the
-      // pack has to be moved out of `objects/pack/` before re-feeding it)
-      // and into a loose file, then overwrites that file directly.
+      // `unpack-objects` skips writing a loose copy of an object it can already satisfy
+      // from a pack, so the pack is moved out of `objects/pack/` first, then re-fed.
       const corruptingScript = [
         "mkdir -p /tmp/pack-backup && cp .git/objects/pack/*.pack /tmp/pack-backup/",
         "rm .git/objects/pack/*.pack .git/objects/pack/*.idx",

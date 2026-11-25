@@ -1,3 +1,9 @@
+> **Superseded 2026-11-14 by
+> [docs/adr/0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md](./0012-network-wall-is-tinyproxy-on-an-internal-network-with-the-allowlist-bind-mounted.md).**
+> Ticket 06 built the wall this ADR named as still missing; `network` now reports `"allowlist"` by
+> default. Left below exactly as written, since it is a record of ticket 01's own decision, not of
+> the wall's design.
+
 # Run result reports `network: "open"` until the Allowlist wall exists
 
 Ticket 01 builds no network wall at all — the Sandbox runs on Docker's ordinary default network,

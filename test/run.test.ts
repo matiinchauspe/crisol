@@ -11,13 +11,10 @@ function gitLog(repoPath: string, ref: string): string {
 }
 
 /**
- * The sha the branch was actually CUT from (round-4 review, finding B4):
- * the FakeAdapter's `DEFAULT_SCRIPT` makes exactly one commit on top of
- * whatever `checkoutNewBranch` started the branch at, so `<branch>~1` is
- * that starting point — the branch's PARENT, not its tip. Used to lock
- * that `checkoutNewBranch` is actually called with `baseSha`, not just that
- * the reported `base` string says so (dropping `baseSha` there still
- * passed every test that only checked the string before this fix).
+ * The sha the branch was actually CUT from: the FakeAdapter's `DEFAULT_SCRIPT` makes
+ * exactly one commit on top of the branch's starting point, so `<branch>~1` is that
+ * point — the branch's PARENT, not its tip. Proves `checkoutNewBranch` was actually
+ * called with `baseSha`, not just that the reported `base` string says so.
  */
 function branchParentSha(repoPath: string, branch: string): string {
   const proc = Bun.spawnSync(["git", "-C", repoPath, "log", "--format=%h", "-1", `${branch}~1`], {
@@ -33,7 +30,7 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
-        const result = await runCli(["run", "say hello", "--json"], {
+        const result = await runCli(["run", "say hello", "--json", "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         });
@@ -42,26 +39,22 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
         expect(result.exitCode).toBe(0);
         const payload = JSON.parse(result.stdout);
 
-        // The Run result matches the spec's JSON shape.
         expect(payload).toMatchObject({
           status: "unverified",
           iterations: 1,
           gates: [],
-          network: "open",
+          network: "allowlist",
           blocked: [],
           warnings: [],
         });
         expect(typeof payload.run).toBe("string");
-        // W2: lengthened from the spec's own "a1b2" EXAMPLE to 8 hex chars.
         expect(payload.run).toMatch(/^[0-9a-f]{8}$/);
         expect(payload.branch).toBe(`crisol/${payload.run}`);
         expect(payload.base).toMatch(/^main@[0-9a-f]+$/);
 
-        // The branch landed in the HOST repo with the fake Adapter's commit.
         const logText = gitLog(repo.path, payload.branch);
         expect(logText).toContain("feat: record the walking-skeleton run");
 
-        // `~/.crisol/runs/<id>/` holds `repo/`, `log` and `result.json`.
         const runRoot = path.join(home.path, "runs", payload.run);
         expect(existsSync(path.join(runRoot, "repo"))).toBe(true);
         expect(existsSync(path.join(runRoot, "log"))).toBe(true);
@@ -80,10 +73,8 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
         const gitEntries = readdirSync(path.join(clonePath, ".git"));
         expect(gitEntries.length).toBeGreaterThan(0);
 
-        // No host path besides the Clone was ever mounted into the Sandbox —
-        // proved through the log, the one place `docker run`'s actual `-v`
-        // argument gets recorded (spec, Testing Decisions: "observable from
-        // what it leaves ... in ~/.crisol/").
+        // No host path besides the Clone was ever mounted — proved through the log, the
+        // one place `docker run`'s actual mount argument gets recorded.
         const log = readFileSync(path.join(runRoot, "log"), "utf8");
         const mountLines = log.split("\n").filter((line) => line.includes("mounts="));
         expect(mountLines).toHaveLength(1);
@@ -116,7 +107,7 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
           .trim();
 
         const result = await runCli(
-          ["run", "say hello", "--json", "--base", firstSha, "--name", "crisol/custom"],
+          ["run", "say hello", "--json", "--base", firstSha, "--name", "crisol/custom", "--adapter", "fake"],
           { cwd: repo.path, home: home.path },
         );
 
@@ -128,11 +119,8 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
         const logText = gitLog(repo.path, "crisol/custom");
         expect(logText).toContain("feat: record the walking-skeleton run");
 
-        // Round-4 review, finding B4: the branch must actually be CUT from
-        // firstSha, not merely report it. firstSha is HEAD~1 on the host —
-        // if `checkoutNewBranch` ignored `baseSha`, the Clone's default
-        // checkout would start from the host's then-current HEAD (the
-        // SECOND commit) instead, and this would diverge from firstSha.
+        // If `checkoutNewBranch` ignored `baseSha`, the Clone would start from the host's
+        // current HEAD (the SECOND commit) instead, diverging from firstSha.
         expect(branchParentSha(repo.path, "crisol/custom")).toBe(firstSha);
       } finally {
         home.cleanup();
@@ -148,7 +136,7 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
       try {
-        const result = await runCli(["run", "say hello"], { cwd: repo.path, home: home.path });
+        const result = await runCli(["run", "say hello", "--adapter", "fake"], { cwd: repo.path, home: home.path });
 
         expect(result.exitCode).toBe(0);
         expect(result.stdout).toMatch(
@@ -165,15 +153,11 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
 });
 
 /**
- * Round-4 review, finding B4 (real test gap): changing `checkoutNewBranch`
- * (`src/git.ts`) to ignore `baseSha` still passed all 66 tests before this
- * fix — the test above only re-checks the REPORTED `base` string, which is
- * computed independently from `resolveBaseSha`/`baseRef` and never actually
- * observes what `checkoutNewBranch` was called with; `test/base-ref.test.ts`
- * only exercises a tag that already sits on HEAD, where "cut from the tag"
- * and "cut from the Clone's default checkout" are indistinguishable. Both
- * tests below pick a `--base` that is NOT HEAD, so a dropped `baseSha`
- * provably diverges: `checkoutNewBranch`'s own branch point.
+ * The above tests only re-check the REPORTED `base` string, never observing what
+ * `checkoutNewBranch` was actually called with — and `base-ref.test.ts` only exercises a
+ * tag already on HEAD, where "cut from the tag" and "cut from the default checkout" are
+ * indistinguishable. Both tests below pick a `--base` that is NOT HEAD, so a dropped
+ * `baseSha` provably diverges.
  */
 describe("the branch is actually CUT from --base, not merely reported (round-4 finding B4)", () => {
   test(
@@ -193,7 +177,7 @@ describe("the branch is actually CUT from --base, not merely reported (round-4 f
           .stdout.toString("utf8")
           .trim();
 
-        const result = await runCli(["run", "say hello", "--json", "--base", "HEAD~1"], {
+        const result = await runCli(["run", "say hello", "--json", "--base", "HEAD~1", "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         });
@@ -227,7 +211,7 @@ describe("the branch is actually CUT from --base, not merely reported (round-4 f
           { cwd: repo.path },
         );
 
-        const result = await runCli(["run", "say hello", "--json", "--base", "v-old"], {
+        const result = await runCli(["run", "say hello", "--json", "--base", "v-old", "--adapter", "fake"], {
           cwd: repo.path,
           home: home.path,
         });

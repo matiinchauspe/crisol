@@ -1,160 +1,257 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import type { Adapter, AdapterContext } from "../src/adapter";
-import { run } from "../src/run";
-import { runLogPath } from "../src/paths";
 import { createTempHome } from "./support/crisolHome";
-import { createFixtureRepo } from "./support/fixtureRepo";
+import { HANGING_INSTALL, commitFiles, createFixtureRepo } from "./support/fixtureRepo";
+import { startCli, waitFor } from "./support/liveCli";
+import {
+  cloneSha,
+  commitSubjects,
+  readLog,
+  readResult,
+  refSha,
+  removeRunContainers,
+  runContainers,
+  runIds,
+} from "./support/runState";
+import { wrapTools } from "./support/wrappedTools";
 
-async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
-  const start = Date.now();
-  while (!predicate()) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error("timed out waiting for condition");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+const FAKE_COMMIT = "feat: record the walking-skeleton run";
+
+/** Real signals to a real `crisol` process: a `process.emit` in the test runner proves nothing about the OS. */
+type Delivery = { signal: NodeJS.Signals; toGroup: boolean; like: string };
+
+const DELIVERIES: Delivery[] = [
+  { signal: "SIGINT", toGroup: true, like: "Ctrl+C in a terminal" },
+  { signal: "SIGTERM", toGroup: false, like: "`kill <pid>`" },
+  { signal: "SIGHUP", toGroup: true, like: "closing the terminal" },
+];
+
+function deliver(pid: number, delivery: Delivery): void {
+  process.kill(delivery.toGroup ? -pid : pid, delivery.signal);
 }
 
-/**
- * finding 6 (round-2 review): Ctrl+C left the container AND the agent
- * running — the spec's own testing decisions name SIGINT explicitly
- * ("branch present in the host repo after every exit path, INCLUDING
- * SIGINT"). `process.emit("SIGINT", ...)` fires the exact listeners
- * `run()` installs (Node/Bun's `process` is a plain EventEmitter for
- * signals), without needing a real OS-level signal or a subprocess — a
- * deterministic way to test the handler itself.
- */
-describe("Ctrl+C tears the Sandbox down and still runs Fetch-back (finding 6)", () => {
-  test("SIGINT during the Adapter's work stops the container and still leaves the branch in the host repo", async () => {
+function mainSha(repoPath: string): string {
+  return refSha(repoPath, "main")!;
+}
+
+describe("a signal during the Adapter phase", () => {
+  for (const delivery of DELIVERIES) {
+    test(`${delivery.signal} (${delivery.like}) tears the Sandbox down and leaves the branch in the host with the commits made so far`, async () => {
+      const home = createTempHome();
+      const repo = createFixtureRepo();
+      let id: string | undefined;
+      try {
+        const cli = startCli(["run", "x", "--gate", "sleep 60", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+        await waitFor(() => runIds(home.path).length === 1);
+        id = runIds(home.path)[0]!;
+        await waitFor(() => readLog(id!, home.path).includes("adapter reported completion"));
+
+        deliver(cli.proc.pid, delivery);
+        const done = await cli.finished();
+
+        expect(done.exitCode).not.toBe(0);
+        const branch = `crisol/${id}`;
+        expect(refSha(repo.path, branch)).toBe(cloneSha(id, home.path, branch)!);
+        expect(commitSubjects(repo.path, branch)).toContain(FAKE_COMMIT);
+        expect(runContainers(id)).toEqual([]);
+        expect(readLog(id, home.path)).toContain(`received ${delivery.signal}`);
+        expect(readResult(id, home.path)).toMatchObject({
+          status: "not-converged",
+          reason: `interrupted: ${delivery.signal}`,
+          fetchBack: true,
+        });
+      } finally {
+        if (id) removeRunContainers(id);
+        home.cleanup();
+        repo.cleanup();
+      }
+    }, 60_000);
+  }
+});
+
+describe("a signal before the Sandbox is up", () => {
+  test("SIGTERM while `docker run` is still creating the Sandbox removes it and leaves the branch at its base", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
+    const tools = wrapTools([{ tool: "docker", subcommand: "run", mode: { kind: "stall", seconds: 3 } }]);
+    let id: string | undefined;
     try {
-      let launchStarted = false;
-      let containerId = "";
-      const slowAdapter: Adapter = {
-        declarePreStart() {
-          return { envNames: [], mounts: [] };
-        },
-        async launch(ctx: AdapterContext) {
-          launchStarted = true;
-          containerId = ctx.sandbox.containerId;
-          // A long sleep INSIDE the Sandbox — long enough that the signal
-          // always arrives well before this would ever resolve on its own.
-          await ctx.sandbox.exec(["sleep", "30"]);
-        },
-        async reportCompletion() {
-          return true;
-        },
-        async resumeWithFeedback() {},
-      };
-
-      const runPromise = run({ task: "x", cwd: repo.path, home: home.path, adapter: slowAdapter });
-
-      await waitFor(() => launchStarted);
-      // A microtask tick so the signal handlers (registered synchronously
-      // right before `adapter.launch` is awaited) are in place.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      process.emit("SIGINT", "SIGINT");
-
-      await expect(runPromise).rejects.toThrow(/Interrupted by SIGINT/i);
-
-      // The container must actually be gone, not just "stopped".
-      expect(containerId).not.toBe("");
-      const inspect = Bun.spawnSync(["docker", "inspect", containerId], {
-        stdout: "pipe",
-        stderr: "pipe",
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], {
+        cwd: repo.path,
+        home: home.path,
+        env: { PATH: `${tools.binDir}:${process.env.PATH}` },
       });
-      expect(inspect.exitCode).not.toBe(0);
+      await waitFor(() => tools.hits("docker", "run").length === 1);
+      id = runIds(home.path)[0]!;
 
-      // Fetch-back still ran: find the run id from the log directory and
-      // confirm the branch landed in the host repo despite the interrupt.
-      const runs = Bun.spawnSync(["ls", `${home.path}/runs`], { stdout: "pipe" })
-        .stdout.toString("utf8")
-        .trim()
-        .split("\n")
-        .filter(Boolean);
-      expect(runs).toHaveLength(1);
-      const runId = runs[0]!;
-      const log = readFileSync(runLogPath(runId, home.path), "utf8");
-      expect(log).toContain("received SIGINT; tearing the Sandbox down");
-      expect(log).toContain("fetch-back complete");
+      process.kill(cli.proc.pid, "SIGTERM");
+      const done = await cli.finished();
 
-      const branchCheck = Bun.spawnSync(
-        ["git", "-C", repo.path, "show-ref", "--verify", "--quiet", `refs/heads/crisol/${runId}`],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      expect(branchCheck.exitCode).toBe(0);
+      expect(done.exitCode).not.toBe(0);
+      expect(refSha(repo.path, `crisol/${id}`)).toBe(mainSha(repo.path));
+      expect(runContainers(id)).toEqual([]);
+      expect(readLog(id, home.path)).toContain("received SIGTERM");
+      expect(readResult(id, home.path)).toMatchObject({ reason: "interrupted: SIGTERM", fetchBack: true });
     } finally {
+      if (id) removeRunContainers(id);
+      tools.cleanup();
       home.cleanup();
       repo.cleanup();
     }
-  }, 30_000);
+  }, 60_000);
 
-  /**
-   * Round-3 review, finding 2 (CRITICAL): the OLD code `process.off`'d the
-   * SIGINT/SIGTERM handlers right after the Adapter's own race settled —
-   * well before `sandbox.stop()` (teardown) or Fetch-back ever ran. A
-   * SECOND Ctrl+C landing in that window hit NO listener at all: under the
-   * OLD code, `process.emit` on an event with zero listeners is a pure
-   * no-op (never logged, no effect) — the exact "no teardown, no
-   * Fetch-back" risk this fix closes for any signal arriving there. The
-   * handlers must now cover the WHOLE window through teardown AND
-   * Fetch-back, removed only once, at the very end.
-   *
-   * The first SIGINT (during the Adapter's slow `launch`) is identical to
-   * the test above; a short delay after it reliably lands the SECOND
-   * SIGINT inside the teardown+Fetch-back window — `process.off` (old
-   * code) already ran by then (same-tick synchronous code), while
-   * `docker rm -f` plus Fetch-back's own git calls still take measurably
-   * longer than that delay.
-   */
-  test("a SECOND SIGINT during teardown/Fetch-back is still logged, not silently lost", async () => {
+  test("Ctrl+C while the Clone is being made never starts a Sandbox and still leaves the branch at its base", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
+    const tools = wrapTools([{ tool: "git", subcommand: "clone", mode: { kind: "stall", seconds: 3 } }]);
+    let id: string | undefined;
     try {
-      let launchStarted = false;
-      const slowAdapter: Adapter = {
-        declarePreStart() {
-          return { envNames: [], mounts: [] };
-        },
-        async launch(ctx: AdapterContext) {
-          launchStarted = true;
-          await ctx.sandbox.exec(["sleep", "30"]);
-        },
-        async reportCompletion() {
-          return true;
-        },
-        async resumeWithFeedback() {},
-      };
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], {
+        cwd: repo.path,
+        home: home.path,
+        env: { PATH: `${tools.binDir}:${process.env.PATH}` },
+      });
+      await waitFor(() => tools.hits("git", "clone").length === 1);
+      id = runIds(home.path)[0]!;
 
-      const runPromise = run({ task: "x", cwd: repo.path, home: home.path, adapter: slowAdapter });
+      process.kill(-cli.proc.pid, "SIGINT");
+      const done = await cli.finished();
 
-      await waitFor(() => launchStarted);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      process.emit("SIGINT", "SIGINT"); // first: interrupts the Adapter's work
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      process.emit("SIGINT", "SIGINT"); // second: lands during teardown/Fetch-back
-
-      await expect(runPromise).rejects.toThrow(/Interrupted by SIGINT/i);
-
-      const runs = Bun.spawnSync(["ls", `${home.path}/runs`], { stdout: "pipe" })
-        .stdout.toString("utf8")
-        .trim()
-        .split("\n")
-        .filter(Boolean);
-      expect(runs).toHaveLength(1);
-      const log = readFileSync(runLogPath(runs[0]!, home.path), "utf8");
-      const receivedCount = log.split("\n").filter((line) => line.includes("received SIGINT")).length;
-      // Both signals must be logged — the second one only if the handler
-      // was still attached when it arrived.
-      expect(receivedCount).toBeGreaterThanOrEqual(2);
-      expect(log).toContain("fetch-back complete");
+      expect(done.exitCode).not.toBe(0);
+      expect(refSha(repo.path, `crisol/${id}`)).toBe(mainSha(repo.path));
+      expect(runContainers(id)).toEqual([]);
+      const log = readLog(id, home.path);
+      expect(log).toContain("received SIGINT");
+      expect(log).not.toContain(" started from ");
+      expect(readResult(id, home.path)).toMatchObject({ reason: "interrupted: SIGINT", fetchBack: true });
     } finally {
+      if (id) removeRunContainers(id);
+      tools.cleanup();
       home.cleanup();
       repo.cleanup();
     }
-  }, 30_000);
+  }, 60_000);
+});
+
+describe("Ctrl+C again while the Run is already stopping", () => {
+  test("a second Ctrl+C during teardown and a third during Fetch-back kill neither, and both are logged", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    const tools = wrapTools([
+      { tool: "docker", subcommand: "rm", mode: { kind: "stall", seconds: 2 } },
+      { tool: "git", subcommand: "fetch", mode: { kind: "stall", seconds: 2 } },
+    ]);
+    let id: string | undefined;
+    try {
+      const cli = startCli(["run", "x", "--gate", "sleep 60", "--json", "--adapter", "fake"], {
+        cwd: repo.path,
+        home: home.path,
+        env: { PATH: `${tools.binDir}:${process.env.PATH}` },
+      });
+      await waitFor(() => runIds(home.path).length === 1);
+      id = runIds(home.path)[0]!;
+      await waitFor(() => readLog(id!, home.path).includes("adapter reported completion"));
+
+      process.kill(-cli.proc.pid, "SIGINT");
+      await waitFor(() => tools.hits("docker", "rm").length === 1);
+      process.kill(-cli.proc.pid, "SIGINT");
+      await waitFor(() => tools.hits("git", "fetch").length === 1);
+      process.kill(-cli.proc.pid, "SIGINT");
+      const done = await cli.finished();
+
+      expect(done.exitCode).not.toBe(0);
+      const branch = `crisol/${id}`;
+      expect(refSha(repo.path, branch)).toBe(cloneSha(id, home.path, branch)!);
+      expect(runContainers(id)).toEqual([]);
+      const log = readLog(id, home.path);
+      expect(log.split("\n").filter((line) => line.includes("received SIGINT"))).toHaveLength(3);
+      // Three legitimate removals, never a retry: the Sandbox's own `docker rm -f`, the
+      // Allowlist proxy's own `docker rm -f`, and `docker network rm` for the wall's network —
+      // the wrapper matches "rm" as a bare argv word, so `network rm` counts here too. A retry
+      // would add a FOURTH hit, which this still catches.
+      expect(tools.hits("docker", "rm")).toHaveLength(3);
+      expect(tools.hits("git", "fetch")).toHaveLength(1);
+      expect(log).not.toContain("FAILED to stop");
+    } finally {
+      if (id) removeRunContainers(id);
+      tools.cleanup();
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+});
+
+/**
+ * `start_period` keeps a failing healthcheck at `starting` rather than `unhealthy` — checked live:
+ * `--health-cmd false --health-start-period 1h` still reads `starting` after five 1s intervals —
+ * so the health wait would sit out its whole 10-minute backstop.
+ */
+const NEVER_HEALTHY_SERVICE = [
+  "services:",
+  "  db:",
+  "    image: postgres:16-alpine",
+  '    command: ["sleep", "3600"]',
+  "    healthcheck:",
+  '      test: ["CMD-SHELL", "false"]',
+  "      interval: 1s",
+  "      start_period: 1h",
+  "",
+].join("\n");
+
+describe("a signal before the agent's first turn", () => {
+  test("Ctrl+C during the health wait removes the Services at once and leaves the branch at its base", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    commitFiles(repo.path, { ".crisol/services.yml": NEVER_HEALTHY_SERVICE }, "chore: declare a never-healthy service");
+    let id: string | undefined;
+    try {
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      await waitFor(() => runIds(home.path).length === 1);
+      id = runIds(home.path)[0]!;
+      await waitFor(() => readLog(id!, home.path).includes("services up on"));
+
+      process.kill(-cli.proc.pid, "SIGINT");
+      const done = await cli.finished();
+
+      expect(done.exitCode).not.toBe(0);
+      expect(refSha(repo.path, `crisol/${id}`)).toBe(mainSha(repo.path));
+      expect(runContainers(id)).toEqual([]);
+      const log = readLog(id, home.path);
+      expect(log).toContain("received SIGINT");
+      expect(log).not.toContain("services healthy");
+      expect(log).not.toContain(" started from ");
+      expect(readResult(id, home.path)).toMatchObject({ reason: "interrupted: SIGINT", iterations: 0, fetchBack: true });
+    } finally {
+      if (id) removeRunContainers(id);
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+
+  test("SIGTERM during a dependency install that never returns removes the Sandbox and leaves the branch at its base", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    commitFiles(repo.path, HANGING_INSTALL, "chore: add a package whose install hangs");
+    let id: string | undefined;
+    try {
+      const cli = startCli(["run", "x", "--json", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      await waitFor(() => runIds(home.path).length === 1);
+      id = runIds(home.path)[0]!;
+      await waitFor(() => readLog(id!, home.path).includes("installing dependencies with bun"));
+
+      process.kill(cli.proc.pid, "SIGTERM");
+      const done = await cli.finished();
+
+      expect(done.exitCode).not.toBe(0);
+      expect(refSha(repo.path, `crisol/${id}`)).toBe(mainSha(repo.path));
+      expect(runContainers(id)).toEqual([]);
+      const log = readLog(id, home.path);
+      expect(log).toContain("received SIGTERM");
+      expect(log).not.toContain("dependencies installed");
+      expect(readResult(id, home.path)).toMatchObject({ reason: "interrupted: SIGTERM", iterations: 0, fetchBack: true });
+    } finally {
+      if (id) removeRunContainers(id);
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
 });
