@@ -2,11 +2,11 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, 
 import { ProviderFailureError } from "./adapter";
 import type { Adapter, AdapterContext, PreStartDeclaration } from "./adapter";
 import { FakeAdapter } from "./adapters/fake";
-import { allowlistByLevel, readRepoLevelAtCommit, repoLevelChangeWarning } from "./allowlist";
+import { allowlistByLevel, readRepoLevelAtCommit } from "./allowlist";
 import type { AllowlistEntry } from "./allowlist";
 import { readGlobalConfig, readInstructions, readRepoGates, readRepoSecretNames } from "./config";
 import type { GlobalConfig } from "./config";
-import { DECLARATION_EFFECTS, declarationChangeWarning } from "./declaration-warning";
+import { crisolChangeWarnings } from "./declaration-warning";
 import { PACKAGE_CACHE_MOUNT, PACKAGE_CACHE_VOLUME, detectPackageManager, installDependencies } from "./dependencies";
 import type { PackageManager } from "./dependencies";
 import {
@@ -27,7 +27,6 @@ import { readProjectDockerfile, resolveProjectLayer } from "./project-layer";
 import { readRepoServices, startServices } from "./services";
 import type { ServiceRuntime, ServiceSpec } from "./services";
 import {
-  addedLines,
   branchExists,
   branchSha,
   checkedOutWorktree,
@@ -48,7 +47,6 @@ import {
 } from "./git";
 import type { GitIdentity } from "./git";
 import {
-  REPO_ALLOWLIST_FILE,
   crisolHome,
   runDir,
   runGatesPath,
@@ -1391,11 +1389,6 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
       try {
         const range = `${scanFrom}..${fetchCloneObjects(hostRepoPath, clonePath, branch)}`;
         warnings.push(...scanCommitsForWarnings(hostRepoPath, range, identity));
-        const repoLevelChange = addedLines(hostRepoPath, range, REPO_ALLOWLIST_FILE);
-        if (repoLevelChange !== undefined) warnings.push(repoLevelChangeWarning(repoLevelChange));
-        for (const { file, effect } of DECLARATION_EFFECTS) {
-          if (addedLines(hostRepoPath, range, file) !== undefined) warnings.push(declarationChangeWarning(file, effect));
-        }
       } catch (error) {
         appendLog(logPath, `commit scan failed: ${errorMessage(error)}`);
       }
@@ -1482,6 +1475,16 @@ export async function run(options: RunOptions, sharedInputs?: ResolvedInputs): P
     } catch (error) {
       fetchBackError = error;
       appendLog(logPath, `fetch-back failed: ${errorMessage(error)}`);
+    }
+    // Here and not beside the commit scan: an error, an interrupt or a provider failure skips that
+    // scan, yet Fetch-back still lands the branch on the host.
+    if (fetchedBack) {
+      try {
+        const tip = branchSha(hostRepoPath, branch);
+        if (tip !== undefined) warnings.push(...crisolChangeWarnings(hostRepoPath, baseSha, tip));
+      } catch (error) {
+        appendLog(logPath, `.crisol/ scan failed: ${errorMessage(error)}`);
+      }
     }
     await letSignalsLand();
 

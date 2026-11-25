@@ -392,6 +392,15 @@ export function scanCommitsForWarnings(
   return warnings;
 }
 
+/** Compares the range's endpoints, so a file added and deleted inside it is not removed. */
+export function fileRemoved(repoPath: string, range: string, file: string): boolean {
+  const result = run(["git", "-C", repoPath, "diff", "--no-color", "--no-renames", "--diff-filter=D", "--name-only", range, "--", file]);
+  if (result.exitCode !== 0) {
+    throw new Error(`\`git diff ${range} -- ${file}\` failed: ${result.stderr.trim()}`);
+  }
+  return result.stdout.trim() !== "";
+}
+
 /** `undefined` when the range leaves `file` untouched; otherwise the lines it adds, without the `+`. */
 export function addedLines(repoPath: string, range: string, file: string): string[] | undefined {
   const result = run(["git", "-C", repoPath, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0", range, "--", file]);

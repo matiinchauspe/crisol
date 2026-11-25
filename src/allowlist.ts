@@ -133,3 +133,11 @@ export function repoLevelChangeWarning(addedLines: readonly string[]): string {
   const what = hosts.length > 0 ? `adds ${hosts.map((host) => JSON.stringify(host)).join(", ")} to` : "changes";
   return `the branch ${what} ${REPO_ALLOWLIST_FILE}: a Run cut from this branch, or the repo once it is merged, reads it`;
 }
+
+/** A removal narrows the wall, but the repo level a Run cut from the branch reads is no longer the one the user reviewed. */
+export function repoLevelRemovalWarning(): string {
+  return (
+    `the branch removes ${REPO_ALLOWLIST_FILE}: a Run cut from this branch, or the repo once it is merged, ` +
+    "reads the repo without it, and then reaches only the built-in and user-level hosts"
+  );
+}

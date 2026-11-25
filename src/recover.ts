@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { listRunSandboxIds, removeRunSandboxes } from "./docker";
+import { crisolChangeWarnings } from "./declaration-warning";
 import { branchSha, cloneBranchSha, fetchBack } from "./git";
 import { removeNetworkByRunId } from "./network";
 import { runLockPath, runLogPath, runRepoPath, runResultPath, runsRoot } from "./paths";
@@ -110,13 +111,33 @@ function interruptedContinuation(result: RunResult): RunResult {
   };
 }
 
+/**
+ * The dead round never scanned, and a result it did write may predate commits made after it. A lock
+ * record from before it carried `base` has only the result to read it from.
+ */
+function crisolWarningsSinceBase(id: string, home: string, record: RunLockRecord, result: RunResult | undefined): string[] {
+  const base = record.base ?? result?.base;
+  if (base === undefined) return [];
+  try {
+    const tip = branchSha(record.host, record.branch);
+    if (tip === undefined) return [];
+    return crisolChangeWarnings(record.host, base.slice(base.lastIndexOf("@") + 1), tip);
+  } catch (error) {
+    appendLog(id, home, `.crisol/ scan failed: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+}
+
 function settleResult(id: string, home: string, record: RunLockRecord): void {
   const result = readStoredResult(id, home);
   let settled: RunResult | undefined;
   if (result === undefined) settled = interruptedFirstRound(id, record);
   else if (resultIsStale(id, home, result)) settled = interruptedContinuation(result);
   else if (!result.fetchBack) settled = { ...result, fetchBack: true };
-  if (settled !== undefined) writeFileSync(runResultPath(id, home), JSON.stringify(settled, null, 2));
+  if (settled !== undefined) {
+    settled.warnings = [...new Set([...settled.warnings, ...crisolWarningsSinceBase(id, home, record, result)])];
+    writeFileSync(runResultPath(id, home), JSON.stringify(settled, null, 2));
+  }
 }
 
 /**

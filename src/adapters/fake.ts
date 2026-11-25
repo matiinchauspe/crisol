@@ -87,7 +87,7 @@ export const REACH_UNLISTED_HOST_SCRIPT: readonly string[] = [
   "git commit --quiet -m 'test: reach a host off the Allowlist'",
 ];
 
-/** What an agent could commit to widen every later Run in the repo once its branch is merged. */
+/** What an agent could commit to widen a later Run: one cut from its branch with `--base`, or every Run once it is merged. */
 export const WIDEN_REPO_LEVEL_SCRIPT: readonly string[] = [
   "mkdir -p .crisol && echo 'evil.example.com # needed for tests' >> .crisol/network",
   "git add .crisol/network",
