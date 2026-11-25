@@ -67,29 +67,52 @@ jobs:
             dist/checksums.txt
           generate_release_notes: true
 
-      # The tagged commit predates its own checksums, so the formula is filled on main instead.
-      - name: Fill the formula on main
+  # The tagged commit predates its own checksums, and main takes changes only through a pull
+  # request, so the filled formula reaches main as a PR the owner merges. A job of its own, filled
+  # from the published checksums.txt, so re-running it never rebuilds or re-uploads a binary.
+  formula:
+    name: Open the formula pull request
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Open the pull request that fills the formula
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin main
-          git switch --detach FETCH_HEAD
-          bun scripts/formula.ts fill Formula/crisol.rb "${GITHUB_REF_NAME#v}" dist/checksums.txt
+          branch="release/formula-${GITHUB_REF_NAME}"
+          gh release download "$GITHUB_REF_NAME" --pattern checksums.txt --dir "$RUNNER_TEMP"
+          bun scripts/formula.ts fill Formula/crisol.rb "${GITHUB_REF_NAME#v}" "${RUNNER_TEMP}/checksums.txt"
+          bun scripts/formula.ts check Formula/crisol.rb
           if git diff --quiet -- Formula/crisol.rb; then
-            echo "Formula/crisol.rb on main already holds ${GITHUB_REF_NAME}'s values."
+            echo "Formula/crisol.rb on main already holds ${GITHUB_REF_NAME}'s values; no pull request needed." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore(release): fill the formula for ${GITHUB_REF_NAME}" -- Formula/crisol.rb
-          if ! git push origin HEAD:main; then
-            echo "The release is published, but pushing the filled formula to main failed, so main still holds the previous values." >&2
-            echo "On an up-to-date main, run: bun scripts/formula.ts fill Formula/crisol.rb ${GITHUB_REF_NAME#v} checksums.txt (checksums.txt from this release), then commit and push." >&2
-            exit 1
+          git push --force origin "HEAD:refs/heads/${branch}"
+          pr="$(gh pr list --head "$branch" --state open --json url,isCrossRepository \
+            --jq 'map(select(.isCrossRepository | not))[0].url // empty')"
+          if [ -z "$pr" ]; then
+            if ! pr="$(gh pr create --base main --head "$branch" \
+              --title "chore(release): fill the formula for ${GITHUB_REF_NAME}" \
+              --body "Fills \`Formula/crisol.rb\` with ${GITHUB_REF_NAME}'s version and the sha256 values from its \`checksums.txt\`. \`brew install\` picks up ${GITHUB_REF_NAME} only once this is merged.")"; then
+              echo "Opening the pull request failed; branch ${branch} holds the filled formula. If the repo setting \"Allow GitHub Actions to create and approve pull requests\" is off, turn it on and re-run this job." >&2
+              exit 1
+            fi
           fi
-
-      - name: Check the formula on main holds no placeholder
-        run: |
-          set -euo pipefail
-          git fetch --depth=1 origin main
-          git show FETCH_HEAD:Formula/crisol.rb > "${RUNNER_TEMP}/crisol.rb"
-          bun scripts/formula.ts check "${RUNNER_TEMP}/crisol.rb"
+          echo "Merge ${pr} so \`brew install\` picks up ${GITHUB_REF_NAME}." | tee -a "$GITHUB_STEP_SUMMARY"

@@ -61,3 +61,32 @@ Rosetta runs it.
   only fail until a human merged it, and nothing on this plan requires a review before `main`.
 - **Keeping the by-hand fill.** Every tagged release would ship a formula Homebrew rejects until
   someone remembers.
+
+## Amendment 2026-11-25: the filled formula reaches `main` through a pull request
+
+The repo is now public, so GitHub enforces `main`'s ruleset: a pull request with code-owner
+review, whose only bypass is the admin role in pull-request mode. The direct push this ADR chose
+was rejected (GH013) on v0.1.0 (run 45609381874) and v0.2.0 (run 45710902008): each release
+published, then failed with `main` still holding the previous values, until a PR filled the
+formula by hand (#4, #7).
+
+The workflow now opens that pull request itself, from a job of its own, `formula`, which runs after
+the release job. It fills `Formula/crisol.rb` on `main` from the `checksums.txt` the release
+published, not from a fresh build: re-running `formula` alone never recompiles or re-uploads a
+binary, so it cannot change a sha256 under a formula `main` already serves. Re-running the release
+job does both, since `softprops/action-gh-release` overwrites existing assets. Only `formula` holds
+`pull-requests: write`.
+
+It fails on any placeholder left (`scripts/formula.ts check`, on the filled file rather than on
+`main`, which still holds the previous release until the merge), force-pushes the commit to
+`release/formula-v<version>` and opens a PR from it, or reuses the same-repo PR already open from
+that branch. A PR from a fork is never reused, since the repo is public and anyone can name a branch
+that way. When `main` already holds the release's values, it opens none. The owner merges the PR,
+and `brew install` picks up the release from then on.
+
+`GITHUB_TOKEN` opens the PR, which needs the repo setting "Allow GitHub Actions to create and
+approve pull requests" turned on. The approval half of that setting does not weaken `main`: the bot
+is not a code owner, so its approval never satisfies the ruleset.
+
+Two premises above no longer hold: "private on a free plan, where GitHub enforces no branch
+protection", and the rejection's "nothing on this plan requires a review before `main`".

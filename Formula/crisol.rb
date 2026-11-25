@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-# This repo is its own tap. The release workflow writes version and both sha256 here on main
-# once the release publishes, so a tagged commit still carries the previous release's values.
+# This repo is its own tap. Once a release publishes, its workflow opens a pull request writing
+# version and both sha256 here, so a tagged commit still carries the previous release's values.
 class Crisol < Formula
   desc "Run one Task in a container, unattended, and get back exactly one branch"
   homepage "https://github.com/matiinchauspe/crisol"

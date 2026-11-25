@@ -51,6 +51,18 @@ function copyRepoFormula(): string {
   return target;
 }
 
+function placeholderFormula(): string {
+  const target = copyRepoFormula();
+  let text = readFileSync(target, "utf8");
+  for (const binary of Object.keys(BOTH)) {
+    const line = new RegExp(`(/${binary}"\\s*\\n\\s*sha256 ")[^"]*(")`);
+    expect(line.test(text)).toBe(true);
+    text = text.replace(line, `$1REPLACE_WITH_SHA256_OF_${binary}$2`);
+  }
+  writeFileSync(target, text);
+  return target;
+}
+
 function shaAfterUrl(formula: string, binary: string): string | undefined {
   const match = formula.match(new RegExp(`/${binary}"\\s*\\n\\s*sha256 "([^"]*)"`));
   return match?.[1];
@@ -104,7 +116,7 @@ describe("the release's formula script", () => {
   });
 
   test("check fails on a formula that still holds a placeholder, naming it", async () => {
-    const result = await run(["bun", SCRIPT, "check", REPO_FORMULA]);
+    const result = await run(["bun", SCRIPT, "check", placeholderFormula()]);
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("REPLACE_WITH_SHA256_OF_crisol-darwin-arm64");
