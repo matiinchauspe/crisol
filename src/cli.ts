@@ -14,7 +14,7 @@ import { collectRun, formatGb, formatSizeWarning, planGc, reconcileTrackedSize, 
 import type { GcSkip } from "./gc";
 import { initRepo, LEARN_TASK, REPO_CONFIG_FILE, SANDBOX_HEADING, writeLearnedHosts } from "./init";
 import type { InitReport } from "./init";
-import { crisolHome, REPO_ALLOWLIST_FILE, repoAllowlistPath, userAllowlistPath } from "./paths";
+import { crisolHome, REPO_ALLOWLIST_FILE, repoAllowlistPath, runRepoPath, userAllowlistPath } from "./paths";
 import { assertSupportedPlatform } from "./platform";
 import { detachRun, takeDetachedHandoff } from "./detach";
 import { recover } from "./recover";
@@ -22,8 +22,9 @@ import type { RecoverOutcome } from "./recover";
 import { run, runFanOut } from "./run";
 import { listRuns, readRunLog } from "./runs";
 import type { RunEntry } from "./runs";
-import { BUILT_IN_ALLOWLIST, isInternalHostname, isPlainHostname } from "./network";
-import type { Blocked, NetworkMode, RunFailure, RunOptions, RunResult } from "./run";
+import { BUILT_IN_ALLOWLIST } from "./network";
+import type { NetworkMode, RunFailure, RunOptions, RunResult } from "./run";
+import { colourIsOn, formatRunResult, outputColumns } from "./run-result-output";
 import { CLAUDE_TOKEN_SECRET_NAME } from "./secret-store";
 
 const USAGE =
@@ -230,38 +231,12 @@ function parseRunArgs(argv: string[]): ParsedRunArgs {
   };
 }
 
-/** The host comes from whatever the agent sent, so only a plain hostname is ever printed unquoted. */
-export function formatBlockedAdvice(blocked: readonly Blocked[], allowlist: readonly string[]): string {
-  return blocked
-    .map((entry) => {
-      const times = entry.count === 1 ? "1 attempt" : `${entry.count} attempts`;
-      const plain = isPlainHostname(entry.host);
-      const shown = plain ? entry.host : JSON.stringify(entry.host);
-      if (entry.port !== undefined) {
-        return (
-          `Blocked: ${shown}:${entry.port} (${times}). Only HTTPS on 443 and plain HTTP on 80 ` +
-          "leave the Sandbox, whatever the Allowlist names."
-        );
-      }
-      if (!plain) {
-        return `Blocked: ${shown} (${times}). The Allowlist names plain hostnames only, so there is nothing to allow.`;
-      }
-      if (isInternalHostname(entry.host)) {
-        return `Blocked: ${shown} (${times}). It names a host inside your machine or network, which the Allowlist never opens.`;
-      }
-      if (allowlist.includes(entry.host)) {
-        return (
-          `Blocked: ${shown} (${times}). It is already on the Allowlist; the request was refused ` +
-          "for its form, not its host."
-        );
-      }
-      return (
-        `Blocked: ${shown} (${times}). Allow it for every repo, or for this repo only, with:\n` +
-        `  crisol allow ${shown}\n` +
-        `  crisol allow ${shown} --repo`
-      );
-    })
-    .join("\n");
+/** Colour and width follow stdout, so a pipe or a file gets the plain form. */
+function printRunResult(result: RunResult, allowlist: readonly string[]): void {
+  const awaitsRecover = !result.fetchBack && existsSync(runRepoPath(result.run));
+  const colour = colourIsOn(process.stdout.isTTY, process.env);
+  const columns = outputColumns(process.stdout.columns);
+  console.log(formatRunResult(result, { colour, columns, allowlist, awaitsRecover }));
 }
 
 /** Lines to paste, never a question: the user copies only the hosts the repo really needs. */
@@ -579,7 +554,12 @@ async function runInitCommand(rest: string[]): Promise<number> {
   }
   if (result === undefined) return 1;
 
-  console.log(`Run ${result.run}: branch ${result.branch}, status ${result.status}.`);
+  let allowlist: readonly string[] = BUILT_IN_ALLOWLIST;
+  try {
+    allowlist = mergedAllowlist(crisolHome(), hostRepoPath);
+  } catch {}
+  printRunResult(result, allowlist);
+  console.log("");
   let added: string[];
   try {
     added = writeLearnedHosts(hostRepoPath, result);
@@ -687,7 +667,7 @@ async function main(argv: string[]): Promise<number> {
   const onSignal = (signal: NodeJS.Signals) => interrupt.abort(signal);
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, onSignal);
 
-  // A warning `onWarning` already printed is in the Run result too; printing it again would read as two.
+  // Keeps the post-run stderr pass, which catches warnings that never went through `onWarning`, from repeating one.
   const shownWarnings = new Set<string>();
   const options: Omit<RunOptions, "task"> = {
     ...runOptions,
@@ -736,6 +716,12 @@ async function main(argv: string[]): Promise<number> {
 
   let exitCode = 0;
   const learned = new Set<string>();
+  let blocksPrinted = 0;
+  // The block lists every warning, live ones too: a long Run buries what scrolled past.
+  const printBlock = (result: RunResult) => {
+    if (blocksPrinted++ > 0) console.log("");
+    printRunResult(result, allowlist);
+  };
   settled.forEach((outcome, index) => {
     if (outcome.status === "fulfilled") {
       const result = outcome.value;
@@ -743,9 +729,7 @@ async function main(argv: string[]): Promise<number> {
       if (args.json) {
         console.log(JSON.stringify(result));
       } else {
-        const summary = `Run ${result.run}: branch ${result.branch}, status ${result.status}.`;
-        const advice = formatBlockedAdvice(result.blocked, allowlist);
-        console.log(advice.length > 0 ? `${summary}\n${advice}` : summary);
+        printBlock(result);
         for (const warning of result.warnings) {
           if (!shownWarnings.has(warning)) process.stderr.write(`Warning: Run ${result.run}: ${warning}\n`);
         }
@@ -755,16 +739,18 @@ async function main(argv: string[]): Promise<number> {
       const prefix = args.tasks.length > 1 ? `Task ${JSON.stringify(args.tasks[index])}: ` : "";
       process.stderr.write(`${prefix}${formatError(outcome.reason)}\n`);
       // The Run still computed and wrote a result (a provider failure, an interruption, a red
-      // Gate that also lost Fetch-back…) — `--json` prints it even though the Run failed.
+      // Gate that also lost Fetch-back…) — it prints even though the Run failed.
       const failedResult = (outcome.reason as RunFailure | undefined)?.result;
-      if (args.json && failedResult !== undefined) console.log(JSON.stringify(failedResult));
+      if (failedResult === undefined) return;
+      if (args.json) console.log(JSON.stringify(failedResult));
+      else printBlock(failedResult);
     }
   });
   // --json is a machine's contract: one Run result per line, and `reached` is already in it.
   if (!args.json && learned.size > 0) {
     // Proposals measured against a level that would not parse would include hosts already on it,
     // and pasting them would fail on the same line.
-    if (baselineError === undefined) console.log(formatLearnedHosts([...learned]));
+    if (baselineError === undefined) console.log(`\n${formatLearnedHosts([...learned])}`);
     else process.stderr.write(`Cannot propose hosts for the repo level: ${formatError(baselineError)}\n`);
   }
   // Best-effort: a disk-usage check must never fail a Run that otherwise finished cleanly.

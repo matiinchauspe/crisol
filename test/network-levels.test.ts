@@ -451,6 +451,9 @@ describe("the repo level is made visible", () => {
       const warnings = cli.stderr.split("\n").filter((line) => line.startsWith("Warning: ") && line.includes('"evil.example.com"'));
       expect(warnings).toHaveLength(2);
       expect(cli.stdout).not.toContain("Warning:");
+      // Each Run's block lists the same warning, so the summary stands on its own.
+      const listed = cli.stdout.split("Warnings\n").slice(1).filter((section) => section.includes('"evil.example.com"'));
+      expect(listed).toHaveLength(2);
     } finally {
       home.cleanup();
       repo.cleanup();

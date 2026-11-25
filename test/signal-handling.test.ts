@@ -68,6 +68,32 @@ describe("a signal during the Adapter phase", () => {
   }
 });
 
+describe("an interrupted Run without --json", () => {
+  test("prints the error, then the Run result it still wrote", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    let id: string | undefined;
+    try {
+      const cli = startCli(["run", "x", "--gate", "sleep 60", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      await waitFor(() => runIds(home.path).length === 1);
+      id = runIds(home.path)[0]!;
+      await waitFor(() => readLog(id!, home.path).includes("adapter reported completion"));
+
+      process.kill(cli.proc.pid, "SIGTERM");
+      const done = await cli.finished();
+
+      expect(done.exitCode).not.toBe(0);
+      expect(done.stderr).toContain("SIGTERM");
+      expect(done.stdout).toStartWith(`Run ${id}  not-converged — interrupted: SIGTERM  ·  `);
+      expect(done.stdout).toContain(`  branch crisol/${id}   (base `);
+    } finally {
+      if (id) removeRunContainers(id);
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 60_000);
+});
+
 describe("a signal before the Sandbox is up", () => {
   test("SIGTERM while `docker run` is still creating the Sandbox removes it and leaves the branch at its base", async () => {
     const home = createTempHome();

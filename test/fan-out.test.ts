@@ -166,6 +166,22 @@ describe('crisol run "a" "b" "c" — independent Runs from one base', () => {
     }
   }, 180_000);
 
+  test("without --json, each Run gets its own block, one blank line between them", async () => {
+    const home = createTempHome();
+    const repo = createFixtureRepo();
+    try {
+      const cli = await runCli(["run", "a", "b", "--adapter", "fake"], { cwd: repo.path, home: home.path });
+      expect(cli.exitCode).toBe(0);
+      const blocks = cli.stdout.trimEnd().split(/\n\n(?=Run [0-9a-f]{8} )/);
+      expect(blocks).toHaveLength(2);
+      for (const block of blocks) expect(block).toMatch(/^Run [0-9a-f]{8}  unverified  ·  1 iteration\n  branch crisol\//);
+      expect(cli.stdout).not.toContain("\n\n\n");
+    } finally {
+      home.cleanup();
+      repo.cleanup();
+    }
+  }, 180_000);
+
   test("--name with more than one Task is a usage error, before anything runs", async () => {
     const home = createTempHome();
     const repo = createFixtureRepo();
