@@ -181,7 +181,7 @@ describe("crisol init", () => {
 
         const result = await runCli(["init", "--adapter", "fake"], { cwd: repo.path, home: home.path, stdin: "y\n" });
 
-        expect(result.stdout).toMatch(/Run \w+: branch crisol\/\w+, status verified\./);
+        expect(result.stdout).toMatch(/Run \w+  verified  ·  \d+ iterations?\n  branch crisol\/\w+   \(base \S+\)/);
         expect(result.stdout).toContain("Added example.com to the repo Allowlist (.crisol/network).");
         expect(result.stdout).toContain("takes effect once it is committed");
         expect(result.stderr).not.toContain("Uncommitted changes");

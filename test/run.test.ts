@@ -131,7 +131,7 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
   );
 
   test(
-    "run without --json prints a human-readable summary instead of raw JSON",
+    "run without --json prints the Run result for a person instead of raw JSON",
     async () => {
       const home = createTempHome();
       const repo = createFixtureRepo();
@@ -140,8 +140,10 @@ describe("crisol run (ticket 01: walking skeleton)", () => {
 
         expect(result.exitCode).toBe(0);
         expect(result.stdout).toMatch(
-          /^Run [0-9a-f]{8}: branch crisol\/[0-9a-f]{8}, status unverified\.\n$/,
+          /^Run [0-9a-f]{8}  unverified  ·  1 iteration\n  branch crisol\/[0-9a-f]{8}   \(base \S+\)\n/,
         );
+        // Piped, as here, the block carries no colour.
+        expect(result.stdout).not.toContain("\x1b[");
         expect(() => JSON.parse(result.stdout)).toThrow();
       } finally {
         home.cleanup();

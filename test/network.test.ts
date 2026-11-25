@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { formatBlockedAdvice } from "../src/cli";
 import { buildDockerRunArgs } from "../src/docker";
 import {
   BUILT_IN_ALLOWLIST,
@@ -19,6 +18,7 @@ import {
 } from "../src/adapters/fake";
 import { FakeAdapter } from "../src/adapters/fake";
 import { run } from "../src/run";
+import { describeBlocked } from "../src/run-result-output";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { runCli } from "./support/cli";
@@ -149,15 +149,15 @@ describe("parseReachedHosts reads what a learn proxy connected to, no Docker nee
   });
 });
 
-describe("formatBlockedAdvice", () => {
+describe("describeBlocked", () => {
   test("a refused port gets no `crisol allow` line — the Allowlist names hosts, never ports", () => {
-    const advice = formatBlockedAdvice([{ host: "github.com", port: 22, count: 1 }], BUILT_IN_ALLOWLIST);
+    const advice = describeBlocked({ host: "github.com", port: 22, count: 1 }, BUILT_IN_ALLOWLIST);
     expect(advice).toContain("github.com:22");
     expect(advice).not.toContain("crisol allow");
   });
 
   test("a plain hostname gets both allow lines, user level and repo level", () => {
-    const advice = formatBlockedAdvice([{ host: "api.stripe.com", count: 3 }], BUILT_IN_ALLOWLIST);
+    const advice = describeBlocked({ host: "api.stripe.com", count: 3 }, BUILT_IN_ALLOWLIST);
     expect(advice).toContain("  crisol allow api.stripe.com\n  crisol allow api.stripe.com --repo");
     expect(advice).not.toContain("not built yet");
   });
@@ -165,31 +165,31 @@ describe("formatBlockedAdvice", () => {
   test.each(["a$(id)b.com", "x`id`y.com", "a;id;b.com", "a b.com", "1.2.3.4", "[::1]", "localhost"])(
     "%p is reported quoted, with no command to paste",
     (host) => {
-      const advice = formatBlockedAdvice([{ host, count: 1 }], BUILT_IN_ALLOWLIST);
+      const advice = describeBlocked({ host, count: 1 }, BUILT_IN_ALLOWLIST);
       expect(advice).not.toContain("crisol allow");
       expect(advice).toContain(JSON.stringify(host));
     },
   );
 
   test("an internal name gets no allow line: the Allowlist never opens the machine or the LAN", () => {
-    const advice = formatBlockedAdvice([{ host: "host.docker.internal", count: 1 }], BUILT_IN_ALLOWLIST);
+    const advice = describeBlocked({ host: "host.docker.internal", count: 1 }, BUILT_IN_ALLOWLIST);
     expect(advice).toContain("host.docker.internal");
     expect(advice).not.toContain("crisol allow");
   });
 
   test("a metacharacter host refused on another port is quoted too", () => {
-    const advice = formatBlockedAdvice([{ host: "a$(id)b.com", port: 22, count: 1 }], BUILT_IN_ALLOWLIST);
+    const advice = describeBlocked({ host: "a$(id)b.com", port: 22, count: 1 }, BUILT_IN_ALLOWLIST);
     expect(advice).toContain('"a$(id)b.com":22');
   });
 
   test("a host on the user or repo level gets no allow line either", () => {
-    const advice = formatBlockedAdvice([{ host: "api.stripe.com", count: 1 }], [...BUILT_IN_ALLOWLIST, "api.stripe.com"]);
+    const advice = describeBlocked({ host: "api.stripe.com", count: 1 }, [...BUILT_IN_ALLOWLIST, "api.stripe.com"]);
     expect(advice).not.toContain("crisol allow");
     expect(advice).toContain("already on the Allowlist");
   });
 
   test("a host already on the Allowlist gets no allow line: its request was refused for its form", () => {
-    const advice = formatBlockedAdvice([{ host: "github.com", count: 2 }], BUILT_IN_ALLOWLIST);
+    const advice = describeBlocked({ host: "github.com", count: 2 }, BUILT_IN_ALLOWLIST);
     expect(advice).not.toContain("crisol allow");
     expect(advice).toContain("already on the Allowlist");
   });
@@ -315,7 +315,7 @@ describe("the Allowlist wall end to end, against a real Docker engine", () => {
         expect(result.blocked).toEqual([{ host: "example.com", count: 2 }]);
         expect(gitShow(repo.path, result.branch, "BLOCKED.txt")).toBe("attempted a blocked host twice");
 
-        const advice = formatBlockedAdvice(result.blocked, BUILT_IN_ALLOWLIST);
+        const advice = result.blocked.map((entry) => describeBlocked(entry, BUILT_IN_ALLOWLIST)).join("\n");
         expect(advice).toContain("example.com");
         expect(advice).toContain("crisol allow example.com");
         expect(advice).toContain("crisol allow example.com --repo");
@@ -361,9 +361,9 @@ describe("the Allowlist wall end to end, against a real Docker engine", () => {
         );
         expect(cli.exitCode).toBe(0);
         expect(cli.stdout).toContain(
-          "Blocked: example.com (1 attempt). Allow it for every repo, or for this repo only, with:\n" +
-            "  crisol allow example.com\n" +
-            "  crisol allow example.com --repo",
+          "Blocked\n  example.com (1 attempt). Allow it for every repo, or for this repo only, with:\n" +
+            "    crisol allow example.com\n" +
+            "    crisol allow example.com --repo",
         );
       } finally {
         home.cleanup();

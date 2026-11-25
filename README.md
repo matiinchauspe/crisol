@@ -159,7 +159,7 @@ crisol --version
 | `--timeout <minutes>` | `60` | Overrides the wall-clock ceiling for this Run, in minutes. Must be a positive integer. |
 | `--network <allowlist\|learn\|open>` | `allowlist` | `learn` lets the Run reach any host and records which; `open` drops the wall. See [Network](#network). |
 | `--adapter <fake\|claude-code>` | `claude-code`; on `--continue`, the Run's own recorded Adapter | Which Adapter runs the Task. `claude-code` runs Claude Code (`crisol auth` first — see [Credentials](#credentials)); `fake` is the suite's own scripted stand-in, which does no work. See [Continue a Run](#continue-a-run) for how a Continuation matches it. |
-| `--json` | off | Print the Run result as JSON instead of one line — one JSON line per Run when there are several Tasks. |
+| `--json` | off | Print the Run result as JSON instead of the block a person reads — one JSON line per Run when there are several Tasks. |
 | `--detach` | off | Return at once with the run id and let the Run finish in the background. One Task only, and not with `--json`. See [Detach, status and logs](#detach-status-and-logs). |
 
 A repo can declare its own Gates once, in `.crisol/config.toml`:
@@ -359,12 +359,13 @@ A host it doesn't name is refused, and every refusal is counted:
 "blocked": [{ "host": "api.stripe.com", "count": 3 }]
 ```
 
-The end-of-run report names each one and the line that would allow it:
+The end-of-run report names each one under `Blocked`, with the line that would allow it:
 
 ```
-Blocked: api.stripe.com (3 attempts). Allow it for every repo, or for this repo only, with:
-  crisol allow api.stripe.com
-  crisol allow api.stripe.com --repo
+Blocked
+  api.stripe.com (3 attempts). Allow it for every repo, or for this repo only, with:
+    crisol allow api.stripe.com
+    crisol allow api.stripe.com --repo
 ```
 
 Only a plain hostname gets those lines. An IP literal, or a host carrying anything but letters,
