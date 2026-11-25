@@ -11,10 +11,12 @@ jobs:
     name: fake Run on ubuntu-latest
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CRISOL_HOME: ${{ runner.temp }}/crisol-home
-      SCRATCH: ${{ runner.temp }}/scratch-repo
     steps:
+      - name: Paths under the runner's temp dir
+        run: |
+          echo "CRISOL_HOME=$RUNNER_TEMP/crisol-home" >> "$GITHUB_ENV"
+          echo "SCRATCH=$RUNNER_TEMP/scratch-repo" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
