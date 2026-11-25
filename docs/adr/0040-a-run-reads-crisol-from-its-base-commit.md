@@ -58,3 +58,24 @@ The post-Run commit scan now adds a warning for each of `.crisol/config.toml`,
 a Run cut from the branch, or the repo once it is merged, reads it. The `.crisol/network` warning
 says the same. Warning, not refusal: refusing a base whose `.crisol/` differs from the host's breaks
 the `--base` chaining this ADR enables.
+
+## Amendment 2026-11-24: the warning scans from the Run's base, on every path that fetches back
+
+The first amendment put the scan after `converge`, over the round's own commits. Two gaps let a
+branch land on the host with no warning. An error, an interrupt or a provider failure jumped past
+the scan, yet Fetch-back still landed the branch, and `crisol recover` fetched a dead Run's branch
+back without scanning. A Continuation scanned only its own round, and each round rewrites
+`result.json`, so a Dockerfile committed in round 1 was gone from the result after round 2.
+
+The `.crisol/` check (`.crisol/network` and the three declaration files) now diffs `<baseSha>..<branch
+tip>` once Fetch-back has succeeded, whatever the Run's status. `baseSha` is the Run's original one:
+a Continuation takes it from the owner's `result.base` (`<ref>@<sha>`), which every round writes
+unchanged, and `recover` takes it from the Run lock's `base`, else the stored result's. `recover`
+merges the warnings into the result it settles. The attribution and identity scan
+(`scanCommitsForWarnings`) keeps its round-scoped range.
+
+A watched file the branch deletes is worded as removed, with what removal means. The file reads as
+absent: a removed `config.toml` leaves the repo no Gates, so a Run cut from the branch ends
+`unverified` unless `--gate` is passed; a removed `Dockerfile` falls back to Crisol's default Project
+layer; a removed `services.yml` starts no Services; a removed `.crisol/network` leaves the repo level
+empty.
