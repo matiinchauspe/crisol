@@ -12,10 +12,10 @@ class Crisol < Formula
 
   if Hardware::CPU.arm?
     url "https://github.com/matiinchauspe/crisol/releases/download/v#{version}/crisol-darwin-arm64"
-    sha256 "REPLACE_WITH_SHA256_OF_crisol-darwin-arm64"
+    sha256 "c635ff75bcd34c65056b5a3dedfbb0a5d985c742529a54a1a85f55432a7439e3"
   else
     url "https://github.com/matiinchauspe/crisol/releases/download/v#{version}/crisol-darwin-x64"
-    sha256 "REPLACE_WITH_SHA256_OF_crisol-darwin-x64"
+    sha256 "70cf4f77dc88eefe558b25f2c9d48d2f83062658936dc6d5a079d94c79e258e6"
   end
 
   def install
