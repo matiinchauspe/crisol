@@ -53,6 +53,7 @@ jobs:
           test "$(jq -r .status "$RUNNER_TEMP/run1.json")" = "unverified"
 
       - name: Run 2 (fake, allowlist, Gate "true") expects verified
+        if: always()
         run: |
           set -uo pipefail
           cd "$SCRATCH"

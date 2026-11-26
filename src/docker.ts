@@ -251,6 +251,8 @@ export function buildDockerRunArgs(options: StartSandboxOptions): string[] {
     "--memory",
     memory,
     ...(network !== undefined ? ["--network", network] : []),
+    // SPIKE: native Linux Docker enforces numeric ownership, so run as the host user that owns the Clone.
+    ...(process.platform === "linux" ? ["--user", `${process.getuid!()}:${process.getgid!()}`] : []),
     "--name",
     `crisol-${id}`,
     "--label",
